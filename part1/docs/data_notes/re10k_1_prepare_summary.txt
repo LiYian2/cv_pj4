@@ -1,0 +1,5 @@
+SRC_ROOT: /home/bzhang512/CV_Project/dataset/Re10k-1
+DST_ROOT: /home/bzhang512/CV_Project/part1/part1_data/re10k_1
+Num images: 279
+Image size: 256 x 256
+Pixel intrinsics: fx=219.462071465, fy=219.515667968, cx=128.0, cy=128.0

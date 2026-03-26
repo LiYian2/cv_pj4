@@ -1,4 +1,6 @@
-# Python / build
+# =========================
+# Python / build artifacts
+# =========================
 __pycache__/
 *.py[cod]
 *.so
@@ -6,68 +8,50 @@ __pycache__/
 dist/
 *.egg-info/
 
-# Virtual envs / local tooling
+# =========================
+# Virtual environments / editor
+# =========================
 .venv/
 venv/
 env/
 .conda/
 *.swp
 .DS_Store
+.ipynb_checkpoints/
 
+# =========================
 # Logs / runtime outputs
+# =========================
 *.log
-output/
-outputs/
 runs/
 checkpoints/
 wandb/
 
-# Datasets / large assets
+# =========================
+# Large data and experiment outputs
+# =========================
 dataset/
-datasets/
-data/
-raw_data/
-processed_data/
+output/
+output_reference/
+plots/
+
+# =========================
+# External / cloned repositories
+# =========================
+third_party/
+
+# =========================
+# Archives / large bundled files
+# =========================
 *.zip
 *.tar.gz
+*.tar
+*.7z
 
-# Large cloned / vendored repositories
-thirdparty/
-external/
-vendor/
-submodules/
-LightGlue/
-gaussian-splatting/
-vggt/
-RegGS/
-
-# Local agent notes
+# =========================
+# Local notes / machine-specific files
+# =========================
 AGENT.md
-
-# Part 1 large data / recon outputs
-part1/colmap_test/
-part1/part1_data/re10k_1/images/
-part1/part1_data/re10k_1/logs_40k/
-part1/part1_data/re10k_1/planA_colmap/gs_scene/
-part1/part1_data/re10k_1/planA_colmap/output_3dgs_30k/
-part1/part1_data/re10k_1/planA_colmap/output_3dgs_3k/
-part1/part1_data/re10k_1/planA_colmap/output_3dgs_40k_2k/
-part1/part1_data/re10k_1/planA_colmap/output_3dgs_curve/
-part1/part1_data/re10k_1/planA_colmap/sparse/
-part1/part1_data/re10k_1/planA_colmap/undistorted/
-part1/part1_data/re10k_1/planA_colmap_96/gs_scene/
-part1/part1_data/re10k_1/planA_colmap_96/output_3dgs_40k_2k/
-part1/part1_data/re10k_1/planB_vggt/gs_scene/
-part1/part1_data/re10k_1/planB_vggt/inputs/re10k1_scene_128/images/
-part1/part1_data/re10k_1/planB_vggt/inputs/re10k1_scene_32/images/
-part1/part1_data/re10k_1/planB_vggt/inputs/re10k1_scene_64/images/
-part1/part1_data/re10k_1/planB_vggt/inputs/re10k1_scene_96/images/
-part1/part1_data/re10k_1/planB_vggt/output_3dgs_30k/
-part1/part1_data/re10k_1/planB_vggt/output_3dgs_40k_2k/
-part1/part1_data/re10k_1/planB_vggt/raw_vggt/
-part1/part1_data/re10k_1/planA_colmap/database.db
-
-# Part 2 linked images / outputs / bundled archive
-part2/data/re10k_1_sparse/images/
-part2/outputs/
-part2/RegGS.tar.gz
+check_nb_02_03.py
+patch_part1_notebooks.py
+patch_markdown_english.py
