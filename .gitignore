@@ -33,7 +33,7 @@ wandb/
 dataset/
 output/
 output_reference/
-plots/
+plots/part1/previous
 
 # =========================
 # External / cloned repositories
@@ -52,6 +52,4 @@ third_party/
 # Local notes / machine-specific files
 # =========================
 AGENT.md
-check_nb_02_03.py
-patch_part1_notebooks.py
-patch_markdown_english.py
+temporary_local_notes/

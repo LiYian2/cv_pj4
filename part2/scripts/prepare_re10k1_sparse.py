@@ -23,8 +23,6 @@ meta = {
     'selected_num_images': len(selected),
     'selected_filenames': [p.name for p in selected],
 }
-(dst / 'image_list.txt').write_text('
-'.join(p.name for p in selected) + '
-')
+(dst / 'image_list.txt').write_text('\n'.join(p.name for p in selected) + '\n')
 (dst / 'meta.json').write_text(json.dumps(meta, indent=2))
 print(json.dumps(meta, indent=2))
