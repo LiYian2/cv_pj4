@@ -1,0 +1,7 @@
+dataset_name,split,loader_type,n_total,n_split,target_root,config_path,check_pass
+Re10k-1,sparse,dl3dv,279,9,/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_re10k1_sparse.yaml,True
+Re10k-1,test,dl3dv,279,270,/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/test,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_re10k1_test.yaml,True
+DL3DV-2,sparse,dl3dv,306,10,/home/bzhang512/CV_Project/dataset/DL3DV-2/part2_s3po/sparse,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_dl3dv2_sparse.yaml,True
+DL3DV-2,test,dl3dv,306,296,/home/bzhang512/CV_Project/dataset/DL3DV-2/part2_s3po/test,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_dl3dv2_test.yaml,True
+405841,sparse,waymo,199,20,/home/bzhang512/CV_Project/dataset/405841/part2_s3po/sparse,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_sparse_waymo.yaml,True
+405841,test,waymo,199,179,/home/bzhang512/CV_Project/dataset/405841/part2_s3po/test,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_test_waymo.yaml,True

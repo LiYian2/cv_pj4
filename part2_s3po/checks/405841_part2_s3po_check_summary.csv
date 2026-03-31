@@ -1,0 +1,4 @@
+scene,n_images,n_cameras,width,height,overall_pass,config_path
+scene_A,25,25,960,640,True,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_scene_a.yaml
+scene_B,45,45,960,640,True,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_scene_b.yaml
+scene_C,129,129,960,640,True,/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_scene_c.yaml

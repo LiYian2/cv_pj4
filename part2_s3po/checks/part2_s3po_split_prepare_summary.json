@@ -1,0 +1,64 @@
+{
+  "rows": [
+    {
+      "dataset_name": "Re10k-1",
+      "split": "sparse",
+      "loader_type": "dl3dv",
+      "n_total": 279,
+      "n_split": 9,
+      "target_root": "/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse",
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_re10k1_sparse.yaml",
+      "check_pass": true
+    },
+    {
+      "dataset_name": "Re10k-1",
+      "split": "test",
+      "loader_type": "dl3dv",
+      "n_total": 279,
+      "n_split": 270,
+      "target_root": "/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/test",
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_re10k1_test.yaml",
+      "check_pass": true
+    },
+    {
+      "dataset_name": "DL3DV-2",
+      "split": "sparse",
+      "loader_type": "dl3dv",
+      "n_total": 306,
+      "n_split": 10,
+      "target_root": "/home/bzhang512/CV_Project/dataset/DL3DV-2/part2_s3po/sparse",
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_dl3dv2_sparse.yaml",
+      "check_pass": true
+    },
+    {
+      "dataset_name": "DL3DV-2",
+      "split": "test",
+      "loader_type": "dl3dv",
+      "n_total": 306,
+      "n_split": 296,
+      "target_root": "/home/bzhang512/CV_Project/dataset/DL3DV-2/part2_s3po/test",
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_dl3dv2_test.yaml",
+      "check_pass": true
+    },
+    {
+      "dataset_name": "405841",
+      "split": "sparse",
+      "loader_type": "waymo",
+      "n_total": 199,
+      "n_split": 20,
+      "target_root": "/home/bzhang512/CV_Project/dataset/405841/part2_s3po/sparse",
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_sparse_waymo.yaml",
+      "check_pass": true
+    },
+    {
+      "dataset_name": "405841",
+      "split": "test",
+      "loader_type": "waymo",
+      "n_total": 199,
+      "n_split": 179,
+      "target_root": "/home/bzhang512/CV_Project/dataset/405841/part2_s3po/test",
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_test_waymo.yaml",
+      "check_pass": true
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+{
+  "rows": [
+    {
+      "scene": "scene_A",
+      "n_images": 25,
+      "n_cameras": 25,
+      "width": 960,
+      "height": 640,
+      "overall_pass": true,
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_scene_a.yaml"
+    },
+    {
+      "scene": "scene_B",
+      "n_images": 45,
+      "n_cameras": 45,
+      "width": 960,
+      "height": 640,
+      "overall_pass": true,
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_scene_b.yaml"
+    },
+    {
+      "scene": "scene_C",
+      "n_images": 129,
+      "n_cameras": 129,
+      "width": 960,
+      "height": 640,
+      "overall_pass": true,
+      "config_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_scene_c.yaml"
+    }
+  ]
+}

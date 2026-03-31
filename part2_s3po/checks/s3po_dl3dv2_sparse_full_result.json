@@ -1,0 +1,22 @@
+{
+  "run_tag": "s3po_dl3dv2_sparse_full",
+  "dataset_name": "DL3DV-2",
+  "split_name": "sparse",
+  "loader_type": "dl3dv",
+  "run_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_dl3dv2_sparse_full.yaml",
+  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/dl3dv-2/s3po_dl3dv-2_sparse_full/DL3DV-2_part2_s3po",
+  "latest_run_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/dl3dv-2/s3po_dl3dv-2_sparse_full/DL3DV-2_part2_s3po/2026-03-31-10-58-03",
+  "project_link": "/home/bzhang512/CV_Project/output/part2_s3po/s3po_dl3dv2_sparse_full_latest",
+  "plot_stats_files": [
+    "stats_final.json"
+  ],
+  "trajectory_files": [
+    "trj_final.json"
+  ],
+  "psnr_files": [
+    "psnr/before_opt/final_result.json",
+    "psnr/after_opt/final_result.json"
+  ],
+  "final_ply_exists": true,
+  "returncode": 0
+}

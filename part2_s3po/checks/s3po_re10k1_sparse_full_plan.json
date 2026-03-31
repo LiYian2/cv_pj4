@@ -1,0 +1,11 @@
+{
+  "dataset_name": "Re10k-1",
+  "split_name": "sparse",
+  "loader_type": "dl3dv",
+  "base_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_re10k1_sparse.yaml",
+  "run_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_re10k1_sparse_full.yaml",
+  "run_tag": "s3po_re10k1_sparse_full",
+  "dataset_path": "/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse",
+  "output_base": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse_full",
+  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse_full/Re10k-1_part2_s3po"
+}
