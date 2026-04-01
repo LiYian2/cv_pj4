@@ -1,0 +1,36 @@
+dataset_name: re10k
+checkpoint_path: null
+frame_limit: -1
+seed: 0
+nopo_enable: true
+n_views: 20
+sample_rate: 30
+nopo_checkpoint: dl3dv
+new_submap_every: 2
+aligner:
+  iterations: 300
+  cam_rot_lr: 0.0001
+  cam_trans_lr: 0.001
+  filter_alpha: true
+  alpha_thre: 0.98
+  soft_alpha: true
+  mask_invalid_depth: true
+  key_frame_pose: nopo
+  scale_min: 0.05
+  scale_max: 20.0
+  depth_valid_min: 0.05
+  scale_init_fallback: 1.0
+  mw2_warmup_iters: 20
+data:
+  input_path: /home/bzhang512/CV_Project/dataset/405841/part2
+  output_path: /home/bzhang512/CV_Project/output/part2/405841/reggs_405841_scene_full_dl3dv-ckpt_sr30_nv20_sm2_stable_v1
+  scene_name: reggs_405841_full_512
+cam:
+  H: 512
+  W: 512
+  fx: 1.0764049814673433
+  fy: 1.6146074722010149
+  cx: 0.4950787903203501
+  cy: 0.5009273860525132
+  crop_edge: 0
+  depth_scale: 5000.0
