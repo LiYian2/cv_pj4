@@ -30,6 +30,7 @@ wandb/
 # =========================
 # Large data and experiment outputs
 # =========================
+dataset
 dataset/
 output/
 output_reference/

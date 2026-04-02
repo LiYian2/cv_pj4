@@ -17,6 +17,8 @@ Dataset:
   adaptive_pointsize: true
   point_size: 0.01
   dataset_path: /home/bzhang512/CV_Project/dataset/405841/part2_s3po/test
+  begin: 0
+  end: 179
   Calibration:
     fx: 551.1193505112797
     fy: 826.6790257669196
