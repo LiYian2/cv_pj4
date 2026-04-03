@@ -1,0 +1,11 @@
+{
+  "dataset_name": "DL3DV-2",
+  "split_name": "full",
+  "loader_type": "dl3dv",
+  "base_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_dl3dv2_full.yaml",
+  "run_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_dl3dv2_full_full.yaml",
+  "run_tag": "s3po_dl3dv2_full_full",
+  "dataset_path": "/home/bzhang512/CV_Project/dataset/DL3DV-2/part2_s3po/full",
+  "output_base": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/dl3dv-2/s3po_dl3dv-2_full",
+  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/dl3dv-2/s3po_dl3dv-2_full/DL3DV-2_part2_s3po"
+}

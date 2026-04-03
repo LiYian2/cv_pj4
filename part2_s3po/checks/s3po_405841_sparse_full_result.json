@@ -4,14 +4,15 @@
   "split_name": "sparse",
   "loader_type": "waymo",
   "run_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_sparse_full.yaml",
-  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse_full/405841_part2_s3po",
-  "latest_run_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse_full/405841_part2_s3po/2026-03-31-10-48-39",
-  "project_link": "/home/bzhang512/CV_Project/output/part2_s3po/s3po_405841_sparse_full_latest",
+  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse/405841_part2_s3po",
+  "latest_run_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse/405841_part2_s3po/2026-04-04-00-43-23",
   "plot_stats_files": [
+    "stats_0010.json",
     "stats_final.json"
   ],
   "trajectory_files": [
-    "trj_final.json"
+    "trj_final.json",
+    "trj_0010.json"
   ],
   "psnr_files": [
     "psnr/before_opt/final_result.json",

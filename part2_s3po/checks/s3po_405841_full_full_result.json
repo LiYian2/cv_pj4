@@ -1,0 +1,25 @@
+{
+  "run_tag": "s3po_405841_full_full",
+  "dataset_name": "405841",
+  "split_name": "full",
+  "loader_type": "waymo",
+  "run_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_full_full.yaml",
+  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_full/405841_part2_s3po",
+  "latest_run_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_full/405841_part2_s3po/2026-04-04-00-43-20",
+  "plot_stats_files": [
+    "stats_0094.json",
+    "stats_0199.json",
+    "stats_final.json"
+  ],
+  "trajectory_files": [
+    "trj_final.json",
+    "trj_0094.json",
+    "trj_0199.json"
+  ],
+  "psnr_files": [
+    "psnr/before_opt/final_result.json",
+    "psnr/after_opt/final_result.json"
+  ],
+  "final_ply_exists": true,
+  "returncode": 0
+}

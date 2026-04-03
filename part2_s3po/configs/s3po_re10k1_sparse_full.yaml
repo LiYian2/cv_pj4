@@ -1,6 +1,6 @@
 Results:
   save_results: true
-  save_dir: /home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse_full
+  save_dir: /home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse
   save_trj: true
   save_trj_kf_intv: 10
   use_gui: false
@@ -40,7 +40,7 @@ Training:
   init_gaussian_th: 0.005
   init_gaussian_extent: 30
   tracking_itr_num: 300
-  mapping_itr_num: 500
+  mapping_itr_num: 300
   global_BA_itr_num: 500
   gaussian_update_every: 150
   gaussian_update_offset: 50
@@ -48,12 +48,12 @@ Training:
   gaussian_extent: 1.0
   gaussian_reset: 2001
   size_threshold: 20
-  kf_interval: 3
+  kf_interval: 30
   window_size: 10
-  pose_window: 4
+  pose_window: 5
   edge_threshold: 1.1
   rgb_boundary_threshold: 0.01
-  alpha: 0.98
+  alpha: 0.985
   kf_translation: 0.08
   kf_min_translation: 0.05
   kf_overlap: 0.9
@@ -68,7 +68,16 @@ Training:
   lr:
     cam_rot_delta: 0.003
     cam_trans_delta: 0.001
-  'global_BA_itr_num:': 500
+  force_keyframe_indices:
+  - 0
+  - 1
+  - 2
+  - 3
+  - 4
+  - 5
+  - 6
+  - 7
+  - 8
 opt_params:
   iterations: 30000
   position_lr_init: 0.0016

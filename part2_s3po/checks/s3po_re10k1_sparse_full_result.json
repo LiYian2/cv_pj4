@@ -4,9 +4,8 @@
   "split_name": "sparse",
   "loader_type": "dl3dv",
   "run_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_re10k1_sparse_full.yaml",
-  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse_full/Re10k-1_part2_s3po",
-  "latest_run_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse_full/Re10k-1_part2_s3po/2026-03-31-10-50-54",
-  "project_link": "/home/bzhang512/CV_Project/output/part2_s3po/s3po_re10k1_sparse_full_latest",
+  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse/Re10k-1_part2_s3po",
+  "latest_run_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse/Re10k-1_part2_s3po/2026-04-04-00-43-29",
   "plot_stats_files": [
     "stats_final.json"
   ],

@@ -1,6 +1,6 @@
 Results:
   save_results: true
-  save_dir: /home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse
+  save_dir: /home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_full
   save_trj: true
   save_trj_kf_intv: 10
   use_gui: false
@@ -16,7 +16,7 @@ Dataset:
   pcd_downsample_init: 32
   adaptive_pointsize: true
   point_size: 0.01
-  dataset_path: /home/bzhang512/CV_Project/dataset/405841/part2_s3po/sparse
+  dataset_path: /home/bzhang512/CV_Project/dataset/405841/part2_s3po/full
   Calibration:
     fx: 551.1193505112797
     fy: 826.6790257669196
@@ -68,25 +68,25 @@ Training:
     cam_trans_delta: 0.001
   force_keyframe_indices:
   - 0
-  - 1
-  - 2
-  - 3
-  - 4
-  - 5
-  - 6
-  - 7
-  - 8
-  - 9
   - 10
-  - 11
-  - 12
-  - 13
-  - 14
-  - 15
-  - 16
-  - 17
-  - 18
-  - 19
+  - 20
+  - 31
+  - 41
+  - 52
+  - 62
+  - 72
+  - 83
+  - 93
+  - 104
+  - 114
+  - 125
+  - 135
+  - 145
+  - 156
+  - 166
+  - 177
+  - 187
+  - 198
 opt_params:
   iterations: 30000
   position_lr_init: 0.0016

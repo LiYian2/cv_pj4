@@ -1,0 +1,21 @@
+{
+  "run_tag": "s3po_re10k1_full_full",
+  "dataset_name": "Re10k-1",
+  "split_name": "full",
+  "loader_type": "dl3dv",
+  "run_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_re10k1_full_full.yaml",
+  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_full/Re10k-1_part2_s3po",
+  "latest_run_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_full/Re10k-1_part2_s3po/2026-04-04-02-11-09",
+  "plot_stats_files": [
+    "stats_final.json"
+  ],
+  "trajectory_files": [
+    "trj_final.json"
+  ],
+  "psnr_files": [
+    "psnr/before_opt/final_result.json",
+    "psnr/after_opt/final_result.json"
+  ],
+  "final_ply_exists": true,
+  "returncode": 0
+}

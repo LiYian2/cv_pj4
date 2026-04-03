@@ -6,6 +6,6 @@
   "run_cfg_path": "/home/bzhang512/CV_Project/part2_s3po/configs/s3po_405841_sparse_full.yaml",
   "run_tag": "s3po_405841_sparse_full",
   "dataset_path": "/home/bzhang512/CV_Project/dataset/405841/part2_s3po/sparse",
-  "output_base": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse_full",
-  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse_full/405841_part2_s3po"
+  "output_base": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse",
+  "output_group_dir": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/405841/s3po_405841_sparse/405841_part2_s3po"
 }

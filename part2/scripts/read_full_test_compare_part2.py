@@ -3,7 +3,7 @@
 
 Reads six groups of full-test outputs:
 - RegGS (3 datasets): eval_test_all_non_train_subset_v1.json + ate_test_all_non_train_subset_v1.json
-- S3PO (3 datasets): external_eval/*/infer_*/eval_external.json + plot/stats_external_infer.json
+- S3PO (3 datasets): 00_external_eval/*/infer_*/eval_external.json + plot/stats_external_infer.json
 
 Writes a compact CSV (no parameter/path columns) to:
   /home/bzhang512/CV_Project/results/part2/part2_full_test_model_compare.csv
@@ -19,7 +19,7 @@ import pandas as pd
 
 CV_ROOT = Path("/home/bzhang512/CV_Project")
 REGGS_OUTPUT_ROOT = Path("/home/bzhang512/my_storage_500G/CV_Project/output/part2")
-S3PO_EXTERNAL_ROOT = Path("/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/external_eval")
+S3PO_EXTERNAL_ROOT = Path("/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/00_external_eval")
 RESULTS_ROOT = CV_ROOT / "results" / "part2"
 
 
@@ -115,12 +115,28 @@ def collect_reggs_rows() -> List[Dict[str, Any]]:
 def collect_s3po_rows() -> List[Dict[str, Any]]:
     rows: List[Dict[str, Any]] = []
 
-    eval_files = sorted(S3PO_EXTERNAL_ROOT.glob("*/infer_*/eval_external.json"))
+    # Support both legacy and new layouts under 00_external_eval:
+    # legacy: <dataset>/infer_xxx/eval_external.json
+    # new:    <dataset>/infer_xxx/<timestamp>/eval_external.json
+    eval_files = sorted(S3PO_EXTERNAL_ROOT.glob("**/eval_external.json"))
     for eval_path in eval_files:
+        rel = eval_path.relative_to(S3PO_EXTERNAL_ROOT)
+        parts = rel.parts
+        # Require at least dataset/infer_xxx/eval_external.json
+        if len(parts) < 3:
+            continue
+        dataset_raw = parts[0]
+        if not parts[1].startswith("infer_"):
+            continue
+
         infer_dir = eval_path.parent
-        dataset_raw = infer_dir.parent.name
         dataset = canonical_s3po_dataset(dataset_raw)
-        run_name = infer_dir.name
+        # Keep row key unique across full/sparse and timestamps.
+        # Example: infer_405841_full__2026-04-04-00-43-20
+        if len(parts) >= 4:
+            run_name = f"{parts[1]}__{parts[2]}"
+        else:
+            run_name = parts[1]
 
         ate_path = infer_dir / "plot" / "stats_external_infer.json"
         eval_data = safe_load_json(eval_path)
