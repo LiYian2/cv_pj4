@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""
+Part3 Stage1: Pseudo refinement for S3PO Gaussians.
+
+Usage:
+    python run_pseudo_refinement.py \
+        --ply_path path/to/point_cloud.ply \
+        --pseudo_cache path/to/pseudo_cache \
+        --output_path path/to/refined.ply \
+        --num_iterations 100
+"""
+import argparse
+import json
+import sys
+import torch
+import numpy as np
+from pathlib import Path
+from PIL import Image
+from tqdm import tqdm
+
+# S3PO-GS paths
+S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
+sys.path.insert(0, S3PO_ROOT)
+sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--ply_path", required=True)
+    p.add_argument("--pseudo_cache", required=True)
+    p.add_argument("--output_path", required=True)
+    p.add_argument("--num_iterations", type=int, default=100)
+    p.add_argument("--use_left", action="store_true", default=True)
+    p.add_argument("--use_right", action="store_true")
+    p.add_argument("--alpha_pseudo", type=float, default=0.9)
+    p.add_argument("--lambda_pseudo", type=float, default=1.0)
+    return p.parse_args()
+
+
+def create_viewpoint(camera):
+    pose_c2w = np.array(camera["pose_c2w"])
+    intr = camera.get("intrinsics_px", {})
+    img_size = camera.get("image_size", {"width": 512, "height": 512})
+    
+    pose_w2c = np.linalg.inv(pose_c2w)
+    R = pose_w2c[:3, :3].T
+    T = pose_w2c[:3, 3]
+    
+    fx = intr.get("fx", 500)
+    fy = intr.get("fy", fx)
+    W = img_size.get("width", 512)
+    H = img_size.get("height", 512)
+    
+    FoVx = 2 * np.arctan(W / (2 * fx))
+    FoVy = 2 * np.arctan(H / (2 * fy))
+    
+    class Viewpoint:
+        def __init__(self):
+            self.R = torch.from_numpy(R).float().cuda()
+            self.T = torch.from_numpy(T).float().cuda()
+            self.FoVx = FoVx
+            self.FoVy = FoVy
+            self.image_height = H
+            self.image_width = W
+            self.original_image = torch.zeros(3, H, W).cuda()
+            self.exposure_a = torch.tensor(0.0).cuda()
+            self.exposure_b = torch.tensor(0.0).cuda()
+    
+    return Viewpoint()
+
+
+def get_loss_pseudo(image, depth, target_rgb, target_depth, confidence, alpha=0.9, lambda_pseudo=1.0):
+    if isinstance(target_rgb, np.ndarray):
+        target_rgb = torch.from_numpy(target_rgb).float().cuda()
+    if isinstance(target_depth, np.ndarray):
+        target_depth = torch.from_numpy(target_depth).float().cuda()
+    if isinstance(confidence, np.ndarray):
+        confidence = torch.from_numpy(confidence).float().cuda()
+    
+    if target_rgb.dim() == 3 and target_rgb.shape[-1] == 3:
+        target_rgb = target_rgb.permute(2, 0, 1)
+    
+    valid = (target_depth > 0.01) & (confidence > 0.5)
+    valid_rgb = valid.view(1, *valid.shape).expand_as(image)
+    
+    l1_rgb = torch.abs(image * valid_rgb - target_rgb * valid_rgb)
+    l1_depth = torch.abs(depth.view_as(target_depth) * valid - target_depth * valid)
+    
+    return lambda_pseudo * (alpha * l1_rgb.mean() + (1 - alpha) * l1_depth.mean())
+
+
+def main():
+    args = parse_args()
+    
+    print(f"[Part3 Stage1] Loading PLY: {args.ply_path}")
+    
+    # Import S3PO modules
+    from scene.gaussian_model import GaussianModel
+    from arguments import PipelineParams, OptimizationParams
+    from gaussian_renderer import render
+    
+    # Load Gaussians
+    gaussians = GaussianModel(sh_degree=3)
+    gaussians.load_ply(args.ply_path)
+    gaussians = gaussians.cuda()
+    print(f"  Loaded {len(gaussians.get_xyz)} Gaussians")
+    
+    # Setup optimizer
+    gaussians.setup_optimizer(OptimizationParams())
+    
+    # Load pseudo cache
+    pseudo_cache_path = Path(args.pseudo_cache)
+    manifest = json.load(open(pseudo_cache_path / "manifest.json"))
+    
+    use_left = not args.use_right
+    target_name = "target_rgb_left.png" if use_left else "target_rgb_right.png"
+    
+    viewpoints = []
+    for sid in manifest["sample_ids"]:
+        sd = pseudo_cache_path / "samples" / str(sid)
+        
+        cam = json.load(open(sd / "camera.json"))
+        rgb = np.array(Image.open(sd / target_name)).astype(np.float32) / 255.0
+        depth = np.load(sd / "target_depth.npy")
+        conf = np.load(sd / "confidence_mask.npy") if (sd / "confidence_mask.npy").exists() else (depth > 0).astype(np.float32)
+        
+        viewpoints.append({
+            "vp": create_viewpoint(cam),
+            "rgb": rgb,
+            "depth": depth,
+            "conf": conf,
+        })
+    
+    print(f"  {len(viewpoints)} pseudo viewpoints")
+    
+    # Render setup
+    pipeline = PipelineParams()
+    bg = torch.zeros(3, device="cuda")
+    
+    # Optimization
+    for i in tqdm(range(1, args.num_iterations + 1), desc="Pseudo refinement"):
+        loss = 0
+        for v in np.random.choice(len(viewpoints), min(4, len(viewpoints)), replace=False):
+            pv = viewpoints[v]
+            pkg = render(pv["vp"], gaussians, pipeline, bg)
+            loss += get_loss_pseudo(pkg["render"], pkg["depth"], pv["rgb"], pv["depth"], pv["conf"], args.alpha_pseudo, args.lambda_pseudo)
+        
+        loss += 10 * torch.abs(gaussians.get_scaling - gaussians.get_scaling.mean(1).unsqueeze(1)).mean()
+        loss.backward()
+        
+        with torch.no_grad():
+            gaussians.optimizer.step()
+            gaussians.optimizer.zero_grad(set_to_none=True)
+        
+        if i % 10 == 0:
+            print(f"  iter {i}: loss={loss.item():.4f}")
+    
+    # Save
+    Path(args.output_path).parent.mkdir(parents=True, exist_ok=True)
+    gaussians.save_ply(args.output_path)
+    print(f"[Part3 Stage1] Saved: {args.output_path}")
+
+
+if __name__ == "__main__":
+    main()

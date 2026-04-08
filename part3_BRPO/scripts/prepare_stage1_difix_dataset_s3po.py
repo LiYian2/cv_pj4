@@ -1,17 +1,7 @@
 #!/usr/bin/env python3
 """
 Prepare part3 stage1 Difix-ref pseudo-view assets for S3PO backend.
-
-Input:
-  - sparse split: selected_indices (train frames)
-  - test split: selected_indices (test frames) + render_rgb + render_depth + pose
-  - render from external eval
-
-Output:
-  - inputs/raw_render/, inputs/left_ref/, inputs/right_ref/
-  - difix/left_fixed/, difix/right_fixed/
-  - pseudo_cache/samples/{frame_id}/camera.json, render_rgb.png, render_depth.npy
-  - augmented_train_left/rgb/, augmented_train_right/rgb/
+Output: pseudo-cache-v1.1 schema compliant.
 """
 from __future__ import annotations
 
@@ -22,6 +12,10 @@ import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
+import numpy as np
+
+SCHEMA_VERSION = "pseudo-cache-v1.1"
+CAMERA_SCHEMA = "cam-v1"
 
 
 @dataclass
@@ -93,29 +87,39 @@ def copy_force(src: Path, dst: Path) -> None:
     ensure_dir(dst.parent)
     shutil.copy2(src, dst)
 
+def require_exists(path: Path, what: str) -> None:
+    if not path.exists():
+        raise FileNotFoundError(f"Missing {what}: {path}")
+
+
+def validate_records(records: List[PseudoRecord], args: argparse.Namespace) -> None:
+    render_depth_dir = Path(args.render_depth_dir)
+    for rec in records:
+        require_exists(Path(rec.render_src_path), f"render rgb for frame_id={rec.frame_id} test_idx={rec.test_idx}")
+        require_exists(Path(rec.left_ref_src_path), f"left ref rgb for frame_id={rec.frame_id}")
+        require_exists(Path(rec.right_ref_src_path), f"right ref rgb for frame_id={rec.frame_id}")
+        require_exists(render_depth_dir / get_render_depth_name(rec.test_idx), f"render depth for frame_id={rec.frame_id} test_idx={rec.test_idx}")
+
+
 
 def get_sparse_rgb_name(frame_id: int, scene_name: str) -> str:
-    """Get sparse rgb filename from frame_id."""
     if scene_name == "DL3DV-2":
         return f"frame_{frame_id + 1:05d}.png"
     elif scene_name == "Re10k-1":
         return f"{frame_id:05d}.png"
-    else:  # 405841 and others
+    else:
         return f"{frame_id:06d}.png"
 
 
 def get_render_name(test_idx: int) -> str:
-    """Get render filename from test index."""
     return f"{test_idx:04d}_pred.png"
 
 
 def get_render_depth_name(test_idx: int) -> str:
-    """Get render depth filename from test index."""
     return f"{test_idx:04d}.npy"
 
 
 def get_canonical_name(frame_id: int, scene_name: str) -> str:
-    """Get canonical output filename (without _pred suffix)."""
     if scene_name == "DL3DV-2":
         return f"{frame_id:05d}.png"
     elif scene_name == "Re10k-1":
@@ -130,19 +134,14 @@ def pick_pseudo_in_gap(
     test_indices: List[int],
     test_idx_to_frame_id: Dict[int, int],
     placement: str,
-) -> List[Tuple[int, str]]:
-    """Select pseudo frames in a sparse gap."""
-    out: List[Tuple[int, int, str]] = []  # (frame_id, test_idx, label)
-    
-    # Get test frames in this gap
+) -> List[Tuple[int, int, str]]:
+    out: List[Tuple[int, int, str]] = []
     gap_test = [(fid, idx) for idx, fid in test_idx_to_frame_id.items() if left_id < fid < right_id]
     if not gap_test:
         return []
-    
     candidates = sorted([fid for fid, _ in gap_test])
     
     def add(target: float, label: str) -> None:
-        # Find nearest frame_id to target
         nearest = min(candidates, key=lambda x: abs(x - target))
         test_idx = next((idx for fid, idx in gap_test if fid == nearest), None)
         if test_idx is not None:
@@ -155,7 +154,6 @@ def pick_pseudo_in_gap(
         add(left_id + (right_id - left_id) / 3.0, "tertile_left")
         add(left_id + 2.0 * (right_id - left_id) / 3.0, "tertile_right")
     
-    # Deduplicate by frame_id
     seen: set = set()
     result: List[Tuple[int, int, str]] = []
     for fid, tidx, label in out:
@@ -165,13 +163,136 @@ def pick_pseudo_in_gap(
     return result
 
 
+def quat_xyzw_to_rot(q: List[float]) -> np.ndarray:
+    q_arr = np.asarray(q, dtype=np.float64)
+    n = np.linalg.norm(q_arr)
+    if n < 1e-12:
+        return np.eye(3, dtype=np.float64)
+    x, y, z, w = (q_arr / n).tolist()
+    xx, yy, zz = x * x, y * y, z * z
+    xy, xz, yz = x * y, x * z, y * z
+    wx, wy, wz = w * x, w * y, w * z
+    return np.array([
+        [1 - 2 * (yy + zz), 2 * (xy - wz), 2 * (xz + wy)],
+        [2 * (xy + wz), 1 - 2 * (xx + zz), 2 * (yz - wx)],
+        [2 * (xz - wy), 2 * (yz + wx), 1 - 2 * (xx + yy)],
+    ], dtype=np.float64)
+
+
+def parse_frame_id_from_image_name(image_name: str) -> Optional[int]:
+    stem = Path(image_name).stem
+    if stem.startswith('frame_'):
+        tail = stem.split('_')[-1]
+        if tail.isdigit():
+            return int(tail) - 1
+    if stem.isdigit():
+        return int(stem)
+    return None
+
+
+def camera_entry_to_c2w(entry: dict, init_trans: np.ndarray) -> List[List[float]]:
+    quat = entry.get('cam_quat', [0.0, 0.0, 0.0, 1.0])
+    trans = np.asarray(entry.get('cam_trans', [0.0, 0.0, 0.0]), dtype=np.float64)
+    R = quat_xyzw_to_rot(quat)
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = R
+    T[:3, 3] = trans - init_trans
+    return T.tolist()
+
+
+def load_intrinsics_405841(split_manifest_path: Path) -> dict:
+    manifest = read_json(split_manifest_path)
+    calib = manifest.get("calibration_sync", {})
+    return {
+        "fx": calib.get("fx", 0.0),
+        "fy": calib.get("fy", 0.0),
+        "cx": calib.get("cx", 0.0),
+        "cy": calib.get("cy", 0.0),
+    }
+
+
+def load_intrinsics_dl3dv_re10k(dataset_path: Path, target_width: int = 512, target_height: int = 512) -> Tuple[dict, dict]:
+    """Load intrinsics for Re10k-1/DL3DV-2, preferring intrinsics_px.json (pixel coords)."""
+    intr_path = dataset_path / "intrinsics_px.json"
+    if intr_path.exists():
+        intr = read_json(intr_path)
+        return (
+            {
+                "fx": float(intr.get("fx", 0.0)),
+                "fy": float(intr.get("fy", 0.0)),
+                "cx": float(intr.get("cx", 0.0)),
+                "cy": float(intr.get("cy", 0.0)),
+            },
+            {"type": "intrinsics_px.json", "path": str(intr_path)},
+        )
+
+    cameras_path = dataset_path / "cameras.json"
+    if cameras_path.exists():
+        cameras = read_json(cameras_path)
+        if cameras and len(cameras) > 0:
+            c = cameras[0]
+            fx = float(c.get("fx", 0.0))
+            fy = float(c.get("fy", 0.0))
+            cx = float(c.get("cx", 0.0))
+            cy = float(c.get("cy", 0.0))
+            normalized = (fx <= 2.0 and fy <= 2.0 and cx <= 2.0 and cy <= 2.0)
+            if normalized:
+                fx *= target_width
+                fy *= target_height
+                cx *= target_width
+                cy *= target_height
+                src_type = "cameras.json(normalized->scaled)"
+            else:
+                src_type = "cameras.json(pixel)"
+            return (
+                {"fx": fx, "fy": fy, "cx": cx, "cy": cy},
+                {"type": src_type, "path": str(cameras_path)},
+            )
+
+    return (
+        {"fx": 0.0, "fy": 0.0, "cx": 0.0, "cy": 0.0},
+        {"type": "missing", "path": ""},
+    )
+
+
+def load_ref_pose_405841(frame_id: int, dataset_path: Path) -> List[List[float]]:
+    """Load reference pose from dataset/<scene>/FRONT/gt/<frame_id>.txt."""
+    gt_path = dataset_path.parent.parent / "FRONT" / "gt" / f"{frame_id:06d}.txt"
+    if gt_path.exists():
+        pose = np.loadtxt(gt_path).reshape(4, 4)
+        return pose.tolist()
+    return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+
+
+def load_ref_pose_dl3dv_re10k(frame_id: int, dataset_path: Path) -> List[List[float]]:
+    """Load c2w from cameras.json cam_quat/cam_trans (with first-frame translation normalization)."""
+    cameras_path = dataset_path / "cameras.json"
+    if not cameras_path.exists():
+        return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+
+    cameras = read_json(cameras_path)
+    if not cameras:
+        return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+
+    init_trans = np.asarray(cameras[0].get("cam_trans", [0.0, 0.0, 0.0]), dtype=np.float64)
+
+    for c in cameras:
+        fid = parse_frame_id_from_image_name(c.get("image_name", ""))
+        cam_id = c.get("cam_id")
+        if fid == frame_id or cam_id == frame_id:
+            return camera_entry_to_c2w(c, init_trans)
+
+    if 0 <= frame_id < len(cameras):
+        return camera_entry_to_c2w(cameras[frame_id], init_trans)
+
+    return [[1, 0, 0, 0], [0, 1, 0, 0], [0, 0, 1, 0], [0, 0, 0, 1]]
+
+
 def build_source_manifest(args: argparse.Namespace, run_root: Path) -> dict:
     sparse_manifest = read_json(Path(args.sparse_manifest))
     test_manifest = read_json(Path(args.test_manifest))
-    
     sparse_indices = sparse_manifest["selected_indices"]
     test_indices = test_manifest["selected_indices"]
-    
     manifest = {
         "scene_name": args.scene_name,
         "run_key": args.run_key,
@@ -193,44 +314,20 @@ def build_source_manifest(args: argparse.Namespace, run_root: Path) -> dict:
 def build_pseudo_records(args: argparse.Namespace, run_root: Path, source: dict) -> List[PseudoRecord]:
     sparse_indices = source["sparse_indices"]
     test_indices = source["test_indices"]
-    
-    # Build mapping: test_idx -> frame_id and frame_id -> test_idx
     test_idx_to_frame_id = {i: fid for i, fid in enumerate(test_indices)}
-    frame_id_to_test_idx = {fid: i for i, fid in enumerate(test_indices)}
-    
     sparse_rgb_dir = Path(args.sparse_rgb_dir)
     render_rgb_dir = Path(args.render_rgb_dir)
-    render_depth_dir = Path(args.render_depth_dir)
-    
-    # Load pose
-    trj = read_json(Path(args.trj_json))
-    trj_id = trj["trj_id"]
-    trj_est = trj["trj_est"]  # c2w matrices
-    
     records: List[PseudoRecord] = []
-    
     for left_id, right_id in zip(sparse_indices[:-1], sparse_indices[1:]):
         chosen = pick_pseudo_in_gap(left_id, right_id, test_indices, test_idx_to_frame_id, args.placement)
         for frame_id, test_idx, label in chosen:
-            # Get render paths
             render_name = get_render_name(test_idx)
-            depth_name = get_render_depth_name(test_idx)
             render_src = render_rgb_dir / render_name
-            depth_src = render_depth_dir / depth_name
-            
-            # Get left/right ref paths
             left_name = get_sparse_rgb_name(left_id, args.scene_name)
             right_name = get_sparse_rgb_name(right_id, args.scene_name)
             left_ref_src = sparse_rgb_dir / left_name
             right_ref_src = sparse_rgb_dir / right_name
-            
-            # Output paths
             canonical = get_canonical_name(frame_id, args.scene_name)
-            
-            # Get pose for this test_idx
-            pose_idx = trj_id.index(test_idx) if test_idx in trj_id else -1
-            pose_c2w = trj_est[pose_idx] if pose_idx >= 0 else None
-            
             rec = PseudoRecord(
                 frame_id=frame_id,
                 placement=label,
@@ -248,34 +345,22 @@ def build_pseudo_records(args: argparse.Namespace, run_root: Path, source: dict)
                 pseudo_camera_path=str((run_root / "pseudo_cache" / "samples" / str(frame_id) / "camera.json").resolve()),
             )
             records.append(rec)
-    
     records = sorted(records, key=lambda r: r.frame_id)
     if args.limit is not None:
         records = records[:args.limit]
+    validate_records(records, args)
     return records
 
 
 def stage_select(args: argparse.Namespace, run_root: Path) -> List[PseudoRecord]:
     source = build_source_manifest(args, run_root)
     records = build_pseudo_records(args, run_root, source)
-    
-    # Create symlinks
-    raw_dir = run_root / "inputs" / "raw_render"
-    left_dir = run_root / "inputs" / "left_ref"
-    right_dir = run_root / "inputs" / "right_ref"
-    ensure_dir(raw_dir)
-    ensure_dir(left_dir)
-    ensure_dir(right_dir)
-    
     for rec in records:
         if not args.dry_run:
             symlink_force(Path(rec.render_src_path), Path(rec.render_input_path))
             symlink_force(Path(rec.left_ref_src_path), Path(rec.left_ref_input_path))
             symlink_force(Path(rec.right_ref_src_path), Path(rec.right_ref_input_path))
-    
-    # Save manifests
     write_json(run_root / "manifests" / "pseudo_selection_manifest.json", [asdict(r) for r in records])
-    
     summary = {
         "scene_name": args.scene_name,
         "run_key": args.run_key,
@@ -306,12 +391,10 @@ def load_difix_model(model_name: Optional[str], model_path: Optional[str], times
         )
         pipe = pipe.to("cuda")
         return {"kind": "hf_pipeline", "obj": pipe, "timestep": timestep}
-    
     difix_src = Path("/home/bzhang512/CV_Project/third_party/Difix3D/src")
     if str(difix_src) not in sys.path:
         sys.path.insert(0, str(difix_src))
-    from model import Difix  # type: ignore
-    
+    from model import Difix
     model = Difix(
         pretrained_name=model_name,
         pretrained_path=model_path,
@@ -324,13 +407,11 @@ def load_difix_model(model_name: Optional[str], model_path: Optional[str], times
 
 def run_single_difix(model_bundle, image_path: Path, ref_path: Path, output_path: Path, prompt: str, height: int, width: int, overwrite: bool) -> None:
     from PIL import Image
-    
     if output_path.exists() and not overwrite:
         return
     image = Image.open(image_path).convert("RGB")
     ref = Image.open(ref_path).convert("RGB")
     ensure_dir(output_path.parent)
-    
     if model_bundle["kind"] == "hf_pipeline":
         pipe = model_bundle["obj"]
         out = pipe(
@@ -346,7 +427,6 @@ def run_single_difix(model_bundle, image_path: Path, ref_path: Path, output_path
     else:
         model = model_bundle["obj"]
         out = model.sample(image=image, ref_image=ref, prompt=prompt, height=height, width=width)
-    
     if out.size != image.size:
         out = out.resize(image.size, Image.LANCZOS)
     out.save(output_path)
@@ -357,11 +437,9 @@ def stage_difix(args: argparse.Namespace, run_root: Path) -> List[PseudoRecord]:
     if args.dry_run:
         print(f"[dry-run] would run difix on {len(records)} pseudo frames")
         return records
-    
     model = load_difix_model(args.difix_model_name, args.difix_model_path, args.timestep)
     ensure_dir(run_root / "difix" / "left_fixed")
     ensure_dir(run_root / "difix" / "right_fixed")
-    
     for idx, rec in enumerate(records, start=1):
         print(f"[{idx}/{len(records)}] frame_id={rec.frame_id} test_idx={rec.test_idx} placement={rec.placement}")
         run_single_difix(
@@ -384,7 +462,6 @@ def stage_difix(args: argparse.Namespace, run_root: Path) -> List[PseudoRecord]:
             width=args.width,
             overwrite=args.overwrite,
         )
-    
     write_json(
         run_root / "manifests" / "difix_run_manifest.json",
         {
@@ -403,21 +480,22 @@ def stage_difix(args: argparse.Namespace, run_root: Path) -> List[PseudoRecord]:
 def stage_pack(args: argparse.Namespace, run_root: Path) -> None:
     source = read_json(run_root / "manifests" / "source_manifest.json")
     records = load_pseudo_records(run_root)
-    
-    # Load pose
     trj = read_json(Path(args.trj_json))
     trj_id = trj["trj_id"]
     trj_est = trj["trj_est"]
-    
+    dataset_path = Path(args.sparse_manifest).parent
+    if args.scene_name == "405841":
+        intrinsics = load_intrinsics_405841(Path(args.sparse_manifest))
+        intr_source = {"type": "split_manifest.calibration_sync", "dataset": "405841"}
+    else:
+        intrinsics, intr_source = load_intrinsics_dl3dv_re10k(dataset_path, target_width=args.width, target_height=args.height)
+        intr_source["dataset"] = args.scene_name
     left_rgb = run_root / "augmented_train_left" / "rgb"
     right_rgb = run_root / "augmented_train_right" / "rgb"
     ensure_dir(left_rgb)
     ensure_dir(right_rgb)
-    
-    # Copy/symlink train frames
     sparse_rgb_dir = Path(args.sparse_rgb_dir)
     sparse_indices = source["sparse_indices"]
-    
     for frame_id in sparse_indices:
         name = get_sparse_rgb_name(frame_id, args.scene_name)
         canonical = get_canonical_name(frame_id, args.scene_name)
@@ -425,8 +503,6 @@ def stage_pack(args: argparse.Namespace, run_root: Path) -> None:
         if not args.dry_run:
             symlink_force(src, left_rgb / canonical)
             symlink_force(src, right_rgb / canonical)
-    
-    # Copy difix outputs
     for rec in records:
         canonical = get_canonical_name(rec.frame_id, args.scene_name)
         left_src = Path(rec.left_fixed_path)
@@ -434,66 +510,93 @@ def stage_pack(args: argparse.Namespace, run_root: Path) -> None:
         if not left_src.is_file() or not right_src.is_file():
             raise FileNotFoundError(f"Difix outputs missing for frame {rec.frame_id}")
         if not args.dry_run:
-            copy_force(left_src, left_rgb / canonical)
-            copy_force(right_src, right_rgb / canonical)
-    
-    # Create pseudo_cache
+            symlink_force(left_src, left_rgb / canonical)
+            symlink_force(right_src, right_rgb / canonical)
     pseudo_cache = run_root / "pseudo_cache"
     render_depth_dir = Path(args.render_depth_dir)
-    
+    samples_meta = []
     for rec in records:
         sample_dir = pseudo_cache / "samples" / str(rec.frame_id)
         ensure_dir(sample_dir)
-        
-        # Save camera.json
         pose_idx = trj_id.index(rec.test_idx) if rec.test_idx in trj_id else -1
-        if pose_idx >= 0:
-            camera = {
-                "frame_id": rec.frame_id,
-                "test_idx": rec.test_idx,
-                "pose_c2w": trj_est[pose_idx],
-                "left_ref_frame_id": rec.gap_left_train_id,
-                "right_ref_frame_id": rec.gap_right_train_id,
-            }
+        pose_c2w = trj_est[pose_idx] if pose_idx >= 0 else [[1,0,0,0],[0,1,0,0],[0,0,1,0],[0,0,0,1]]
+        camera = {
+            "camera_schema": CAMERA_SCHEMA,
+            "frame_id": rec.frame_id,
+            "test_idx": rec.test_idx,
+            "pose_c2w": pose_c2w,
+            "intrinsics_px": intrinsics,
+            "image_size": {"width": args.width, "height": args.height},
+            "intrinsics_source": intr_source,
+        }
+        if not args.dry_run:
             write_json(sample_dir / "camera.json", camera)
-        
-        # Copy render_rgb and render_depth
+        if args.scene_name == "405841":
+            left_pose = load_ref_pose_405841(rec.gap_left_train_id, dataset_path)
+            right_pose = load_ref_pose_405841(rec.gap_right_train_id, dataset_path)
+            ref_pose_source = {"type": "FRONT/gt", "dataset": "405841"}
+        else:
+            left_pose = load_ref_pose_dl3dv_re10k(rec.gap_left_train_id, dataset_path)
+            right_pose = load_ref_pose_dl3dv_re10k(rec.gap_right_train_id, dataset_path)
+            ref_pose_source = {"type": "cameras.json", "dataset": args.scene_name}
+        refs = {
+            "left_ref_frame_id": rec.gap_left_train_id,
+            "right_ref_frame_id": rec.gap_right_train_id,
+            "left_ref_rgb_path": f"../../inputs/left_ref/{get_canonical_name(rec.frame_id, args.scene_name)}",
+            "right_ref_rgb_path": f"../../inputs/right_ref/{get_canonical_name(rec.frame_id, args.scene_name)}",
+            "left_ref_pose": left_pose,
+            "right_ref_pose": right_pose,
+            "ref_pose_source": ref_pose_source,
+        }
+        if not args.dry_run:
+            write_json(sample_dir / "refs.json", refs)
         canonical = get_canonical_name(rec.frame_id, args.scene_name)
         render_src = Path(rec.render_src_path)
         depth_src = render_depth_dir / get_render_depth_name(rec.test_idx)
-        
+        require_exists(render_src, f"render rgb for frame_id={rec.frame_id} test_idx={rec.test_idx}")
+        require_exists(depth_src, f"render depth for frame_id={rec.frame_id} test_idx={rec.test_idx}")
         if not args.dry_run:
-            if render_src.exists():
-                copy_force(render_src, sample_dir / "render_rgb.png")
-            if depth_src.exists():
-                copy_force(depth_src, sample_dir / "render_depth.npy")
-    
-    # Save pseudo_cache manifest
+            symlink_force(render_src, sample_dir / "render_rgb.png")
+            symlink_force(depth_src, sample_dir / "render_depth.npy")
+            symlink_force(Path(rec.left_fixed_path), sample_dir / "target_rgb_left.png")
+            symlink_force(Path(rec.right_fixed_path), sample_dir / "target_rgb_right.png")
+        if not args.dry_run:
+            ensure_dir(sample_dir / "diag")
+
+        sample_meta = {
+            "sample_id": rec.frame_id,
+            "frame_id": rec.frame_id,
+            "test_idx": rec.test_idx,
+            "placement": rec.placement,
+            "camera_path": f"samples/{rec.frame_id}/camera.json",
+            "refs_path": f"samples/{rec.frame_id}/refs.json",
+            "render_rgb_path": f"samples/{rec.frame_id}/render_rgb.png",
+            "render_depth_path": f"samples/{rec.frame_id}/render_depth.npy",
+            "target_rgb_left_path": f"samples/{rec.frame_id}/target_rgb_left.png",
+            "target_rgb_right_path": f"samples/{rec.frame_id}/target_rgb_right.png",
+            "target_depth_path": f"samples/{rec.frame_id}/target_depth.npy",
+            "confidence_mask_path": f"samples/{rec.frame_id}/confidence_mask.npy",
+            "diag_dir": f"samples/{rec.frame_id}/diag",
+        }
+        samples_meta.append(sample_meta)
+    external_eval_dir = Path(args.render_rgb_dir).parent
     cache_manifest = {
+        "schema_version": SCHEMA_VERSION,
         "scene_name": args.scene_name,
         "run_key": args.run_key,
+        "backend": "s3po",
+        "source_run_root": str(external_eval_dir.resolve()),
+        "image_size": {"width": args.width, "height": args.height},
         "num_samples": len(records),
         "sample_ids": [r.frame_id for r in records],
-        "samples": [
-            {
-                "frame_id": r.frame_id,
-                "test_idx": r.test_idx,
-                "placement": r.placement,
-                "left_ref_frame_id": r.gap_left_train_id,
-                "right_ref_frame_id": r.gap_right_train_id,
-                "camera_path": r.pseudo_camera_path,
-                "render_rgb": str((pseudo_cache / "samples" / str(r.frame_id) / "render_rgb.png").resolve()),
-                "render_depth": str((pseudo_cache / "samples" / str(r.frame_id) / "render_depth.npy").resolve()),
-            }
-            for r in records
-        ],
+        "samples": samples_meta,
     }
-    write_json(pseudo_cache / "manifest.json", cache_manifest)
-    
-    # Save pack manifest
+    if not args.dry_run:
+        write_json(pseudo_cache / "manifest.json", cache_manifest)
     pack_manifest = {
         "scene_name": args.scene_name,
         "run_key": args.run_key,
+        "schema_version": SCHEMA_VERSION,
         "train_ids": sparse_indices,
         "pseudo_ids": [r.frame_id for r in records],
         "augmented_train_left_rgb": str(left_rgb.resolve()),
@@ -501,7 +604,8 @@ def stage_pack(args: argparse.Namespace, run_root: Path) -> None:
         "num_left_files": len(list(left_rgb.glob("*.png"))),
         "num_right_files": len(list(right_rgb.glob("*.png"))),
     }
-    write_json(run_root / "manifests" / "pack_manifest.json", pack_manifest)
+    if not args.dry_run:
+        write_json(run_root / "manifests" / "pack_manifest.json", pack_manifest)
     print(json.dumps(pack_manifest, indent=2, ensure_ascii=False))
 
 
@@ -510,7 +614,6 @@ def main() -> None:
     run_root = Path(args.dataset_root) / args.scene_name / "part3_stage1" / args.run_key
     ensure_dir(run_root)
     ensure_dir(run_root / "manifests")
-    
     if args.stage in ("select", "all"):
         stage_select(args, run_root)
     if args.stage in ("difix", "all"):

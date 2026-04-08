@@ -1,0 +1,73 @@
+{
+  "args": {
+    "ply_path": "/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_sparse/Re10k-1_part2_s3po/2026-04-04-00-43-29/point_cloud/final/point_cloud.ply",
+    "pseudo_cache": "/home/bzhang512/my_storage_500G/CV_Project/dataset/Re10k-1/part3_stage1/re10k1__s3po__midpoint__sparse_v1/pseudo_cache",
+    "output_path": "/home/bzhang512/CV_Project/part3_BRPO/test_refine_output/joint_freeze_geom_smoke/refined.ply",
+    "num_iterations": 3,
+    "sh_degree": 0,
+    "target_side": "left",
+    "train_manifest": "/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse/split_manifest.json",
+    "train_rgb_dir": "/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse/rgb",
+    "lambda_real": 1.0,
+    "lambda_pseudo": 1.0,
+    "num_real_views": 2,
+    "num_pseudo_views": 2,
+    "rgb_boundary_threshold": 0.01,
+    "freeze_geometry_for_pseudo": true,
+    "pseudo_trainable_params": "auto",
+    "densify_interval": 100,
+    "densify_from_iter": 500,
+    "densify_until_iter": 15000,
+    "densify_grad_threshold": 0.0002,
+    "densify_stats_source": "real",
+    "disable_densify": true,
+    "min_opacity": 0.005,
+    "late_size_threshold": 20,
+    "seed": 0
+  },
+  "initial_gaussians": 35639,
+  "final_gaussians": 35639,
+  "num_real_viewpoints_loaded": 9,
+  "num_pseudo_viewpoints_loaded": 8,
+  "resolved_train_rgb_dir": "/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse/rgb",
+  "pseudo_trainable_params": [
+    "f_dc",
+    "f_rest",
+    "opacity"
+  ],
+  "pseudo_frozen_params": [
+    "rotation",
+    "scaling",
+    "xyz"
+  ],
+  "iterations": [
+    1,
+    2,
+    3
+  ],
+  "loss_total": [
+    0.3926137015223503,
+    0.39379094541072845,
+    0.38519712164998055
+  ],
+  "loss_real": [
+    0.09824129939079285,
+    0.08838469535112381,
+    0.08108684420585632
+  ],
+  "loss_pseudo": [
+    0.04104217141866684,
+    0.052434660494327545,
+    0.0514896996319294
+  ],
+  "loss_reg": [
+    0.2533302307128906,
+    0.2529715895652771,
+    0.2526205778121948
+  ],
+  "gaussian_count": [
+    35639,
+    35639,
+    35639
+  ]
+}

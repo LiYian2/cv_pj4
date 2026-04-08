@@ -1,0 +1,280 @@
+#!/usr/bin/env python3
+"""
+Part3 Stage1: Pseudo refinement for S3PO Gaussians.
+
+MODIFIED: 2026-04-07
+- Unified loss: uses slam_utils.get_loss_pseudo (confidence-weighted RGB only)
+- Added densify/prune (A2 fix) for adaptive Gaussian density
+
+Usage:
+    python run_pseudo_refinement.py \
+        --ply_path path/to/point_cloud.ply \
+        --pseudo_cache path/to/pseudo_cache \
+        --output_path path/to/refined.ply \
+        --num_iterations 3000 \
+        --sh_degree 0
+"""
+import argparse
+import json
+import sys
+import torch
+import numpy as np
+from pathlib import Path
+from PIL import Image
+from tqdm import tqdm
+from types import SimpleNamespace
+
+# S3PO-GS paths
+S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
+sys.path.insert(0, S3PO_ROOT)
+sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
+
+# Import unified loss function from slam_utils
+from utils.slam_utils import get_loss_pseudo
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--ply_path", required=True)
+    p.add_argument("--pseudo_cache", required=True)
+    p.add_argument("--output_path", required=True)
+    p.add_argument("--num_iterations", type=int, default=3000)
+    p.add_argument("--sh_degree", type=int, default=0, help="SH degree of the PLY (0=only DC, 3=full SH)")
+    p.add_argument("--use_left", action="store_true", default=True)
+    p.add_argument("--use_right", action="store_true")
+    p.add_argument("--lambda_pseudo", type=float, default=1.0)
+    p.add_argument("--densify_interval", type=int, default=100)
+    p.add_argument("--densify_from_iter", type=int, default=500)
+    p.add_argument("--densify_until_iter", type=int, default=15000)
+    return p.parse_args()
+
+
+def create_viewpoint(camera):
+    pose_c2w = np.array(camera["pose_c2w"])
+    intr = camera.get("intrinsics_px", {})
+    img_size = camera.get("image_size", {"width": 512, "height": 512})
+    
+    # c2w -> w2c
+    pose_w2c = np.linalg.inv(pose_c2w)
+    R = pose_w2c[:3, :3]  # w2c rotation (NO transpose!)
+    T = pose_w2c[:3, 3]   # w2c translation
+    
+    fx = intr.get("fx", 500)
+    fy = intr.get("fy", fx)
+    W = img_size.get("width", 512)
+    H = img_size.get("height", 512)
+    cx = intr.get("cx", W / 2)
+    cy = intr.get("cy", H / 2)
+    
+    FoVx = 2 * np.arctan(W / (2 * fx))
+    FoVy = 2 * np.arctan(H / (2 * fy))
+    
+    from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
+    
+    R_tensor = torch.from_numpy(R).float().cuda()
+    T_tensor = torch.from_numpy(T).float().cuda()
+    
+    world_view_transform = getWorld2View2(R_tensor, T_tensor).transpose(0, 1)
+    projection_matrix = getProjectionMatrix2(
+        znear=0.01, zfar=100.0, cx=cx, cy=cy, fx=fx, fy=fy, W=W, H=H
+    ).transpose(0, 1).cuda()
+    full_proj_transform = world_view_transform.unsqueeze(0).bmm(
+        projection_matrix.unsqueeze(0)
+    ).squeeze(0)
+    camera_center = world_view_transform.inverse()[3, :3]
+    
+    class Viewpoint:
+        def __init__(self):
+            self.R = R_tensor
+            self.T = T_tensor
+            self.FoVx = FoVx
+            self.FoVy = FoVy
+            self.image_height = H
+            self.image_width = W
+            self.original_image = torch.zeros(3, H, W).cuda()
+            self.exposure_a = torch.tensor(0.0).cuda()
+            self.exposure_b = torch.tensor(0.0).cuda()
+            self.world_view_transform = world_view_transform
+            self.projection_matrix = projection_matrix
+            self.full_proj_transform = full_proj_transform
+            self.camera_center = camera_center
+            self.cam_rot_delta = torch.zeros(3, device="cuda")
+            self.cam_trans_delta = torch.zeros(3, device="cuda")
+            self.fx = fx
+            self.fy = fy
+            self.cx = cx
+            self.cy = cy
+    
+    return Viewpoint()
+
+
+def main():
+    args = parse_args()
+    
+    print(f"[Part3 Stage1] Loading PLY: {args.ply_path}")
+    
+    from scene.gaussian_model import GaussianModel
+    from gaussian_renderer import render
+    
+    pipeline_params = SimpleNamespace(
+        compute_cov3D_python=False,
+        convert_SHs_python=False,
+        debug=False
+    )
+    
+    opt_params = SimpleNamespace(
+        percent_dense=0.01,
+        position_lr_init=0.00016,
+        position_lr_final=0.0000016,
+        position_lr_delay_mult=0.01,
+        position_lr_max_steps=30000,
+        feature_lr=0.0025,
+        opacity_lr=0.05,
+        scaling_lr=0.001,
+        rotation_lr=0.001,
+        densify_grad_threshold=0.0002,
+    )
+    
+    # Load Gaussians
+    gaussians = GaussianModel(sh_degree=args.sh_degree)
+    gaussians.load_ply(args.ply_path)
+    print(f"  Loaded {len(gaussians.get_xyz)} Gaussians (sh_degree={args.sh_degree})")
+    
+    # Setup optimizer
+    gaussians.init_lr(1.0)
+    gaussians.training_setup(opt_params)
+    
+    # Initialize densification buffers (required for densify_and_prune)
+    if gaussians.xyz_gradient_accum.shape[0] != len(gaussians.get_xyz):
+        gaussians.xyz_gradient_accum = torch.zeros((len(gaussians.get_xyz), 1), device="cuda")
+        gaussians.denom = torch.zeros((len(gaussians.get_xyz), 1), device="cuda")
+    if gaussians.max_radii2D.shape[0] != len(gaussians.get_xyz):
+        gaussians.max_radii2D = torch.zeros(len(gaussians.get_xyz), device="cuda")
+    
+    # Load pseudo cache
+    pseudo_cache_path = Path(args.pseudo_cache)
+    manifest = json.load(open(pseudo_cache_path / "manifest.json"))
+    
+    use_left = not args.use_right
+    target_name = "target_rgb_left.png" if use_left else "target_rgb_right.png"
+    
+    viewpoints = []
+    for sid in manifest["sample_ids"]:
+        sd = pseudo_cache_path / "samples" / str(sid)
+        
+        cam = json.load(open(sd / "camera.json"))
+        rgb = np.array(Image.open(sd / target_name)).astype(np.float32) / 255.0
+        depth = np.load(sd / "target_depth.npy")
+        conf = np.load(sd / "confidence_mask.npy") if (sd / "confidence_mask.npy").exists() else (depth > 0).astype(np.float32)
+        
+        viewpoints.append({
+            "vp": create_viewpoint(cam),
+            "rgb": rgb,
+            "depth": depth,
+            "conf": conf,
+        })
+    
+    print(f"  {len(viewpoints)} pseudo viewpoints")
+    
+    # Compute scene extent for densify/prune
+    cam_centers = torch.stack([v["vp"].camera_center for v in viewpoints])
+    center = cam_centers.mean(dim=0)
+    cameras_extent = (cam_centers - center).norm(dim=1).max().item() * 1.1
+    print(f"  Scene extent: {cameras_extent:.3f}")
+    
+    # Build config dict for get_loss_pseudo
+    config = {
+        "Training": {
+            "lambda_pseudo": args.lambda_pseudo,
+        }
+    }
+    
+    bg = torch.zeros(3, device="cuda")
+    
+    # Optimization loop with densify/prune
+    loss_history = []
+    gaussian_count_history = []
+    
+    for i in tqdm(range(1, args.num_iterations + 1), desc="Pseudo refinement"):
+        loss = 0
+        viewspace_points_acm = []
+        visibility_filter_acm = []
+        radii_acm = []
+        
+        # Sample viewpoints
+        num_to_sample = min(4, len(viewpoints))
+        indices = np.random.choice(len(viewpoints), num_to_sample, replace=False)
+        
+        for v in indices:
+            pv = viewpoints[v]
+            pkg = render(pv["vp"], gaussians, pipeline_params, bg)
+            
+            # Use unified loss function (confidence-weighted RGB only)
+            loss += get_loss_pseudo(
+                config, pkg["render"], pkg["depth"],
+                pv["rgb"], pv["depth"], pv["conf"]
+            )
+            
+            viewspace_points_acm.append(pkg["viewspace_points"])
+            visibility_filter_acm.append(pkg["visibility_filter"])
+            radii_acm.append(pkg["radii"])
+        
+        # Isotropic regularization
+        scaling = gaussians.get_scaling
+        isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).unsqueeze(1))
+        loss += 10 * isotropic_loss.mean()
+        
+        loss.backward()
+        
+        with torch.no_grad():
+            # Collect densification statistics
+            for idx in range(len(viewspace_points_acm)):
+                gaussians.add_densification_stats(
+                    viewspace_points_acm[idx],
+                    visibility_filter_acm[idx]
+                )
+                gaussians.max_radii2D[visibility_filter_acm[idx]] = torch.max(
+                    gaussians.max_radii2D[visibility_filter_acm[idx]],
+                    radii_acm[idx][visibility_filter_acm[idx]]
+                )
+            
+            # Densify/prune periodically
+            if i > args.densify_from_iter and i < args.densify_until_iter and i % args.densify_interval == 0:
+                size_threshold = 20 if i > 3000 else None
+                gaussians.densify_and_prune(
+                    args.densify_grad_threshold if hasattr(args, 'densify_grad_threshold') else 0.0002,
+                    0.005,
+                    cameras_extent,
+                    size_threshold
+                )
+                print(f"  iter {i}: densify/prune done, Gaussians={len(gaussians.get_xyz)}")
+            
+            gaussians.optimizer.step()
+            gaussians.optimizer.zero_grad(set_to_none=True)
+        
+        loss_val = loss.item()
+        loss_history.append(loss_val)
+        gaussian_count_history.append(len(gaussians.get_xyz))
+        
+        if i % 500 == 0 or i == 1:
+            print(f"  iter {i}: loss={loss_val:.4f}, Gaussians={len(gaussians.get_xyz)}")
+    
+    # Save refined Gaussians
+    Path(args.output_path).parent.mkdir(parents=True, exist_ok=True)
+    gaussians.save_ply(args.output_path)
+    print(f"[Part3 Stage1] Saved: {args.output_path}")
+    print(f"  Final Gaussians: {len(gaussians.get_xyz)} (initial: {gaussian_count_history[0]})")
+    
+    # Save history
+    history_path = Path(args.output_path).parent / "refinement_history.json"
+    with open(history_path, "w") as f:
+        json.dump({
+            "iterations": list(range(1, len(loss_history) + 1)),
+            "loss": loss_history,
+            "gaussian_count": gaussian_count_history,
+        }, f, indent=2)
+    print(f"  History saved: {history_path}")
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,475 @@
+#!/usr/bin/env python3
+"""
+Part3 Stage1: Pseudo refinement for S3PO Gaussians.
+
+2026-04-08 update:
+- Add joint refinement: real sparse train views + pseudo views
+- Add densify stats source switch: pseudo | real | mixed
+- Keep backward compatibility: if no real-train inputs are provided, falls back to pseudo-only refine
+- Keep pseudo loss as confidence-weighted RGB-only via slam_utils.get_loss_pseudo
+"""
+
+import argparse
+import json
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+import numpy as np
+import torch
+from PIL import Image
+from scipy.spatial.transform import Rotation as SciRot
+from tqdm import tqdm
+
+# S3PO-GS paths
+S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
+sys.path.insert(0, S3PO_ROOT)
+sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
+
+from utils.slam_utils import get_loss_mapping_rgb, get_loss_pseudo
+
+
+def parse_args():
+    p = argparse.ArgumentParser()
+    p.add_argument("--ply_path", required=True)
+    p.add_argument("--pseudo_cache", required=True)
+    p.add_argument("--output_path", required=True)
+    p.add_argument("--num_iterations", type=int, default=3000)
+    p.add_argument("--sh_degree", type=int, default=0, help="SH degree of the PLY (0=only DC, 3=full SH)")
+
+    # Pseudo target selection (keep compatibility with old CLI)
+    p.add_argument("--use_left", dest="target_side", action="store_const", const="left", default="left")
+    p.add_argument("--use_right", dest="target_side", action="store_const", const="right")
+
+    # Joint refine inputs
+    p.add_argument("--train_manifest", default=None, help="split_manifest.json for sparse train views")
+    p.add_argument("--train_rgb_dir", default=None, help="RGB dir for sparse train views; defaults to manifest files.rgb")
+    p.add_argument("--lambda_real", type=float, default=1.0)
+    p.add_argument("--lambda_pseudo", type=float, default=1.0)
+    p.add_argument("--num_real_views", type=int, default=2)
+    p.add_argument("--num_pseudo_views", type=int, default=4)
+    p.add_argument("--rgb_boundary_threshold", type=float, default=0.01)
+
+    # Densify / prune
+    p.add_argument("--densify_interval", type=int, default=100)
+    p.add_argument("--densify_from_iter", type=int, default=500)
+    p.add_argument("--densify_until_iter", type=int, default=15000)
+    p.add_argument("--densify_grad_threshold", type=float, default=0.0002)
+    p.add_argument("--densify_stats_source", choices=["pseudo", "real", "mixed"], default="mixed")
+    p.add_argument("--disable_densify", action="store_true")
+    p.add_argument("--min_opacity", type=float, default=0.005)
+    p.add_argument("--late_size_threshold", type=int, default=20)
+
+    p.add_argument("--seed", type=int, default=0)
+    return p.parse_args()
+
+
+def load_json(path):
+    with open(path, "r") as f:
+        return json.load(f)
+
+
+def load_image_rgb(path: Path) -> np.ndarray:
+    return np.asarray(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
+
+
+def parse_frame_id_from_image_name(image_name: str):
+    stem = Path(image_name).stem
+    if stem.startswith("frame_"):
+        tail = stem.split("_")[-1]
+        if tail.isdigit():
+            return int(tail) - 1
+    if stem.isdigit():
+        return int(stem)
+    return None
+
+
+def quat_xyzw_to_rot(quat_xyzw):
+    quat_xyzw = np.asarray(quat_xyzw, dtype=np.float64)
+    return SciRot.from_quat(quat_xyzw).as_matrix()
+
+
+def camera_entry_to_c2w(entry: dict, init_trans: np.ndarray) -> np.ndarray:
+    quat = entry.get("cam_quat", [0.0, 0.0, 0.0, 1.0])
+    trans = np.asarray(entry.get("cam_trans", [0.0, 0.0, 0.0]), dtype=np.float64)
+    rot = quat_xyzw_to_rot(quat)
+    T = np.eye(4, dtype=np.float64)
+    T[:3, :3] = rot
+    T[:3, 3] = trans - init_trans
+    return T
+
+
+# [train] prefer manifest intrinsics_px.json; fall back to cameras.json if needed.
+def load_train_intrinsics(split_root: Path, manifest: dict, cameras: list) -> dict:
+    files = manifest.get("files", {})
+    intr_rel = files.get("intrinsics_px")
+    if intr_rel:
+        intr_path = split_root / intr_rel
+        if intr_path.exists():
+            intr = load_json(intr_path)
+            return {
+                "fx": float(intr["fx"]),
+                "fy": float(intr["fy"]),
+                "cx": float(intr["cx"]),
+                "cy": float(intr["cy"]),
+            }
+
+    if not cameras:
+        raise RuntimeError("No cameras available to infer train intrinsics")
+
+    c = cameras[0]
+    width = int(manifest.get("width", 512))
+    height = int(manifest.get("height", 512))
+    fx = float(c.get("fx", 0.0))
+    fy = float(c.get("fy", 0.0))
+    cx = float(c.get("cx", 0.0))
+    cy = float(c.get("cy", 0.0))
+    normalized = fx <= 2.0 and fy <= 2.0 and cx <= 2.0 and cy <= 2.0
+    if normalized:
+        fx *= width
+        fy *= height
+        cx *= width
+        cy *= height
+    return {"fx": fx, "fy": fy, "cx": cx, "cy": cy}
+
+
+def create_viewpoint(camera: dict, rgb: np.ndarray, uid: int = -1, device: str = "cuda"):
+    pose_c2w = np.array(camera["pose_c2w"], dtype=np.float32)
+    intr = camera.get("intrinsics_px", {})
+    img_size = camera.get("image_size", {"width": rgb.shape[1], "height": rgb.shape[0]})
+
+    pose_w2c = np.linalg.inv(pose_c2w)
+    R = pose_w2c[:3, :3]
+    T = pose_w2c[:3, 3]
+
+    fx = float(intr.get("fx", 500.0))
+    fy = float(intr.get("fy", fx))
+    W = int(img_size.get("width", rgb.shape[1]))
+    H = int(img_size.get("height", rgb.shape[0]))
+    cx = float(intr.get("cx", W / 2))
+    cy = float(intr.get("cy", H / 2))
+
+    FoVx = 2 * np.arctan(W / (2 * fx))
+    FoVy = 2 * np.arctan(H / (2 * fy))
+
+    from gaussian_splatting.utils.graphics_utils import getProjectionMatrix2, getWorld2View2
+
+    R_tensor = torch.from_numpy(R).float().to(device)
+    T_tensor = torch.from_numpy(T).float().to(device)
+
+    world_view_transform = getWorld2View2(R_tensor, T_tensor).transpose(0, 1)
+    projection_matrix = getProjectionMatrix2(
+        znear=0.01, zfar=100.0, cx=cx, cy=cy, fx=fx, fy=fy, W=W, H=H
+    ).transpose(0, 1).to(device)
+    full_proj_transform = world_view_transform.unsqueeze(0).bmm(
+        projection_matrix.unsqueeze(0)
+    ).squeeze(0)
+    camera_center = world_view_transform.inverse()[3, :3]
+
+    rgb_tensor = torch.from_numpy(rgb).permute(2, 0, 1).float().to(device)
+
+    vp = SimpleNamespace()
+    vp.uid = uid
+    vp.R = R_tensor
+    vp.T = T_tensor
+    vp.FoVx = FoVx
+    vp.FoVy = FoVy
+    vp.image_height = H
+    vp.image_width = W
+    vp.original_image = rgb_tensor
+    vp.exposure_a = torch.tensor(0.0, device=device)
+    vp.exposure_b = torch.tensor(0.0, device=device)
+    vp.world_view_transform = world_view_transform
+    vp.projection_matrix = projection_matrix
+    vp.full_proj_transform = full_proj_transform
+    vp.camera_center = camera_center
+    vp.cam_rot_delta = torch.zeros(3, device=device)
+    vp.cam_trans_delta = torch.zeros(3, device=device)
+    vp.fx = fx
+    vp.fy = fy
+    vp.cx = cx
+    vp.cy = cy
+    return vp
+
+
+def resolve_train_rgb_dir(split_root: Path, manifest: dict, train_rgb_dir: str | None) -> Path:
+    if train_rgb_dir:
+        return Path(train_rgb_dir)
+    files = manifest.get("files", {})
+    rgb_rel = files.get("rgb")
+    if rgb_rel is None:
+        raise RuntimeError("split manifest has no files.rgb entry; please pass --train_rgb_dir")
+    return split_root / rgb_rel
+
+
+def resolve_train_rgb_path(train_rgb_dir: Path, image_name: str, frame_id) -> Path:
+    candidates = []
+    if image_name:
+        candidates.append(train_rgb_dir / image_name)
+    if frame_id is not None:
+        candidates.append(train_rgb_dir / f"{frame_id:05d}.png")
+        candidates.append(train_rgb_dir / f"{frame_id:06d}.png")
+        candidates.append(train_rgb_dir / f"frame_{frame_id + 1:05d}.png")
+    for p in candidates:
+        if p.exists():
+            return p
+    raise FileNotFoundError(f"Cannot resolve train RGB under {train_rgb_dir} for image_name={image_name}, frame_id={frame_id}")
+
+
+def load_real_viewpoints(train_manifest_path: str, train_rgb_dir: str | None):
+    train_manifest_path = Path(train_manifest_path)
+    split_root = train_manifest_path.parent
+    manifest = load_json(train_manifest_path)
+    cameras_path = split_root / manifest["files"]["cameras"]
+    cameras = load_json(cameras_path)
+    if not cameras:
+        raise RuntimeError(f"No camera entries in {cameras_path}")
+
+    intr = load_train_intrinsics(split_root, manifest, cameras)
+    train_rgb_dir = resolve_train_rgb_dir(split_root, manifest, train_rgb_dir)
+    init_trans = np.asarray(cameras[0].get("cam_trans", [0.0, 0.0, 0.0]), dtype=np.float64)
+
+    views = []
+    for idx, entry in enumerate(cameras):
+        image_name = entry.get("image_name", "")
+        frame_id = parse_frame_id_from_image_name(image_name)
+        if frame_id is None:
+            selected = manifest.get("selected_indices", [])
+            frame_id = int(selected[idx]) if idx < len(selected) else idx
+        rgb_path = resolve_train_rgb_path(train_rgb_dir, image_name, frame_id)
+        rgb = load_image_rgb(rgb_path)
+        H, W = rgb.shape[:2]
+        cam = {
+            "pose_c2w": camera_entry_to_c2w(entry, init_trans).tolist(),
+            "intrinsics_px": intr,
+            "image_size": {"width": W, "height": H},
+        }
+        views.append({
+            "kind": "real",
+            "frame_id": int(frame_id),
+            "rgb_path": str(rgb_path),
+            "vp": create_viewpoint(cam, rgb, uid=int(frame_id)),
+        })
+    return views, str(train_rgb_dir)
+
+
+def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str):
+    pseudo_cache_path = Path(pseudo_cache_path)
+    manifest = load_json(pseudo_cache_path / "manifest.json")
+    target_name = "target_rgb_left.png" if target_side == "left" else "target_rgb_right.png"
+
+    views = []
+    for sid in manifest["sample_ids"]:
+        sd = pseudo_cache_path / "samples" / str(sid)
+        cam = load_json(sd / "camera.json")
+        rgb = load_image_rgb(sd / target_name)
+        depth = np.load(sd / "target_depth.npy")
+        conf_path = sd / "confidence_mask.npy"
+        conf = np.load(conf_path) if conf_path.exists() else (depth > 0).astype(np.float32)
+        views.append({
+            "kind": "pseudo",
+            "sample_id": int(sid),
+            "frame_id": int(cam.get("frame_id", sid)),
+            "vp": create_viewpoint(cam, rgb, uid=int(sid)),
+            "rgb": rgb,
+            "depth": depth.astype(np.float32),
+            "conf": conf.astype(np.float32),
+        })
+    return views
+
+
+def sample_indices(n_total: int, n_sample: int, rng: np.random.Generator):
+    n_sample = max(0, min(n_total, n_sample))
+    if n_sample == 0:
+        return []
+    return rng.choice(n_total, n_sample, replace=False).tolist()
+
+
+def main():
+    args = parse_args()
+    rng = np.random.default_rng(args.seed)
+
+    print(f"[Part3 Stage1] Loading PLY: {args.ply_path}")
+
+    from scene.gaussian_model import GaussianModel
+    from gaussian_renderer import render
+
+    pipeline_params = SimpleNamespace(
+        compute_cov3D_python=False,
+        convert_SHs_python=False,
+        debug=False,
+    )
+
+    opt_params = SimpleNamespace(
+        percent_dense=0.01,
+        position_lr_init=0.00016,
+        position_lr_final=0.0000016,
+        position_lr_delay_mult=0.01,
+        position_lr_max_steps=30000,
+        feature_lr=0.0025,
+        opacity_lr=0.05,
+        scaling_lr=0.001,
+        rotation_lr=0.001,
+        densify_grad_threshold=args.densify_grad_threshold,
+    )
+
+    gaussians = GaussianModel(sh_degree=args.sh_degree)
+    gaussians.load_ply(args.ply_path)
+    initial_gaussians = len(gaussians.get_xyz)
+    print(f"  Loaded {initial_gaussians} Gaussians (sh_degree={args.sh_degree})")
+
+    gaussians.init_lr(1.0)
+    gaussians.training_setup(opt_params)
+
+    if gaussians.xyz_gradient_accum.shape[0] != len(gaussians.get_xyz):
+        gaussians.xyz_gradient_accum = torch.zeros((len(gaussians.get_xyz), 1), device="cuda")
+        gaussians.denom = torch.zeros((len(gaussians.get_xyz), 1), device="cuda")
+    if gaussians.max_radii2D.shape[0] != len(gaussians.get_xyz):
+        gaussians.max_radii2D = torch.zeros(len(gaussians.get_xyz), device="cuda")
+
+    pseudo_views = load_pseudo_viewpoints(args.pseudo_cache, args.target_side)
+    if not pseudo_views:
+        raise RuntimeError(f"No pseudo viewpoints found under {args.pseudo_cache}")
+    print(f"  Loaded {len(pseudo_views)} pseudo viewpoints (target_side={args.target_side})")
+
+    real_views = []
+    resolved_train_rgb_dir = None
+    if args.train_manifest:
+        real_views, resolved_train_rgb_dir = load_real_viewpoints(args.train_manifest, args.train_rgb_dir)
+        print(f"  Loaded {len(real_views)} real sparse-train viewpoints from {args.train_manifest}")
+
+    if args.lambda_real > 0 and args.train_manifest and not real_views:
+        raise RuntimeError("--train_manifest was given but no real viewpoints were loaded")
+
+    all_camera_centers = [v["vp"].camera_center for v in pseudo_views]
+    all_camera_centers.extend(v["vp"].camera_center for v in real_views)
+    cam_centers = torch.stack(all_camera_centers)
+    center = cam_centers.mean(dim=0)
+    cameras_extent = (cam_centers - center).norm(dim=1).max().item() * 1.1
+    print(f"  Scene extent: {cameras_extent:.3f}")
+
+    config = {
+        "Training": {
+            "lambda_pseudo": 1.0,
+            "rgb_boundary_threshold": args.rgb_boundary_threshold,
+            "monocular": False,
+        }
+    }
+    bg = torch.zeros(3, device="cuda")
+
+    loss_history = []
+    real_loss_history = []
+    pseudo_loss_history = []
+    reg_loss_history = []
+    gaussian_count_history = []
+
+    for i in tqdm(range(1, args.num_iterations + 1), desc="Joint pseudo refinement"):
+        total_loss = torch.zeros((), device="cuda")
+        densify_records = []
+        real_loss_tensor = torch.zeros((), device="cuda")
+        pseudo_loss_tensor = torch.zeros((), device="cuda")
+
+        real_indices = []
+        if real_views and args.num_real_views > 0 and args.lambda_real > 0:
+            real_indices = sample_indices(len(real_views), args.num_real_views, rng)
+            real_losses = []
+            for ridx in real_indices:
+                rv = real_views[ridx]
+                pkg = render(rv["vp"], gaussians, pipeline_params, bg)
+                real_losses.append(get_loss_mapping_rgb(config, pkg["render"], rv["vp"]))
+                if args.densify_stats_source in ("real", "mixed"):
+                    densify_records.append((pkg["viewspace_points"], pkg["visibility_filter"], pkg["radii"]))
+            real_loss_tensor = torch.stack(real_losses).mean()
+            total_loss = total_loss + args.lambda_real * real_loss_tensor
+
+        pseudo_indices = sample_indices(len(pseudo_views), args.num_pseudo_views, rng)
+        if not pseudo_indices:
+            raise RuntimeError("No pseudo viewpoints sampled; please check --num_pseudo_views")
+        pseudo_losses = []
+        for pidx in pseudo_indices:
+            pv = pseudo_views[pidx]
+            pkg = render(pv["vp"], gaussians, pipeline_params, bg)
+            pseudo_losses.append(
+                get_loss_pseudo(config, pkg["render"], pkg["depth"], pv["rgb"], pv["depth"], pv["conf"])
+            )
+            if args.densify_stats_source in ("pseudo", "mixed"):
+                densify_records.append((pkg["viewspace_points"], pkg["visibility_filter"], pkg["radii"]))
+        pseudo_loss_tensor = torch.stack(pseudo_losses).mean()
+        total_loss = total_loss + args.lambda_pseudo * pseudo_loss_tensor
+
+        scaling = gaussians.get_scaling
+        reg_loss = 10.0 * torch.abs(scaling - scaling.mean(dim=1, keepdim=True)).mean()
+        total_loss = total_loss + reg_loss
+
+        total_loss.backward()
+
+        with torch.no_grad():
+            for viewspace_points, visibility_filter, radii in densify_records:
+                gaussians.add_densification_stats(viewspace_points, visibility_filter)
+                gaussians.max_radii2D[visibility_filter] = torch.max(
+                    gaussians.max_radii2D[visibility_filter],
+                    radii[visibility_filter],
+                )
+
+            if (
+                not args.disable_densify
+                and i > args.densify_from_iter
+                and i < args.densify_until_iter
+                and i % args.densify_interval == 0
+            ):
+                size_threshold = args.late_size_threshold if i > 3000 else None
+                gaussians.densify_and_prune(
+                    args.densify_grad_threshold,
+                    args.min_opacity,
+                    cameras_extent,
+                    size_threshold,
+                )
+                print(f"  iter {i}: densify/prune done, Gaussians={len(gaussians.get_xyz)}")
+
+            gaussians.optimizer.step()
+            gaussians.optimizer.zero_grad(set_to_none=True)
+
+        loss_history.append(float(total_loss.item()))
+        real_loss_history.append(float(real_loss_tensor.item()))
+        pseudo_loss_history.append(float(pseudo_loss_tensor.item()))
+        reg_loss_history.append(float(reg_loss.item()))
+        gaussian_count_history.append(len(gaussians.get_xyz))
+
+        if i % 200 == 0 or i == 1:
+            print(
+                f"  iter {i}: total={loss_history[-1]:.4f}, real={real_loss_history[-1]:.4f}, "
+                f"pseudo={pseudo_loss_history[-1]:.4f}, reg={reg_loss_history[-1]:.4f}, "
+                f"Gaussians={gaussian_count_history[-1]}"
+            )
+
+    output_path = Path(args.output_path)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    gaussians.save_ply(str(output_path))
+    print(f"[Part3 Stage1] Saved: {output_path}")
+    print(f"  Final Gaussians: {len(gaussians.get_xyz)} (initial: {initial_gaussians})")
+
+    history_path = output_path.parent / "refinement_history.json"
+    with open(history_path, "w") as f:
+        json.dump(
+            {
+                "args": vars(args),
+                "initial_gaussians": initial_gaussians,
+                "final_gaussians": len(gaussians.get_xyz),
+                "num_real_viewpoints_loaded": len(real_views),
+                "num_pseudo_viewpoints_loaded": len(pseudo_views),
+                "resolved_train_rgb_dir": resolved_train_rgb_dir,
+                "iterations": list(range(1, len(loss_history) + 1)),
+                "loss_total": loss_history,
+                "loss_real": real_loss_history,
+                "loss_pseudo": pseudo_loss_history,
+                "loss_reg": reg_loss_history,
+                "gaussian_count": gaussian_count_history,
+            },
+            f,
+            indent=2,
+        )
+    print(f"  History saved: {history_path}")
+
+
+if __name__ == "__main__":
+    main()
