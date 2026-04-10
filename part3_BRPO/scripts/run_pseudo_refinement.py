@@ -66,9 +66,12 @@ def parse_args():
     p.add_argument("--num_iterations", type=int, default=3000)
     p.add_argument("--sh_degree", type=int, default=0, help="SH degree of the PLY (0=only DC, 3=full SH)")
 
-    # Pseudo target selection (keep compatibility with old CLI)
-    p.add_argument("--use_left", dest="target_side", action="store_const", const="left", default="left")
-    p.add_argument("--use_right", dest="target_side", action="store_const", const="right")
+    # Pseudo target selection
+    p.add_argument("--target_side", choices=["left", "right", "fused"], default="left",
+                   help="Which pseudo target to use: left, right, or fused")
+    # Backward compatibility
+    p.add_argument("--use_left", dest="target_side", action="store_const", const="left", help=argparse.SUPPRESS)
+    p.add_argument("--use_right", dest="target_side", action="store_const", const="right", help=argparse.SUPPRESS)
 
     # Joint refine inputs
     p.add_argument("--train_manifest", default=None, help="split_manifest.json for sparse train views")
@@ -333,16 +336,44 @@ def load_real_viewpoints(train_manifest_path: str, train_rgb_dir: str | None):
 def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str):
     pseudo_cache_path = Path(pseudo_cache_path)
     manifest = load_json(pseudo_cache_path / "manifest.json")
-    target_name = "target_rgb_left.png" if target_side == "left" else "target_rgb_right.png"
+    
+    # Determine target RGB filename and confidence mask based on target_side
+    if target_side == "fused":
+        target_name = "target_rgb_fused.png"
+        conf_name = "confidence_mask_fused.npy"
+    elif target_side == "right":
+        target_name = "target_rgb_right.png"
+        conf_name = "confidence_mask.npy"
+    else:  # left (default)
+        target_name = "target_rgb_left.png"
+        conf_name = "confidence_mask.npy"
 
     views = []
     for sid in manifest["sample_ids"]:
         sd = pseudo_cache_path / "samples" / str(sid)
         cam = load_json(sd / "camera.json")
-        rgb = load_image_rgb(sd / target_name)
+        
+        # Check target RGB exists
+        target_rgb_path = sd / target_name
+        if not target_rgb_path.exists():
+            raise FileNotFoundError(f"Missing {target_name} for sample {sid} (target_side={target_side})")
+        
+        rgb = load_image_rgb(target_rgb_path)
         depth = np.load(sd / "target_depth.npy")
-        conf_path = sd / "confidence_mask.npy"
-        conf = np.load(conf_path) if conf_path.exists() else (depth > 0).astype(np.float32)
+        
+        # Load confidence mask
+        if target_side == "fused":
+            conf_path = sd / conf_name
+            if not conf_path.exists():
+                raise FileNotFoundError(
+                    f"Missing {conf_name} for sample {sid} with target_side=fused. "
+                    f"Run build_pseudo_cache.py with fusion enabled first."
+                )
+            conf = np.load(conf_path)
+        else:
+            conf_path = sd / conf_name
+            conf = np.load(conf_path) if conf_path.exists() else (depth > 0).astype(np.float32)
+        
         views.append({
             "kind": "pseudo",
             "sample_id": int(sid),
@@ -562,10 +593,12 @@ def main():
         json.dump(
             {
                 "args": vars(args),
+                "target_side": args.target_side,
                 "initial_gaussians": initial_gaussians,
                 "final_gaussians": len(gaussians.get_xyz),
                 "num_real_viewpoints_loaded": len(real_views),
                 "num_pseudo_viewpoints_loaded": len(pseudo_views),
+                "num_fused_samples_used": len(pseudo_views) if args.target_side == "fused" else 0,
                 "resolved_train_rgb_dir": resolved_train_rgb_dir,
                 "pseudo_trainable_params": sorted(pseudo_trainable_params),
                 "pseudo_frozen_params": sorted(pseudo_frozen_params),

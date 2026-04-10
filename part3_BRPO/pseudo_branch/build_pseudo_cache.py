@@ -265,6 +265,35 @@ def build_sample_edp(sample_dir, sparse_rgb_dir, scene_name, flow_matcher, dry_r
     
     if not dry_run:
         write_full_diag(sample_dir, target_depth, confidence, render_depth, stats, diag_extra)
+        
+        # --- Fusion step ---
+        np.save(sample_dir / "depth_left.npy", depth_left)
+        np.save(sample_dir / "conf_left.npy", conf_left)
+        np.save(sample_dir / "depth_right.npy", depth_right)
+        np.save(sample_dir / "conf_right.npy", conf_right)
+        
+        # RGB fusion
+        from pseudo_fusion import run_fusion_for_sample, get_fusion_diag_images
+        target_rgb_left_path = sample_dir / "target_rgb_left.png"
+        target_rgb_right_path = sample_dir / "target_rgb_right.png"
+        render_rgb_path = sample_dir / "render_rgb.png"
+        
+        fusion_stats, I_r, I_L, I_R, W_L, W_R, A, C_fused = run_fusion_for_sample(
+            str(render_rgb_path), str(target_rgb_left_path), str(target_rgb_right_path),
+            depth_left, conf_left, depth_right, conf_right, render_depth,
+            str(sample_dir),
+            use_depth_agreement=False
+        )
+        
+        # Fusion diagnostic images
+        diag_dir = sample_dir / "diag"
+        diag_dir.mkdir(exist_ok=True)
+        fusion_diag = get_fusion_diag_images(I_L, I_R, W_L, W_R, A, C_fused, conf_left, conf_right)
+        for name, img in fusion_diag.items():
+            from PIL import Image
+            Image.fromarray(img).save(diag_dir / (name + ".png"))
+        
+        stats["fusion"] = fusion_stats
     
     return stats
 
@@ -315,8 +344,16 @@ def main():
             sid = s["sample_id"]
             s["target_depth_path"] = "samples/" + str(sid) + "/target_depth.npy"
             s["confidence_mask_path"] = "samples/" + str(sid) + "/confidence_mask.npy"
+            s["depth_left_path"] = "samples/" + str(sid) + "/depth_left.npy"
+            s["depth_right_path"] = "samples/" + str(sid) + "/depth_right.npy"
+            s["conf_left_path"] = "samples/" + str(sid) + "/conf_left.npy"
+            s["conf_right_path"] = "samples/" + str(sid) + "/conf_right.npy"
+            s["target_rgb_fused_path"] = "samples/" + str(sid) + "/target_rgb_fused.png"
+            s["confidence_mask_fused_path"] = "samples/" + str(sid) + "/confidence_mask_fused.npy"
+            s["fusion_meta_path"] = "samples/" + str(sid) + "/fusion_meta.json"
         manifest["additional_built"] = True
         manifest["depth_method"] = "edp" if use_edp else "gt_reprojection"
+        manifest["has_fusion"] = True
         with open(manifest_path, "w") as f:
             json.dump(manifest, f, indent=2)
     

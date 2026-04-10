@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-08 21:56
+> 更新时间：2026-04-10 12:18
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -48,43 +48,52 @@
 
 ## 1. 概览
 
-当前 Stage 1 的主目标是：**在 Re10k-1 sparse 上找到“几何更稳 + 感知更好”的 pseudo refine 策略。**
+当前 Stage 1 的核心问题已经从“继续堆 GT 口径分数”切换为：**先判断当前 pseudo refine 到底改善了什么，以及它是否真的在 pose-sensitive / internal protocol 下带来收益。**
 
-当前主线判断（已由 A/B/C/D/E 支撑）：
-- joint refine 是必要的；
-- pseudo 分支默认不应更新几何；
-- densify 统计应优先由 real views 驱动；
-- `lambda_pseudo` 是关键权重，过大容易把 pseudo 偏差写进最终外观。
+当前已经明确：
+- **E policy** 在 `external eval + GT pose` 口径下，能稳定提高固定相机条件下的渲染指标；
+- 但这**还不能直接证明** refine 真正改善了完整 pipeline；
+- 最新 `infer` 口径结果显示，refined PLY 相对 baseline 只有很小变化，说明当前提升很可能主要体现在 **fixed-pose appearance refinement**，而不是 pose-aware refinement。
 
-[参见 DESIGN.md §4]
+因此，当前主线目标应改为：
+- 保留 E 作为 **external GT diagnostic** 下的最强 appearance baseline；
+- 优先建立 **internal cache + replay eval**，验证 refined PLY 在 internal camera protocol 下是否真的优于 baseline；
+- 在协议问题澄清前，不再把 GT 口径结果直接表述为“已验证成功”。
 
+[参见 `0_RENDER_EVAL_PROTOCOL.md` 与 `01_INTERNAL_CACHE.md`]
 ## 2. 数据结构
 
 ### 2.1 当前主用数据
 
-当前最规范、已验证可直接使用的是：**Re10k-1 sparse**。
+当前已完成规范化并跑通正式 E policy 的 sparse 数据有两组：**Re10k-1** 与 **DL3DV-2**。
 
 ```text
-PLY:
-/home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/
-  s3po_re10k-1_sparse/Re10k-1_part2_s3po/2026-04-04-00-43-29/
-  point_cloud/final/point_cloud.ply
+Re10k-1 sparse
+- PLY:
+  /home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/re10k-1/
+    s3po_re10k-1_sparse/Re10k-1_part2_s3po/2026-04-04-00-43-29/
+    point_cloud/final/point_cloud.ply
+- Sparse train manifest:
+  /home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse/split_manifest.json
+- Sparse train RGB:
+  /home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse/rgb/
+- Pseudo cache:
+  /home/bzhang512/my_storage_500G/CV_Project/dataset/Re10k-1/part3_stage1/
+    re10k1__s3po__tertile__sparse_v1/pseudo_cache/
 
-Sparse train manifest:
-/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse/split_manifest.json
-
-Sparse train RGB:
-/home/bzhang512/CV_Project/dataset/Re10k-1/part2_s3po/sparse/rgb/
-
-Pseudo cache:
-/home/bzhang512/my_storage_500G/CV_Project/dataset/Re10k-1/part3_stage1/
-  re10k1__s3po__tertile__sparse_v1/pseudo_cache/
-
-对照 pseudo cache（旧）：
-/home/bzhang512/my_storage_500G/CV_Project/dataset/Re10k-1/part3_stage1/
-  re10k1__s3po__midpoint__sparse_v1/pseudo_cache/
+DL3DV-2 sparse
+- PLY:
+  /home/bzhang512/my_storage_500G/CV_Project/output/part2_s3po/dl3dv-2/
+    s3po_dl3dv-2_sparse/DL3DV-2_part2_s3po/2026-04-04-00-43-38/
+    point_cloud/final/point_cloud.ply
+- Sparse train manifest:
+  /home/bzhang512/CV_Project/dataset/DL3DV-2/part2_s3po/sparse/split_manifest.json
+- Sparse train RGB:
+  /home/bzhang512/CV_Project/dataset/DL3DV-2/part2_s3po/sparse/rgb/
+- Pseudo cache:
+  /home/bzhang512/CV_Project/dataset/DL3DV-2/part3_stage1/
+    dl3dv2__s3po__tertile__sparse_v1/pseudo_cache/
 ```
-
 ### 2.2 Pseudo cache 结构
 
 ```text
@@ -117,15 +126,20 @@ pseudo_cache/
 │   └── D_joint_nodensify_freezegeom_lambda1p0/
 └── 2026-04-08_joint_refine_tertile_freezegeom_lambda0p5/
     └── E_joint_realdensify_freezegeom_lambda0p5_tertile/
-```
 
+/home/bzhang512/my_storage_500G/CV_Project/output/part3_stage1/dl3dv-2/sparse/
+└── 2026-04-09_joint_refine_tertile_freezegeom_lambda0p5/
+    ├── E_joint_realdensify_freezegeom_lambda0p5_tertile/
+    ├── _baseline_sparse_gt/
+    └── summary.json
+```
 ### 2.4 数据状态
 
 | 数据集 | Sparse pseudo cache | Sparse refine formal run | 说明 |
 |--------|---------------------|--------------------------|------|
-| Re10k-1 | ✅ | ✅ | 当前主线，tertile 版本已完成 |
-| DL3DV-2 | ⚠️ 未完成规范化验证 | ❌ | 后续再做 |
-| 405841 | ⚠️ 未完成规范化验证 | ❌ | 后续再做 |
+| Re10k-1 | ✅ | ✅ | external GT diagnostic 已完成；infer/internal 仍待补证 |
+| DL3DV-2 | ✅ | ✅ | external GT diagnostic 已完成；infer/internal 仍待补证 |
+| 405841 | ⚠️ 路线待定 | ❌ | GT-reprojection / EDP 路线仍待明确 |
 
 ## 3. 代码脚本
 
@@ -205,10 +219,17 @@ external_eval/
     └── eval_external_meta.json
 ```
 
-当前同口径正式评估使用：
-- `pose_mode=gt`
+当前评估需要分三层理解：
+- **external GT**：固定准确相机下的渲染诊断；
+- **external infer**：pose-sensitive stress test；
+- **internal protocol**：目标协议，但当前尚未建立 replay 闭环。
+
+因此，当前历史 A/B/C/D/E 主结果虽然都基于同一口径、彼此可比，但它们**只说明 fixed-pose 条件下的 map/render 变化**，还不能单独证明完整 pipeline 变好。
+
+当前 external 评估相关参数：
+- `pose_mode=gt`（历史主结果）
 - `origin_mode=test_to_sparse_first`
-- `infer_init_mode=gt_first`
+- `infer_init_mode=gt_first`（infer stress test 使用）
 
 ### 4.4 指标实现说明（LPIPS）
 
@@ -243,7 +264,7 @@ external_eval/
 - **B**：`lambda_pseudo=1.0 + midpoint pseudo + real densify + freeze-geom`
 - **C**：`lambda_pseudo=0.5 + midpoint pseudo + real densify + freeze-geom`
 - **D**：`lambda_pseudo=1.0 + midpoint pseudo + disable_densify + freeze-geom`
-- **E**：`lambda_pseudo=0.5 + tertile pseudo + real densify + freeze-geom`（当前最佳）
+- **E**：`lambda_pseudo=0.5 + tertile pseudo + real densify + freeze-geom`（当前 **external GT diagnostic** 下最佳）
 
 ## 6. 状态
 
@@ -251,39 +272,65 @@ external_eval/
 
 - [x] Re10k-1 sparse pseudo cache 规范化完成
 - [x] `run_pseudo_refinement.py` joint refine / densify source / pseudo param 控制就绪
-- [x] Re10k-1 sparse 正式 A/B 完成
-- [x] Follow-up C/D（lambda 与 densify 对照）完成
-- [x] tertile pseudo 版本 E 完成
-- [x] 同口径 external eval（GT pose）完成
+- [x] Re10k-1 sparse 正式 A/B/C/D/E 完成
+- [x] DL3DV-2 sparse 单组 E 完成
+- [x] Re10k-1 / DL3DV-2 的 external GT-pose 同口径对照完成
+- [x] Re10k-1 sparse external infer 口径补跑完成
+- [x] internal / external protocol 差异已整理成文档
+- [x] internal cache / replay 路线已有可执行规划
 
-### 6.2 当前最佳已验证配置 ⚠️
+### 6.2 当前最强“诊断口径”配置 ⚠️
 
-当前最佳：**E (`lambda_pseudo=0.5`, freeze-geom, real-densify, tertile pseudo)**
+当前在 **external eval + GT pose** 这一固定相机诊断口径下，最强配置仍是：
+**E (`lambda_pseudo=0.5`, freeze-geom, real-densify, tertile pseudo)**
 
+Re10k-1 sparse：
 - `avg_psnr = 21.7658`
 - `avg_ssim = 0.7879`
 - `avg_lpips = 0.2110`
 - `final_gaussians = 42454`
 
-相对 C（`21.5173 / 0.7797 / 0.2242`）：
-- PSNR +0.25
-- SSIM +0.008
-- LPIPS -0.013
+DL3DV-2 sparse：
+- `avg_psnr = 14.0617`
+- `avg_ssim = 0.4526`
+- `avg_lpips = 0.6893`
+
+**但这一定义必须带协议前缀。** 当前它只能说明：在固定准确相机下，refined PLY 的渲染更接近 GT；它还**不能单独证明** pose-aware 或 internal protocol 下的完整收益。
+
+### 6.3 当前关键未决问题 ⚠️
+
+当前最大的不确定性不是 E 还能不能再调，而是：**我们到底 refine 了什么。**
+
+目前已有证据指向：
+- 当前 refine 更像 **fixed-pose appearance refinement**；
+- 它未必改善 external infer，未必改善 internal tracked-camera protocol。
+
+Re10k-1 sparse 的最新 infer 结果：
+- refined（fused RGB-only）：`PSNR 13.6111 / SSIM 0.5067 / LPIPS 0.4061`
+- baseline sparse infer：`PSNR 13.3265 / SSIM 0.5027 / LPIPS 0.3791`
+- `pose_success_rate = 67.4% (182/270)`
 
 说明：
-- 在保持 C 策略不变的情况下，将 pseudo 从 midpoint 扩展到 tertile 后，三项指标继续同步提升；
-- 但相对 baseline sparse GT（`LPIPS=0.1722`）仍有差距。
+- infer 口径下相对 baseline 只有很小变化；
+- 当前还不能说“refine 真正提升了 end-to-end pipeline”；
+- 之前所有 GT 提升都需要重新解读为：**fixed-pose 条件下 map/render 更优**，而不是自动等价于“位姿/协议也更优”。
 
-### 6.3 进行中 ⚠️
+### 6.4 当前最高优先级进行中 ⚠️
 
-- [ ] 在 E 基础上继续做 `lambda_pseudo=0.25` 对照
-- [ ] 在 E 基础上做 `disable_densify` 交叉对照
-- [ ] 做更细粒度 pseudo 参数子集（`opacity only` / `f_dc+f_rest`）
+- [ ] 在 S3PO 侧导出 **internal cache**（建议 before_opt / after_opt 都能导）
+- [ ] 建立 **replay_internal_eval.py**，用同一组 saved internal camera states 回放 baseline / refined PLY
+- [ ] 回答核心问题：refined PLY 在 internal protocol 下是否真的优于 baseline
 
-### 6.4 待办 ❌
+### 6.5 条件性后续任务 ⏳
 
-- [ ] `render_depth + improved confidence` 路线对照
-- [ ] 加一套 `pose_mode=infer` 的外评口径（与 `pose_mode=gt` 并行报告）
-- [ ] DL3DV-2 sparse 主线规范化与正式实验
-- [ ] 405841 sparse 主线规范化与正式实验
-- [ ] backend 集成（非当前优先级）
+只有当 internal replay 证明 refined PLY 确有收益后，再继续：
+- [ ] internal prepare → pseudo cache → refine 的完整 internal 路线
+- [ ] fused pseudo / lambda / densify 等更细的策略对照
+- [ ] 405841 sparse 路线选择（GT-reprojection vs EDP）
+
+### 6.6 当前不建议优先推进的事项 🚫
+
+在 internal replay 结果出来之前，暂不建议优先：
+- [ ] 单纯继续堆 `external GT` 分数
+- [ ] 直接把 GT 口径结果写成“已验证成功”
+- [ ] 先做 backend 集成式 pseudo refine

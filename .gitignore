@@ -35,6 +35,7 @@ dataset/
 output/
 output_reference/
 plots/part1/previous
+part3_BRPO/test_refine_output/
 
 # =========================
 # External / cloned repositories
