@@ -61,12 +61,6 @@ def save_mask_png(mask: np.ndarray, path: str):
     Image.fromarray((np.clip(mask, 0.0, 1.0) * 255).astype(np.uint8)).save(path)
 
 
-def _symlink_force(src: Path, dst: Path):
-    if dst.exists() or dst.is_symlink():
-        dst.unlink()
-    dst.symlink_to(src.name)
-
-
 def summarize_brpo_mask(frame_id: int, left_stats: Dict, right_stats: Dict, fused: Dict) -> Dict:
     conf = fused["confidence_mask_brpo_fused"]
     both = fused["support_both"]
@@ -104,7 +98,13 @@ def write_frame_outputs(frame_out: Path, fused: Dict, meta: Dict, train_masks: D
     active_conf_left = train_masks["train_confidence_mask_brpo_left"] if train_masks is not None else fused["confidence_mask_brpo_left"]
     active_conf_right = train_masks["train_confidence_mask_brpo_right"] if train_masks is not None else fused["confidence_mask_brpo_right"]
 
-    # Canonical train-mask layer
+    # Current consumer-compatible aliases point to the actual training masks
+    np.save(frame_out / "confidence_mask_brpo.npy", active_conf_fused)
+    np.save(frame_out / "confidence_mask_brpo_fused.npy", active_conf_fused)
+    np.save(frame_out / "confidence_mask_brpo_left.npy", active_conf_left)
+    np.save(frame_out / "confidence_mask_brpo_right.npy", active_conf_right)
+
+    # Explicit train-mask layer
     if train_masks is not None:
         np.save(frame_out / "train_confidence_mask_brpo_fused.npy", train_masks["train_confidence_mask_brpo_fused"])
         np.save(frame_out / "train_confidence_mask_brpo_left.npy", train_masks["train_confidence_mask_brpo_left"])
@@ -114,29 +114,22 @@ def write_frame_outputs(frame_out: Path, fused: Dict, meta: Dict, train_masks: D
         np.save(frame_out / "train_support_both.npy", train_masks["train_support_both"])
         np.save(frame_out / "train_support_single.npy", train_masks["train_support_single"])
 
-        # Current consumer-compatible aliases point to the actual training masks
-        _symlink_force(frame_out / "train_confidence_mask_brpo_fused.npy", frame_out / "confidence_mask_brpo.npy")
-        _symlink_force(frame_out / "train_confidence_mask_brpo_fused.npy", frame_out / "confidence_mask_brpo_fused.npy")
-        _symlink_force(frame_out / "train_confidence_mask_brpo_left.npy", frame_out / "confidence_mask_brpo_left.npy")
-        _symlink_force(frame_out / "train_confidence_mask_brpo_right.npy", frame_out / "confidence_mask_brpo_right.npy")
-    else:
-        np.save(frame_out / "confidence_mask_brpo.npy", active_conf_fused)
-        np.save(frame_out / "confidence_mask_brpo_fused.npy", active_conf_fused)
-        np.save(frame_out / "confidence_mask_brpo_left.npy", active_conf_left)
-        np.save(frame_out / "confidence_mask_brpo_right.npy", active_conf_right)
+    # Compatibility aliases used by current pack / consumer
+    np.save(frame_out / "support_left.npy", fused["support_left"])
+    np.save(frame_out / "support_right.npy", fused["support_right"])
+    np.save(frame_out / "support_both.npy", fused["support_both"])
+    np.save(frame_out / "support_single.npy", fused["support_single"])
 
-    # Canonical seed-level outputs for later propagation phases
+    # New explicit seed-level outputs for later propagation phases
     np.save(frame_out / "seed_support_left.npy", fused["support_left"])
     np.save(frame_out / "seed_support_right.npy", fused["support_right"])
     np.save(frame_out / "seed_support_both.npy", fused["support_both"])
     np.save(frame_out / "seed_support_single.npy", fused["support_single"])
 
-    # Compatibility aliases used by current pack / consumer
-    _symlink_force(frame_out / "seed_support_left.npy", frame_out / "support_left.npy")
-    _symlink_force(frame_out / "seed_support_right.npy", frame_out / "support_right.npy")
-    _symlink_force(frame_out / "seed_support_both.npy", frame_out / "support_both.npy")
-    _symlink_force(frame_out / "seed_support_single.npy", frame_out / "support_single.npy")
-
+    save_mask_png(active_conf_fused, str(frame_out / "confidence_mask_brpo.png"))
+    save_mask_png(active_conf_fused, str(frame_out / "confidence_mask_brpo_fused.png"))
+    save_mask_png(active_conf_left, str(frame_out / "confidence_mask_brpo_left.png"))
+    save_mask_png(active_conf_right, str(frame_out / "confidence_mask_brpo_right.png"))
     if train_masks is not None:
         save_mask_png(train_masks["train_confidence_mask_brpo_fused"], str(frame_out / "train_confidence_mask_brpo_fused.png"))
         save_mask_png(train_masks["train_confidence_mask_brpo_left"], str(frame_out / "train_confidence_mask_brpo_left.png"))
@@ -145,23 +138,14 @@ def write_frame_outputs(frame_out: Path, fused: Dict, meta: Dict, train_masks: D
         save_mask_png(train_masks["train_support_right"], str(frame_out / "train_support_right.png"))
         save_mask_png(train_masks["train_support_both"], str(frame_out / "train_support_both.png"))
         save_mask_png(train_masks["train_support_single"], str(frame_out / "train_support_single.png"))
-        _symlink_force(frame_out / "train_confidence_mask_brpo_fused.png", frame_out / "confidence_mask_brpo.png")
-        _symlink_force(frame_out / "train_confidence_mask_brpo_fused.png", frame_out / "confidence_mask_brpo_fused.png")
-        _symlink_force(frame_out / "train_confidence_mask_brpo_left.png", frame_out / "confidence_mask_brpo_left.png")
-        _symlink_force(frame_out / "train_confidence_mask_brpo_right.png", frame_out / "confidence_mask_brpo_right.png")
-    else:
-        save_mask_png(active_conf_fused, str(frame_out / "confidence_mask_brpo.png"))
-        save_mask_png(active_conf_fused, str(frame_out / "confidence_mask_brpo_fused.png"))
-        save_mask_png(active_conf_left, str(frame_out / "confidence_mask_brpo_left.png"))
-        save_mask_png(active_conf_right, str(frame_out / "confidence_mask_brpo_right.png"))
+    save_mask_png(fused["support_left"], str(frame_out / "support_left.png"))
+    save_mask_png(fused["support_right"], str(frame_out / "support_right.png"))
+    save_mask_png(fused["support_both"], str(frame_out / "support_both.png"))
+    save_mask_png(fused["support_single"], str(frame_out / "support_single.png"))
     save_mask_png(fused["support_left"], str(frame_out / "seed_support_left.png"))
     save_mask_png(fused["support_right"], str(frame_out / "seed_support_right.png"))
     save_mask_png(fused["support_both"], str(frame_out / "seed_support_both.png"))
     save_mask_png(fused["support_single"], str(frame_out / "seed_support_single.png"))
-    _symlink_force(frame_out / "seed_support_left.png", frame_out / "support_left.png")
-    _symlink_force(frame_out / "seed_support_right.png", frame_out / "support_right.png")
-    _symlink_force(frame_out / "seed_support_both.png", frame_out / "support_both.png")
-    _symlink_force(frame_out / "seed_support_single.png", frame_out / "support_single.png")
 
     with open(frame_out / "verification_meta.json", "w", encoding="utf-8") as f:
         json.dump(meta, f, indent=2)

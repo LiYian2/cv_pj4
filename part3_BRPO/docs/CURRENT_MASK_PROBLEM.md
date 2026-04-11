@@ -1,191 +1,330 @@
 # CURRENT_MASK_PROBLEM.md
 
-> 最后更新：2026-04-11 18:02
-> 主题：当前 BRPO-style confidence mask 已能跑通，但图像空间 coverage 偏稀；需要先分析“为什么稀、稀到什么程度、下一步该怎么改”，再决定是否继续往 target depth / Stage A / Stage B 推进。
+> 最后更新：2026-04-12 02:20
+> 主题：mask problem 已从“BRPO support 太稀，不能当训练 mask”推进到“train mask 已基本可用，但 verified depth 仍过稀，导致 blended depth 在 Stage A 中接上了却几乎不动”。
 
 ---
 
-## 1. 当前问题一句话
+## 1. 当前结论
 
-当前 internal route 已经完成：
-- `Difix left/right`
-- `BRPO-style bidirectional verification`
-- `support_left/right/both/single`
-- `confidence_mask_brpo_{left,right,fused}`
-- `pack → pseudo_cache → refine consumer`
+现在不能再笼统说“mask 还太稀”。更准确的说法是：
 
-也就是说，**mask 机制本身已经接通**。
+1. **train mask 这一层已经基本可用。**
+   经过 `M1 → M2 → M2.5`，当前 `train_confidence_mask_brpo_fused` 的 coverage 已经从 seed-level 的 `~1.5%` 抬到大约 `18% ~ 20%`，落在此前判断的合理训练区间 `10% ~ 25%` 内。
 
-但当前问题不是“有没有 mask”，而是：
+2. **verified depth 这一层仍然过稀。**
+   当前 `target_depth_for_refine` 中，真正来自 BRPO verified depth 的区域仍只有 `~1.56%`；其余 `~98.4%` 都是 `render_depth` fallback。
 
-**这版 BRPO-style mask 在图像空间上偏稀疏。**
+3. **两者不是同一层产物。**
+   - `train_mask` 是从 `seed_support` 经过 propagation 扩出来的训练 supervision mask；
+   - `verified depth` 当前仍直接来自 verify 阶段的 sparse projected depth，没有跟着 propagation 一起变大。
 
-所以接下来的关键问题不是继续证明“代码能跑”，而是要分析：
-- 这个稀疏性是否是预期内的 BRPO 几何筛选结果；
-- 它是否已经稀疏到不适合作为 current refine / target depth 的主监督；
-- 如果要继续往 `target_depth_for_refine` 或 Stage A / Stage B 推进，应当怎么处理这种稀疏性。
+一句话说：
+
+**mask problem 的第一阶段已经基本解决（train mask 不再只是 seed）；但新的主问题已经转成：verified depth 过稀，导致 M3/M4 的 blended depth 虽然接上了，却还没在 Stage A 里真正“动起来”。**
 
 ---
 
-## 2. 当前已经确认的事实
+## 2. 当前精确统计：coverage 到底是多少
 
-### 2.1 verification 不是坏掉了
+当前统计基于：
 
-当前 verification 不是空转，也不是“几乎没 match 上”。
+```text
+/home/bzhang512/CV_Project/output/part2_s3po/re10k-1/
+  s3po_re10k-1_full_internal_cache/
+  Re10k-1_part2_s3po/2026-04-11-05-33-58/
+  internal_prepare/re10k1__internal_afteropt__brpo_proto_v4_stage3/pseudo_cache/samples/
+```
 
-在 3-frame prototype 上，branch 内部统计是健康的：
-- left branch `support_ratio_vs_matches` 可以到 `0.86 ~ 0.94`
-- right branch `support_ratio_vs_matches` 也在较高区间
-- reprojection / relative depth error 都在可接受范围内
+样本帧：`10 / 50 / 120`
 
-这说明：
+### 2.1 seed support coverage
 
-**当前 BRPO verification 在“已匹配点内部”的筛选，并没有崩。**
+平均：
+- `seed_support_union_coverage ≈ 1.5608%`
+- `seed_support_both_coverage ≈ 0.7975%`
 
-问题不在“几何验证完全失败”，而在于：
+逐帧：
+- frame 10: union `1.6285%`, both `0.7496%`
+- frame 50: union `1.5076%`, both `0.7389%`
+- frame 120: union `1.5465%`, both `0.9041%`
 
-**通过几何验证的像素，映射回整张 pseudo 图像后，coverage 仍然偏小。**
+这说明 verify 的几何 seed 仍然是典型的 **高精度 / 低覆盖** 信号。
 
-### 2.2 当前稀疏性主要体现在图像空间 coverage
+### 2.2 train mask coverage
 
-当前 3-frame prototype 的平均量级大约是：
-- `support_ratio_left ≈ 1.35%`
-- `support_ratio_right ≈ 1.00%`
-- `support_ratio_both ≈ 0.80%`
-- `support_ratio_single ≈ 0.75%`
+平均：
+- `train_mask_coverage ≈ 19.4126%`
 
-所以它的问题不是“完全没有可信区域”，而是：
+逐帧：
+- frame 10: `20.1538%`
+- frame 50: `18.0340%`
+- frame 120: `20.0500%`
 
-**可信区域在图像空间上太 sparse。**
+这说明当前 `train_mask` 已经不再是“几乎没 coverage”的状态，而是已经进入此前 M2.5 认为更合理的区间（大约 `10% ~ 25%`）。
 
-这和后续任务强相关：
-- 如果只把 mask 当成 “RGB loss 的高置信区域加权”，它也许还能用；
-- 如果想进一步构造 `BRPO-style target depth`，或者让 Stage A / Stage B 更强地依赖它，这个 coverage 就很可能不够。
+### 2.3 verified depth coverage
 
----
+平均：
+- `verified_depth_coverage ≈ 1.5608%`
 
-## 3. 为什么这会变成当前主问题
+逐帧：
+- frame 10: `1.6285%`
+- frame 50: `1.5076%`
+- frame 120: `1.5465%`
 
-### 3.1 对 mask-only refine 的影响
+注意这里一个关键事实：
 
-前面已经看到：
-- 当前 BRPO verification 链是通的；
-- 但在 `v1 fixed-pose RGB-only refine` 下，`brpo mask` 还没有优于 `legacy mask`。
+**当前 verified depth coverage 与 seed support union coverage 是一样的。**
 
-一个很自然的解释就是：
+这不是巧合，而是当前实现逻辑决定的：
+- 只有通过 verify 的支持点，才会写入 `projected_depth_left/right`；
+- 后续 `target_depth_for_refine` 的 verified 区域，正是这些 projected depth 的有效并集。
 
-**当前 BRPO mask 虽然几何上更“干净”，但它覆盖得太少；在 v1 这种 fixed-pose + RGB-only 的消费方式下，过稀的高置信区域未必比较宽松的 legacy mask 更适合训练。**
+### 2.4 当前 source map 说明了什么
 
-### 3.2 对 target depth 的影响
+当前 `target_depth_for_refine_source_map.npy` 统计大致是：
+- `both_fused`: `~0.74% ~ 0.90%`
+- `left_only + right_only`: `~0.61% ~ 0.88%`
+- `render_fallback`: `~98.4%`
 
-如果后面要把 `target_depth_for_refine` 改成更 BRPO-style 的 depth target，那么它一定会和当前 support / mask 有关系。
+因此当前 M3 的语义非常明确：
 
-这时问题就更敏感：
-- 如果只在 `support_both` 上写 depth，可能太 sparse；
-- 如果只在少量 verified 区域有 depth，其余全空，那么 Stage A / Stage B 的 depth supervision 会非常脆；
-- 如果直接把当前 sparse verified 区域硬当成整图 depth target 主来源，大概率不稳。
+**它不是大覆盖 depth supervision，而是“少量 BRPO verified depth correction + 大部分 render depth fallback”。**
 
-所以当前稀疏 mask 问题，不只是“mask 视觉上稀”，而是会直接影响：
-
-**BRPO-style target depth 能不能做、该怎么做。**
-
----
-
-## 4. 当前最需要分清的判断
-
-现在最重要的是不要把不同问题混在一起。
-
-### 4.1 不能直接得出“BRPO 路线不行”
-
-当前更合理的判断是：
-- BRPO verification 机制成立；
-- 但其输出更像“高精度、低覆盖”的几何证据；
-- 这类信号是否适合直接拿来做 current refine / target depth，还需要进一步分析。
-
-所以当前问题不是：
-- `BRPO verification completely failed`
-
-而更像：
-- `BRPO verification gives sparse but plausible support; downstream consumption may be mismatched`
-
-### 4.2 不能把 mask 问题和 depth redesign 混为一谈
-
-当前阶段最好把这两个问题拆开：
-
-1. **mask 问题**：
-   - 为什么 coverage 稀？
-   - 稀疏性来自 matcher / threshold / branch target / view gap，还是 BRPO-style 几何本来就这么严格？
-
-2. **depth 问题**：
-   - 如果要做 `target_depth_for_refine`，它应不应该是：
-     - 纯 sparse verified depth
-     - render-depth fallback
-     - mask-aware blended depth
-
-当前不应直接跳到“把 sparse verified depth 硬塞进 Stage A / Stage B”而不先分析 coverage。
+注意：
+- `target_depth_for_refine.npy` 本身因为有 fallback，所以几乎是整张图都有值；
+- 当前 `~1.56%` 指的不是它“有没有值”，而是其中有多少像素是**真正来自 BRPO verified depth 的新信息**。
 
 ---
 
-## 5. 当前最合理的后续分析方向
+## 3. 逻辑链：train mask 和 verified depth 到底是什么关系
 
-### 5.1 先分析“为什么稀”
+当前链路可以概括为：
 
-优先应分析：
-- `support_both` 稀是因为左右重合本来就小，还是 matcher 覆盖差；
-- `support_left/right` 稀是因为阈值太紧，还是 pseudo / ref 本身纹理不足；
-- 使用 `Difix left/right` 后，coverage 是提升了，还是只是 cleaner 但仍 sparse；
-- 对不同 frame gap（midpoint / tertile / explicit）的 coverage 是否差很多。
+```text
+left/right verify
+  ↓
+seed_support_left/right/both/single
+  ├─→ propagation → train_confidence_mask_brpo_*
+  └─→ projected_depth_left/right (仅 support 像素)
+                      ↓
+                build_blended_target_depth
+                      ↓
+              target_depth_for_refine.npy
+```
 
-### 5.2 评估它适合做什么，不适合做什么
+也就是说，当前有两条分叉：
 
-当前更可能的情况是：
-- `support_both` 适合作为**最高置信几何区域**；
-- `support_left/right` 可以作为次高置信分支；
-- 但它们可能都**不适合直接单独撑起整图 depth target**。
+1. **mask 分支**
+   - `seed_support` → propagation → `train_mask`
+   - 这条分支会把 coverage 从 `~1.5%` 扩到 `~19%`
 
-所以当前更值得考虑的是：
+2. **depth 分支**
+   - `seed_support / verify support` → `projected_depth_*`
+   - 再组装 `target_depth_for_refine`
+   - 这条分支当前**没有**跟着 propagation 一起扩张
 
-**mask-aware blended depth target**，而不是纯 sparse BRPO depth。
+因此当前不能说：
+- “verified depth coverage 变大了，是因为 train mask 变大了”
 
-### 5.3 如果要继续做 target depth，应该怎么想
-
-更稳妥的思路大概率是：
-- `support_both`：优先使用双边一致区域的 branch depth
-- `support_left/right`：次优先使用单边 branch depth
-- unsupported 区域：回退到 `render_depth` 或不监督
-
-也就是说，当前更像要构造：
-
-**BRPO verified depth as correction signal + render depth as fallback**
-
-而不是“用 sparse BRPO verified depth 替换整张图的 target depth”。
-
----
-
-## 6. 当前结论（供后续工作引用）
-
-当前结论先固定为：
-
-1. **当前 BRPO-style mask 已经做通。**
-2. **当前主要问题不是没有 mask，而是 mask coverage 在图像空间上偏稀。**
-3. **这种稀疏性会直接影响 target depth 设计。**
-4. **因此下一步不能直接把 sparse verified depth 硬塞进 refine；应先分析 coverage，再决定是做纯 sparse depth、还是做 mask-aware blended depth target。**
-5. 当前更合理的方向是：
-   - 先分析 current mask problem；
-   - 再决定 `target_depth_for_refine` 应该如何构造；
-   - 然后再推进 Stage A / Stage B 的 depth supervision。
+更应该说：
+- `train_mask` 已经被 propagation 放大；
+- `verified depth` 还停留在 seed / support 级别，所以仍然很稀。
 
 ---
 
-## 7. 对后续 agent 的明确提示
+## 4. mask 和 depth 各自的用处
 
-如果你接下来要继续推进，请先回答下面三个问题，再决定下一步：
+这是当前最需要分清楚的地方。
 
-1. 当前稀疏性主要来自哪里：matcher / threshold / overlap / branch target mismatch？
-2. 现有 `support_both / left / right / single` 哪些更适合作为 downstream supervision？
-3. `target_depth_for_refine` 最终应不应该采用：
-   - 纯 sparse verified depth
-   - render-depth fallback blended target
-   - 只在高置信区域监督、其余区域不使用 depth
+### 4.1 mask 的用处
 
-在这三个问题没回答清楚前，不建议直接宣称“BRPO-style target depth 已经定义完成”。
+mask 回答的是：
+
+**哪些像素应该参与监督，参与监督时权重多大。**
+
+当前 `train_mask` 主要服务：
+- masked RGB loss
+- masked depth loss 的支持区域
+
+它本质上是一个 **where / confidence** 问题。
+
+### 4.2 depth 的用处
+
+depth 回答的是：
+
+**这些可信像素的目标深度值到底是多少。**
+
+当前 `projected_depth_*` 和 `target_depth_for_refine.npy` 主要服务：
+- 给 Stage A / 后续 Stage B 提供 depth target
+
+它本质上是一个 **what depth value** 问题。
+
+### 4.3 为什么 mask 可以扩散，但 depth 没跟着扩散
+
+因为两者风险不同：
+- 扩 mask，本质上是在扩大“允许监督的区域”；
+- 扩 depth，本质上是在把一个 sparse depth 数值传播到周围区域。
+
+后者风险更大，因为一旦传播错，就不是单纯“监督范围变大”，而是会把错误几何值写进 target。
+
+所以当前实现选择了更保守的做法：
+- `seed_support -> propagation -> train_mask`
+- `projected_depth` 先保持 sparse
+- 再和 `render_depth` 混成 `target_depth_for_refine`
+
+也正因此，当前会出现：
+- `train_mask ≈ 19.4%`
+- `verified depth ≈ 1.56%`
+
+这种明显不对称。
+
+---
+
+## 5. 当前 loss 结构，以及浅 verified depth 对 loss 的影响
+
+### 5.1 旧的 v1 逻辑是什么
+
+最早的 `run_pseudo_refinement.py`（v1）本质上是：
+- pseudo pose 固定
+- 直接更新 Gaussian / PLY
+- 主要用 confidence-weighted RGB loss
+- 更像 **fixed-pose appearance tuning**
+
+所以你说的“最早不就是 RGB 加权 loss 且 PLY 会更新”，这个理解是对的，指的是 **v1**。
+
+### 5.2 现在的 Stage A 在优化什么
+
+当前 `run_pseudo_refinement_v2.py` 的 **Stage A** 不是 final refine，它做的是 warm-up / alignment：
+- **更新 pseudo pose delta**
+- **更新 exposure**
+- **不更新 Gaussian / PLY**
+
+当前总 loss 大致是：
+
+```text
+L = β * L_rgb
+  + (1-β) * L_depth
+  + λ_pose * L_pose_reg
+  + λ_exp * L_exp_reg
+```
+
+其中：
+- `L_rgb`：在 `train_mask` 上算，所以当前有效训练区域约 `19.4%`
+- `L_depth`：也乘同一个 mask，但其中真正来自 BRPO verified depth 的新信号只有 `~1.56%`
+- `L_pose_reg`：防止 pseudo pose delta 乱飘
+- `L_exp_reg`：防止 exposure 乱飘
+
+所以 Stage A 的作用不是“改地图”，而是：
+
+**先把 pseudo supervision 和当前地图对齐一点，再决定要不要进入会真正改 Gaussian 的 Stage B。**
+
+### 5.3 现在这个浅 verified depth 会怎么影响 loss
+
+当前最关键的影响是：
+- RGB 分支用的是扩大后的 `train_mask`，因此有一块相对大的有效监督区域；
+- depth 分支虽然也在算，但真正携带“新几何信息”的区域只有 `~1.56%`；
+- 剩下 `~98.4%` 的区域只是 `render_depth fallback`，更多是保底完整图，而不是新约束。
+
+因此当前会出现：
+- `blended_depth` 的 depth loss **非零**，说明它确实接进来了；
+- 但 depth loss 在 Stage A 中几乎不下降，说明它对当前优化的牵引还不够强。
+
+### 5.4 这对 Stage B 的意义是什么
+
+原本 two-stage 的规划是：
+- **Stage A**：先调 pseudo pose / exposure，把 pseudo supervision 对齐
+- **Stage B**：再让 Gaussian + pseudo pose 做 joint refinement，也就是开始真正改地图 / PLY
+
+所以现在如果 depth 还是这么稀，就会有一个风险：
+- 如果直接进入 Stage B，地图更新更可能被 RGB 主导；
+- sparse depth correction 太弱，不足以稳定地约束几何；
+- 这样 Stage B 可能会把“对齐不够清楚的 supervision”直接写进 Gaussian。
+
+这就是为什么当前不适合直接自信地进 Stage B。
+
+---
+
+## 6. 当前问题已经演变成什么
+
+到现在，问题应该重命名成更准确的表述：
+
+### 6.1 已经基本解决的部分
+
+- `fused-first verification` 已打通
+- `seed_support` 与 `train_mask` 已明确拆层
+- `train_mask` coverage 已进入可训练区间
+- `blended target_depth_for_refine` 已落地
+- Stage A consumer 已能显式区分：
+  - `train_mask`
+  - `seed_support_only`
+  - `blended_depth`
+  - `render_depth_only`
+
+### 6.2 当前新的主问题
+
+当前新的主问题不再是：
+- `BRPO mask 有没有做出来`
+- 或 `train_mask coverage 能不能从 seed 变大`
+
+而是：
+
+**verified depth 仍停留在 seed/support 级别，coverage 约 `1.56%`，导致 `blended_depth` 在 Stage A 中虽然已接通，但 depth signal 基本不动。**
+
+因此当前问题已经更像：
+
+**depth-flatness problem on top of solved train-mask problem**
+
+---
+
+## 7. 我现在的判断：下一步应该做什么
+
+我觉得当前最合理的下一步不是直接进 Stage B，而是先做一轮 **M4.6 / depth-flatness diagnosis**。
+
+重点不是再堆更多长跑，而是把当前问题拆清楚：
+
+1. 现在 `L_depth` 不动，主要是因为 verified depth 太稀，还是因为当前 loss / optimizer 对它不敏感？
+2. 当前 `L_depth` 里，真正来自 `verified region` 的贡献占多少？是不是被大面积 fallback 区域“稀释”了？
+3. 后面如果要增强 depth 作用，应该先：
+   - 调 Stage A 的 loss / 权重 / 诊断口径
+   - 还是回 upstream 做更受控的 depth-valid coverage 扩张
+
+我现在不建议的事是：
+- 直接进入 Stage B
+- 或者在没搞清楚前，重新回到 `50% ~ 70%` 的宽 propagation
+
+当前最稳的推进顺序应该是：
+
+```text
+先做 M4.6：解释为什么 depth 不动
+  ↓
+如果是 loss/sensitivity 问题，就先改 Stage A
+  ↓
+如果是 verified depth 太稀，就研究更受控的 depth-valid 扩张
+  ↓
+只有这两件事更清楚后，再决定是否进入 Stage B
+```
+
+---
+
+## 8. 当前结论（供后续引用）
+
+当前结论固定为：
+
+1. **train mask 问题已经基本解决。**
+   当前 `train_mask coverage ≈ 19.4%`，已不再只是 seed-level support。
+
+2. **verified depth 稀疏问题仍未解决。**
+   当前 `verified_depth coverage ≈ 1.56%`，与 `seed_support_union` 基本一致，说明它还停留在 verify/support 级别。
+
+3. **当前实现下，verified depth 不会被 train mask 直接放大。**
+   两者共享上游 seed，但分叉后：
+   - `train_mask` 走 propagation
+   - `verified depth` 走 sparse projected depth
+
+4. **当前 Stage A 不是 final refine，而是 pose/exposure alignment warm-up。**
+   它现在还不更新 Gaussian / PLY，真正改地图的是后续 Stage B。
+
+5. **当前新的主问题是：**
+   `train_mask 已经够大，但 verified depth 仍太稀，导致 blended depth 在 Stage A 中已接通却几乎不动。`

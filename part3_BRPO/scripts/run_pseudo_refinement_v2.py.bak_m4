@@ -49,6 +49,8 @@ def parse_args():
     p.add_argument('--stageA_lr_rot', type=float, default=0.003)
     p.add_argument('--stageA_lr_trans', type=float, default=0.001)
     p.add_argument('--stageA_lr_exp', type=float, default=0.01)
+    p.add_argument('--stageA_disable_depth', action='store_true')
+    p.add_argument('--stageA_target_depth_mode', choices=['auto', 'target_depth_for_refine', 'target_depth', 'render_depth'], default='auto')
     p.add_argument('--num_pseudo_views', type=int, default=4)
     p.add_argument('--sh_degree', type=int, default=0)
     p.add_argument('--seed', type=int, default=0)
@@ -62,6 +64,26 @@ def sample_indices(n_total: int, n_sample: int, rng: np.random.Generator):
     return rng.choice(n_total, n_sample, replace=False).tolist()
 
 
+def resolve_depth_target_path(sample_dir: Path, mode: str):
+    candidates = []
+    if mode == 'target_depth_for_refine':
+        candidates = [('target_depth_for_refine', sample_dir / 'target_depth_for_refine.npy')]
+    elif mode == 'target_depth':
+        candidates = [('target_depth', sample_dir / 'target_depth.npy')]
+    elif mode == 'render_depth':
+        candidates = [('render_depth', sample_dir / 'render_depth.npy')]
+    else:
+        candidates = [
+            ('target_depth_for_refine', sample_dir / 'target_depth_for_refine.npy'),
+            ('target_depth', sample_dir / 'target_depth.npy'),
+            ('render_depth', sample_dir / 'render_depth.npy'),
+        ]
+    for kind, path in candidates:
+        if path.exists():
+            return kind, path
+    raise FileNotFoundError(f'No depth target candidate found under {sample_dir} for mode={mode}')
+
+
 def load_stageA_pseudo_views(args):
     v1 = load_v1_module()
     pseudo_views, pseudo_manifest_info = v1.load_pseudo_viewpoints(
@@ -72,11 +94,15 @@ def load_stageA_pseudo_views(args):
     )
     for view in pseudo_views:
         sample_dir = Path(view['target_rgb_path']).parent
-        depth_for_refine = sample_dir / 'target_depth_for_refine.npy'
-        if not depth_for_refine.exists():
-            depth_for_refine = sample_dir / 'target_depth.npy'
+        source_meta_path = sample_dir / 'source_meta.json'
+        source_meta = json.load(open(source_meta_path)) if source_meta_path.exists() else {}
+        depth_kind, depth_for_refine = resolve_depth_target_path(sample_dir, args.stageA_target_depth_mode)
+        depth_arr = np.load(depth_for_refine).astype(np.float32)
+        view['source_meta'] = source_meta
+        view['target_depth_for_refine_kind'] = depth_kind
         view['target_depth_for_refine_path'] = str(depth_for_refine)
-        view['depth_for_refine'] = np.load(depth_for_refine).astype(np.float32)
+        view['depth_for_refine'] = depth_arr
+        view['target_depth_nonzero_ratio'] = float((depth_arr > 1e-6).sum() / depth_arr.size)
         make_viewpoint_trainable(view['vp'])
     return pseudo_views, pseudo_manifest_info
 
@@ -167,6 +193,7 @@ def main():
                 lambda_pose=cfg.lambda_pose,
                 lambda_exp=cfg.lambda_exp,
                 trans_weight=cfg.trans_reg_weight,
+                use_depth=not args.stageA_disable_depth,
             )
             per_view_losses.append(loss)
             per_view_stats.append(stats)
@@ -208,6 +235,9 @@ def main():
                 'frame_id': int(v['frame_id']),
                 'target_rgb_path': v.get('target_rgb_path'),
                 'target_depth_for_refine_path': v.get('target_depth_for_refine_path'),
+                'target_depth_for_refine_kind': v.get('target_depth_for_refine_kind'),
+                'target_depth_nonzero_ratio': v.get('target_depth_nonzero_ratio'),
+                'target_depth_for_refine_source': v.get('source_meta', {}).get('target_depth_for_refine_source'),
                 'confidence_path': v.get('confidence_path'),
                 'confidence_source_kind': v.get('confidence_source_kind'),
                 'confidence_nonzero_ratio': v.get('confidence_nonzero_ratio'),
@@ -216,7 +246,20 @@ def main():
             for v in pseudo_views
         ],
         'history': history,
+        'stageA_disable_depth': bool(args.stageA_disable_depth),
+        'stageA_target_depth_mode': args.stageA_target_depth_mode,
         'final_states': stageA_states,
+        'final_delta_summary': [
+            {
+                'sample_id': int(v['sample_id']),
+                'frame_id': int(v['frame_id']),
+                'rot_norm': float(torch.norm(v['vp'].cam_rot_delta).detach().cpu().item()),
+                'trans_norm': float(torch.norm(v['vp'].cam_trans_delta).detach().cpu().item()),
+                'exposure_a': float(v['vp'].exposure_a.detach().cpu().item()),
+                'exposure_b': float(v['vp'].exposure_b.detach().cpu().item()),
+            }
+            for v in pseudo_views
+        ],
     }
     save_json(output_dir / 'stageA_history.json', stageA_history)
     save_json(output_dir / 'refinement_history.json', stageA_history)
