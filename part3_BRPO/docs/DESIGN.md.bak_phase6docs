@@ -1,7 +1,7 @@
 # DESIGN.md - Part3 设计文档
 
 > 本文档记录**当前实际采用**的设计决策、接口定义与默认实验方案。
-> 最后更新：2026-04-11 17:20
+> 最后更新：2026-04-11 16:57
 
 ---
 
@@ -27,9 +27,8 @@
 | Phase 3 | ✅ | internal prepare + Difix + BRPO verification 并入 |
 | Phase 4 | ✅ | mask-only ablation（legacy vs brpo） |
 | Phase 5 | ✅ | auditability / provenance 修补 |
-| Phase 6 | ✅ core plumbing done | 固定 canonical schema：Difix 双侧 + fuse + BRPO mask variants；已完成第一轮代码打通与 smoke |
-| Phase 7A | 进行中（smoke done） | `run_pseudo_refinement_v2` 的 Stage A only：pseudo pose delta + exposure + masked RGBD loss |
-| Phase 7B | 后续主线 | Gaussian + pseudo pose joint refinement |
+| Phase 6 | 进行中（core plumbing done） | 固定 canonical schema：Difix 双侧 + fuse + BRPO mask variants；当前已完成第一轮代码打通与 smoke |
+| Phase 7 | 后续主线 | `run_pseudo_refinement_v2` 的 Stage A only |
 
 ---
 
@@ -235,7 +234,7 @@ Phase 6 只建议先做：
 
 ### 6.3 当前推荐的 v2 最小形态
 
-当前已新增：
+建议新增：
 
 ```text
 scripts/run_pseudo_refinement_v2.py
@@ -244,16 +243,13 @@ pseudo_branch/pseudo_loss_v2.py
 pseudo_branch/pseudo_refine_scheduler.py
 ```
 
-当前最小版已经实现：
+并先实现：
 - pseudo `cam_rot_delta`
 - pseudo `cam_trans_delta`
 - `exposure_a / exposure_b`
 - Gaussian 几何固定
 - densify / prune 关闭
-- masked RGB + masked depth + pose/exposure regularization
-- 导出 `pseudo_camera_states_{init,stageA,final}.json` 与 `stageA_history.json`
-
-并已在 `fused + brpo` 口径下完成 2-iter smoke。
+- 只验证 Stage A 是否能让 pseudo render 更贴近 target
 
 ---
 
@@ -262,26 +258,21 @@ pseudo_branch/pseudo_refine_scheduler.py
 ### 7.1 当前最优先
 
 当前最适合的下一步不是：
-- 回到旧的 `left + brpo fused-style mask` 继续堆 v1 对照；
-- 或直接跳到 full Stage B。
+- 继续做当前 `left + brpo fused-style mask` 的更多 ablation；
+- 或直接写完整 two-stage refine。
 
 而是：
 
 ```text
-Phase 6 checkpoint（已完成）
 internal prepare
   ↓
-fuse + side-aware/fused BRPO mask + canonical pack
+正式接入 fuse
   ↓
-refine consumer smoke
-
-Phase 7A checkpoint（已启动）
+固定 side-aware / fused BRPO mask schema
   ↓
-run_pseudo_refinement_v2 Stage A smoke
+形成 canonical pseudo_cache vNext
   ↓
-继续扩成可评估版本
-  ↓
-再决定是否做 left/right/fused 对照 或切入 Stage B
+再实现 run_pseudo_refinement_v2 Stage A only
 ```
 
 ### 7.2 下一阶段预计修改的代码

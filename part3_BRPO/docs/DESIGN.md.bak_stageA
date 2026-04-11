@@ -263,25 +263,23 @@ pseudo_branch/pseudo_refine_scheduler.py
 
 当前最适合的下一步不是：
 - 回到旧的 `left + brpo fused-style mask` 继续堆 v1 对照；
-- 或直接跳到 full Stage B。
+- 或直接写完整 two-stage refine。
 
 而是：
 
 ```text
-Phase 6 checkpoint（已完成）
+Phase 6 current checkpoint（已完成）
 internal prepare
   ↓
 fuse + side-aware/fused BRPO mask + canonical pack
   ↓
 refine consumer smoke
 
-Phase 7A checkpoint（已启动）
+下一步
   ↓
-run_pseudo_refinement_v2 Stage A smoke
+基于新 schema 做最小 left/right/fused 对照
   ↓
-继续扩成可评估版本
-  ↓
-再决定是否做 left/right/fused 对照 或切入 Stage B
+再实现 run_pseudo_refinement_v2 Stage A only
 ```
 
 ### 7.2 下一阶段预计修改的代码

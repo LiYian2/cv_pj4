@@ -1,0 +1,638 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import asdict, dataclass
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
+
+SCHEMA_VERSION = "pseudo-cache-internal-v1.3"
+CAMERA_SCHEMA = "cam-internal-v1"
+
+
+@dataclass
+class InternalPseudoRecord:
+    frame_id: int
+    placement: str
+    left_ref_frame_id: int
+    right_ref_frame_id: int
+    image_name: str
+    render_rgb_path: str
+    render_depth_path: str
+    render_input_path: str
+    left_ref_input_path: str
+    right_ref_input_path: str
+    left_fixed_path: str
+    right_fixed_path: str
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Prepare internal pseudo dataset from internal_eval_cache")
+    p.add_argument("--stage", choices=["select", "difix", "fusion", "verify", "pack", "all"], default="all")
+    p.add_argument("--internal-cache-root", required=True)
+    p.add_argument("--run-key", required=True)
+    p.add_argument("--output-root", default=None, help="Defaults to <run_root>/internal_prepare/<run_key>")
+    p.add_argument("--scene-name", default="Re10k-1")
+    p.add_argument("--stage-tag", choices=["before_opt", "after_opt"], default="after_opt")
+    p.add_argument("--placement", choices=["midpoint", "tertile", "both"], default="tertile")
+    p.add_argument("--frame-ids", type=int, nargs="*", default=None, help="Optional explicit pseudo frame ids")
+    p.add_argument("--limit", type=int, default=None)
+
+    # target RGB source
+    p.add_argument("--target-rgb-source", choices=["render_placeholder", "difix"], default="render_placeholder")
+    p.add_argument("--left-fixed-root", default=None)
+    p.add_argument("--right-fixed-root", default=None)
+
+    # BRPO mask source (already built elsewhere for now)
+    p.add_argument("--brpo-mask-root", default=None)
+    p.add_argument("--strict-brpo-mask", action="store_true")
+
+    # Difix args
+    p.add_argument("--prompt", type=str, default="remove degradation")
+    p.add_argument("--difix-model-name", type=str, default="nvidia/difix_ref")
+    p.add_argument("--difix-model-path", type=str, default=None)
+    p.add_argument("--height", type=int, default=512)
+    p.add_argument("--width", type=int, default=512)
+    p.add_argument("--timestep", type=int, default=199)
+    p.add_argument("--overwrite", action="store_true")
+    p.add_argument("--dry-run", action="store_true")
+    return p.parse_args()
+
+
+def load_json(path: Path):
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def write_json(path: Path, obj):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
+        json.dump(obj, f, indent=2, ensure_ascii=False)
+
+
+def ensure_dir(path: Path):
+    path.mkdir(parents=True, exist_ok=True)
+
+
+def symlink_force(src: Path, dst: Path):
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists() or dst.is_symlink():
+        dst.unlink()
+    dst.symlink_to(src)
+
+
+def build_default_output_root(internal_cache_root: Path, run_key: str) -> Path:
+    return internal_cache_root.parent / "internal_prepare" / run_key
+
+
+def canonical_name(frame_id: int) -> str:
+    return f"{int(frame_id):05d}.png"
+
+
+def load_internal_context(internal_cache_root: Path, stage_tag: str):
+    manifest = load_json(internal_cache_root / "manifest.json")
+    camera_states = load_json(internal_cache_root / "camera_states.json")
+    states_by_id = {int(s["frame_id"]): s for s in camera_states}
+    stage_meta = load_json(internal_cache_root / stage_tag / "stage_meta.json")
+    rendered_non_kf = [int(x) for x in stage_meta["rendered_non_kf_frames"]]
+    kf_indices = [int(x) for x in manifest["kf_indices"]]
+    return manifest, states_by_id, rendered_non_kf, kf_indices
+
+
+def pick_frames_between(left_kf: int, right_kf: int, candidates: List[int], placement: str) -> List[Tuple[int, str]]:
+    gap = [fid for fid in candidates if left_kf < fid < right_kf]
+    if not gap:
+        return []
+    uniq = sorted(set(gap))
+    out: List[Tuple[int, str]] = []
+
+    def nearest(target: float) -> int:
+        return min(uniq, key=lambda x: abs(x - target))
+
+    if placement in ("midpoint", "both"):
+        out.append((nearest(left_kf + (right_kf - left_kf) / 2.0), "midpoint"))
+    if placement in ("tertile", "both"):
+        out.append((nearest(left_kf + (right_kf - left_kf) / 3.0), "tertile_left"))
+        out.append((nearest(left_kf + 2.0 * (right_kf - left_kf) / 3.0), "tertile_right"))
+
+    dedup = {}
+    for fid, label in out:
+        dedup.setdefault(fid, label)
+    return [(fid, dedup[fid]) for fid in sorted(dedup.keys())]
+
+
+def infer_neighbors(frame_id: int, kf_indices: List[int]) -> Tuple[Optional[int], Optional[int]]:
+    left = max([k for k in kf_indices if k < frame_id], default=None)
+    right = min([k for k in kf_indices if k > frame_id], default=None)
+    return left, right
+
+
+def build_record(run_root: Path, internal_cache_root: Path, stage_tag: str, frame_id: int, placement: str, left_ref: int, right_ref: int, image_name: str):
+    cname = image_name or canonical_name(frame_id)
+    return InternalPseudoRecord(
+        frame_id=int(frame_id),
+        placement=placement,
+        left_ref_frame_id=int(left_ref),
+        right_ref_frame_id=int(right_ref),
+        image_name=cname,
+        render_rgb_path=str((internal_cache_root / stage_tag / "render_rgb" / f"{int(frame_id)}_pred.png").resolve()),
+        render_depth_path=str((internal_cache_root / stage_tag / "render_depth_npy" / f"{int(frame_id)}_pred.npy").resolve()),
+        render_input_path=str((run_root / "inputs" / "raw_render" / cname).resolve()),
+        left_ref_input_path=str((run_root / "inputs" / "left_ref" / cname).resolve()),
+        right_ref_input_path=str((run_root / "inputs" / "right_ref" / cname).resolve()),
+        left_fixed_path=str((run_root / "difix" / "left_fixed" / cname).resolve()),
+        right_fixed_path=str((run_root / "difix" / "right_fixed" / cname).resolve()),
+    )
+
+
+def stage_select(args, run_root: Path):
+    internal_cache_root = Path(args.internal_cache_root)
+    manifest, states_by_id, rendered_non_kf, kf_indices = load_internal_context(internal_cache_root, args.stage_tag)
+
+    records: List[InternalPseudoRecord] = []
+    if args.frame_ids:
+        for fid in args.frame_ids:
+            left, right = infer_neighbors(int(fid), kf_indices)
+            if left is None or right is None:
+                raise ValueError(f"frame_id={fid} missing left/right KF neighbor")
+            st = states_by_id[int(fid)]
+            records.append(build_record(run_root, internal_cache_root, args.stage_tag, int(fid), "explicit", left, right, st.get("image_name", canonical_name(fid))))
+    else:
+        for left_kf, right_kf in zip(kf_indices[:-1], kf_indices[1:]):
+            picks = pick_frames_between(left_kf, right_kf, rendered_non_kf, args.placement)
+            for fid, label in picks:
+                st = states_by_id[int(fid)]
+                records.append(build_record(run_root, internal_cache_root, args.stage_tag, int(fid), label, left_kf, right_kf, st.get("image_name", canonical_name(fid))))
+
+    records = sorted(records, key=lambda x: x.frame_id)
+    if args.limit is not None:
+        records = records[: args.limit]
+
+    for rec in records:
+        if not args.dry_run:
+            symlink_force(Path(rec.render_rgb_path), Path(rec.render_input_path))
+            symlink_force(Path(states_by_id[rec.left_ref_frame_id]["image_path"]), Path(rec.left_ref_input_path))
+            symlink_force(Path(states_by_id[rec.right_ref_frame_id]["image_path"]), Path(rec.right_ref_input_path))
+
+    write_json(run_root / "manifests" / "pseudo_selection_manifest.json", [asdict(r) for r in records])
+    write_json(run_root / "manifests" / "source_manifest.json", {
+        "scene_name": args.scene_name,
+        "run_key": args.run_key,
+        "stage_tag": args.stage_tag,
+        "internal_cache_root": str(internal_cache_root.resolve()),
+        "kf_indices": kf_indices,
+        "rendered_non_kf_frames": rendered_non_kf,
+        "num_frames": manifest["num_frames"],
+        "num_kf": len(kf_indices),
+        "num_non_kf": len(rendered_non_kf),
+        "placement": args.placement,
+        "frame_ids_override": args.frame_ids,
+    })
+    summary = {
+        "scene_name": args.scene_name,
+        "run_key": args.run_key,
+        "stage_tag": args.stage_tag,
+        "placement": args.placement if not args.frame_ids else "explicit",
+        "num_selected": len(records),
+        "selected_frame_ids": [r.frame_id for r in records],
+    }
+    write_json(run_root / "manifests" / "selection_summary.json", summary)
+    print(json.dumps(summary, indent=2, ensure_ascii=False))
+
+
+def load_internal_records(run_root: Path) -> List[InternalPseudoRecord]:
+    data = load_json(run_root / "manifests" / "pseudo_selection_manifest.json")
+    return [InternalPseudoRecord(**x) for x in data]
+
+
+def stage_difix(args, run_root: Path):
+    from prepare_stage1_difix_dataset_s3po import load_difix_model, run_single_difix
+
+    records = load_internal_records(run_root)
+    if args.dry_run:
+        print(f"[dry-run] would run difix on {len(records)} internal pseudo frames")
+        return
+
+    model = load_difix_model(args.difix_model_name, args.difix_model_path, args.timestep)
+    ensure_dir(run_root / "difix" / "left_fixed")
+    ensure_dir(run_root / "difix" / "right_fixed")
+    for idx, rec in enumerate(records, start=1):
+        print(f"[{idx}/{len(records)}] frame_id={rec.frame_id} placement={rec.placement}")
+        run_single_difix(
+            model_bundle=model,
+            image_path=Path(rec.render_input_path),
+            ref_path=Path(rec.left_ref_input_path),
+            output_path=Path(rec.left_fixed_path),
+            prompt=args.prompt,
+            height=args.height,
+            width=args.width,
+            overwrite=args.overwrite,
+        )
+        run_single_difix(
+            model_bundle=model,
+            image_path=Path(rec.render_input_path),
+            ref_path=Path(rec.right_ref_input_path),
+            output_path=Path(rec.right_fixed_path),
+            prompt=args.prompt,
+            height=args.height,
+            width=args.width,
+            overwrite=args.overwrite,
+        )
+    write_json(run_root / "manifests" / "difix_manifest.json", {
+        "prompt": args.prompt,
+        "height": args.height,
+        "width": args.width,
+        "timestep": args.timestep,
+        "difix_model_name": args.difix_model_name,
+        "num_records": len(records),
+        "frame_ids": [r.frame_id for r in records],
+    })
+
+
+def resolve_fixed_path(root: Optional[str], image_name: str) -> Optional[Path]:
+    if not root:
+        return None
+    p = Path(root) / image_name
+    return p if p.exists() else None
+
+
+def default_fusion_root(run_root: Path) -> Path:
+    return run_root / "fusion" / "samples"
+
+
+def fusion_frame_root(run_root: Path, frame_id: int) -> Path:
+    return default_fusion_root(run_root) / str(int(frame_id))
+
+
+def stage_fusion(args, run_root: Path):
+    import numpy as np
+    from PIL import Image
+    from pseudo_branch.pseudo_fusion import run_fusion_for_sample
+
+    records = load_internal_records(run_root)
+    fusion_root = default_fusion_root(run_root)
+    ensure_dir(fusion_root)
+    fusion_samples = []
+
+    for rec in records:
+        frame_root = fusion_frame_root(run_root, rec.frame_id)
+        ensure_dir(frame_root)
+
+        render_rgb = Path(rec.render_rgb_path)
+        if not render_rgb.exists():
+            raise FileNotFoundError(f"Missing render RGB for fusion: {render_rgb}")
+
+        left_fixed = resolve_fixed_path(args.left_fixed_root, rec.image_name)
+        right_fixed = resolve_fixed_path(args.right_fixed_root, rec.image_name)
+        left_fixed = left_fixed or Path(rec.left_fixed_path)
+        right_fixed = right_fixed or Path(rec.right_fixed_path)
+
+        if args.target_rgb_source == "difix":
+            if not left_fixed.exists() or not right_fixed.exists():
+                raise FileNotFoundError(f"Missing difix outputs for fusion image_name={rec.image_name}")
+            target_left = left_fixed
+            target_right = right_fixed
+            fusion_input_mode = "difix_left_right"
+        else:
+            target_left = render_rgb
+            target_right = render_rgb
+            fusion_input_mode = "render_placeholder"
+
+        H, W = np.array(Image.open(render_rgb).convert('RGB')).shape[:2]
+        uniform_conf = np.ones((H, W), dtype=np.float32)
+        stats, *_ = run_fusion_for_sample(
+            render_rgb_path=str(render_rgb),
+            target_rgb_left_path=str(target_left),
+            target_rgb_right_path=str(target_right),
+            depth_left=None,
+            conf_left=uniform_conf,
+            depth_right=None,
+            conf_right=uniform_conf,
+            render_depth=None,
+            output_dir=str(frame_root),
+            use_depth_agreement=False,
+        )
+        meta_path = frame_root / 'fusion_meta.json'
+        meta = load_json(meta_path) if meta_path.exists() else {}
+        meta.update({
+            'frame_id': int(rec.frame_id),
+            'image_name': rec.image_name,
+            'fusion_mode': 'rgb_only_uniform_branch_confidence',
+            'fusion_input_mode': fusion_input_mode,
+            'render_rgb_path': str(render_rgb.resolve()),
+            'target_rgb_left_path': str(target_left.resolve()),
+            'target_rgb_right_path': str(target_right.resolve()),
+            'use_depth_agreement': False,
+        })
+        write_json(meta_path, meta)
+        fusion_samples.append({
+            'frame_id': int(rec.frame_id),
+            'frame_root': str(frame_root.resolve()),
+            'target_rgb_fused_path': str((frame_root / 'target_rgb_fused.png').resolve()),
+            'confidence_mask_fused_path': str((frame_root / 'confidence_mask_fused.npy').resolve()),
+            'fusion_meta_path': str(meta_path.resolve()),
+            'support_ratio_fused': meta.get('support_ratio_fused', stats.get('support_ratio_fused')),
+        })
+
+    write_json(run_root / 'manifests' / 'fusion_manifest.json', {
+        'fusion_root': str(fusion_root.resolve()),
+        'fusion_mode': 'rgb_only_uniform_branch_confidence',
+        'use_depth_agreement': False,
+        'target_rgb_source': args.target_rgb_source,
+        'num_records': len(records),
+        'frame_ids': [r.frame_id for r in records],
+        'samples': fusion_samples,
+    })
+
+
+def maybe_link_brpo_artifacts(sample_dir: Path, brpo_mask_root: Optional[str], frame_id: int, strict: bool):
+    if not brpo_mask_root:
+        return {}
+    frame_root = Path(brpo_mask_root) / f"frame_{int(frame_id):04d}"
+    expected = {
+        "confidence_mask_brpo.npy": "confidence_mask_brpo_path",
+        "confidence_mask_brpo.png": "confidence_mask_brpo_png_path",
+        "support_left.npy": "support_left_path",
+        "support_right.npy": "support_right_path",
+        "support_both.npy": "support_both_path",
+        "support_single.npy": "support_single_path",
+        "verification_meta.json": "verification_meta_path",
+    }
+    present = {}
+    if not frame_root.exists():
+        if strict:
+            raise FileNotFoundError(f"Missing BRPO frame dir: {frame_root}")
+        return present
+    for name, key in expected.items():
+        src = frame_root / name
+        if src.exists():
+            symlink_force(src, sample_dir / name)
+            present[key] = str((sample_dir / name).relative_to(sample_dir.parent.parent))
+        elif strict:
+            raise FileNotFoundError(f"Missing required BRPO artifact: {src}")
+    diag_src = frame_root / "diag"
+    if diag_src.exists():
+        diag_dst = sample_dir / "diag_brpo"
+        if diag_dst.exists() or diag_dst.is_symlink():
+            diag_dst.unlink()
+        diag_dst.symlink_to(diag_src)
+        present["diag_brpo_path"] = str(diag_dst.relative_to(sample_dir.parent.parent))
+    present["verification_root"] = str(frame_root.parent)
+    present["verification_frame_root"] = str(frame_root)
+    return present
+
+
+def default_verification_root(run_root: Path, stage_tag: str) -> Path:
+    return run_root / "verification" / "brpo_phaseC" / stage_tag
+
+
+def maybe_link_fusion_artifacts(sample_dir: Path, run_root: Path, frame_id: int, strict: bool = False):
+    frame_root = fusion_frame_root(run_root, frame_id)
+    present = {}
+    expected = {
+        'target_rgb_fused.png': 'target_rgb_fused_path',
+        'confidence_mask_fused.npy': 'confidence_mask_fused_path',
+        'confidence_mask_fused.png': 'confidence_mask_fused_png_path',
+        'fusion_meta.json': 'fusion_meta_path',
+    }
+    if not frame_root.exists():
+        return present
+    for name, key in expected.items():
+        src = frame_root / name
+        if src.exists():
+            symlink_force(src, sample_dir / name)
+            present[key] = str((sample_dir / name).relative_to(sample_dir.parent.parent))
+        elif strict:
+            raise FileNotFoundError(f"Missing required fusion artifact: {src}")
+    present['fusion_root'] = str(frame_root.parent)
+    present['fusion_frame_root'] = str(frame_root)
+    return present
+
+
+def stage_verify(args, run_root: Path):
+    import subprocess, sys
+
+    records = load_internal_records(run_root)
+    frame_ids = [r.frame_id for r in records]
+    out_root = default_verification_root(run_root, args.stage_tag)
+    ensure_dir(out_root)
+
+    cmd = [
+        sys.executable,
+        str(Path(__file__).parent / "brpo_build_mask_from_internal_cache.py"),
+        "--internal-cache-root", args.internal_cache_root,
+        "--stage-tag", args.stage_tag,
+        "--output-root", str(out_root),
+        "--frame-ids",
+        *[str(x) for x in frame_ids],
+        "--tau-reproj-px", "4.0",
+        "--tau-rel-depth", "0.15",
+    ]
+
+    left_root = run_root / "difix" / "left_fixed"
+    right_root = run_root / "difix" / "right_fixed"
+    if left_root.exists() and right_root.exists():
+        cmd += ["--pseudo-left-root", str(left_root), "--pseudo-right-root", str(right_root)]
+
+    if args.dry_run:
+        print("[dry-run]", " ".join(cmd))
+        return
+
+    subprocess.run(cmd, check=True)
+    write_json(run_root / "manifests" / "verification_manifest.json", {
+        "verification_root": str(out_root.resolve()),
+        "verification_script": str((Path(__file__).parent / "brpo_build_mask_from_internal_cache.py").resolve()),
+        "cmd": cmd,
+        "frame_ids": frame_ids,
+        "internal_cache_root": str(Path(args.internal_cache_root).resolve()),
+        "stage_tag": args.stage_tag,
+        "tau_reproj_px": 4.0,
+        "tau_rel_depth": 0.15,
+        "pseudo_left_root": str(left_root.resolve()) if left_root.exists() else None,
+        "pseudo_right_root": str(right_root.resolve()) if right_root.exists() else None,
+    })
+
+
+def stage_pack(args, run_root: Path):
+    internal_cache_root = Path(args.internal_cache_root)
+    _, states_by_id, _, _ = load_internal_context(internal_cache_root, args.stage_tag)
+    records = load_internal_records(run_root)
+
+    pseudo_cache = run_root / "pseudo_cache"
+    ensure_dir(pseudo_cache)
+    samples_meta = []
+
+    for rec in records:
+        sample_dir = pseudo_cache / "samples" / str(rec.frame_id)
+        ensure_dir(sample_dir)
+        st = states_by_id[int(rec.frame_id)]
+        left_ref = states_by_id[int(rec.left_ref_frame_id)]
+        right_ref = states_by_id[int(rec.right_ref_frame_id)]
+
+        camera = {
+            "camera_schema": CAMERA_SCHEMA,
+            "frame_id": int(rec.frame_id),
+            "pose_c2w": st["pose_c2w"],
+            "intrinsics_px": {
+                "fx": st["fx"], "fy": st["fy"], "cx": st["cx"], "cy": st["cy"],
+            },
+            "image_size": {"width": st["image_width"], "height": st["image_height"]},
+            "image_name": st.get("image_name"),
+            "camera_source": {"type": "internal_eval_cache.camera_states", "stage_tag": args.stage_tag},
+        }
+        refs = {
+            "left_ref_frame_id": int(rec.left_ref_frame_id),
+            "right_ref_frame_id": int(rec.right_ref_frame_id),
+            "left_ref_pose": left_ref["pose_c2w"],
+            "right_ref_pose": right_ref["pose_c2w"],
+            "left_ref_rgb_path": str(Path(left_ref["image_path"])),
+            "right_ref_rgb_path": str(Path(right_ref["image_path"])),
+            "ref_pose_source": {"type": "internal_eval_cache.camera_states", "stage_tag": args.stage_tag},
+        }
+        effective_brpo_root = args.brpo_mask_root
+        default_brpo_root = default_verification_root(run_root, args.stage_tag)
+        if effective_brpo_root is None and default_brpo_root.exists():
+            effective_brpo_root = str(default_brpo_root)
+
+        target_left_source = None
+        target_right_source = None
+        target_fused_source = None
+
+        source_meta = {
+            "render_rgb_source": rec.render_rgb_path,
+            "render_depth_source": rec.render_depth_path,
+            "target_depth_source": rec.render_depth_path,
+            "target_depth_for_refine_source": rec.render_depth_path,
+            "left_ref_rgb_source": str(Path(left_ref["image_path"])),
+            "right_ref_rgb_source": str(Path(right_ref["image_path"])),
+            "target_rgb_source_mode": args.target_rgb_source,
+            "brpo_mask_root": effective_brpo_root,
+            "verification_root": effective_brpo_root,
+        }
+        if not args.dry_run:
+            write_json(sample_dir / "camera.json", camera)
+            write_json(sample_dir / "refs.json", refs)
+
+        render_rgb_src = Path(rec.render_rgb_path)
+        render_depth_src = Path(rec.render_depth_path)
+        if not args.dry_run:
+            symlink_force(render_rgb_src, sample_dir / "render_rgb.png")
+            symlink_force(render_depth_src, sample_dir / "render_depth.npy")
+            symlink_force(render_depth_src, sample_dir / "target_depth.npy")
+            symlink_force(render_depth_src, sample_dir / "target_depth_for_refine.npy")
+            symlink_force(Path(left_ref["image_path"]), sample_dir / "ref_rgb_left.png")
+            symlink_force(Path(right_ref["image_path"]), sample_dir / "ref_rgb_right.png")
+
+        left_fixed = resolve_fixed_path(args.left_fixed_root, rec.image_name)
+        right_fixed = resolve_fixed_path(args.right_fixed_root, rec.image_name)
+        if args.target_rgb_source == "difix":
+            # fall back to run_root/difix if roots not provided
+            left_fixed = left_fixed or Path(rec.left_fixed_path)
+            right_fixed = right_fixed or Path(rec.right_fixed_path)
+            if not left_fixed.exists() or not right_fixed.exists():
+                raise FileNotFoundError(f"Missing difix outputs for image_name={rec.image_name}")
+            target_left_source = str(left_fixed.resolve())
+            target_right_source = str(right_fixed.resolve())
+            if not args.dry_run:
+                symlink_force(left_fixed, sample_dir / "target_rgb_left.png")
+                symlink_force(right_fixed, sample_dir / "target_rgb_right.png")
+        else:
+            target_left_source = str(render_rgb_src.resolve())
+            target_right_source = str(render_rgb_src.resolve())
+            if not args.dry_run:
+                symlink_force(render_rgb_src, sample_dir / "target_rgb_left.png")
+                symlink_force(render_rgb_src, sample_dir / "target_rgb_right.png")
+
+        fusion_paths = {}
+        if not args.dry_run:
+            fusion_paths = maybe_link_fusion_artifacts(sample_dir, run_root, rec.frame_id, strict=False)
+        if fusion_paths.get("target_rgb_fused_path"):
+            target_fused_source = str((fusion_frame_root(run_root, rec.frame_id) / "target_rgb_fused.png").resolve())
+
+        source_meta["target_rgb_left_source"] = target_left_source
+        source_meta["target_rgb_right_source"] = target_right_source
+        source_meta["target_rgb_fused_source"] = target_fused_source
+        if not args.dry_run:
+            write_json(sample_dir / "source_meta.json", source_meta)
+
+        brpo_paths = {}
+        if not args.dry_run:
+            brpo_paths = maybe_link_brpo_artifacts(sample_dir, effective_brpo_root, rec.frame_id, args.strict_brpo_mask)
+            ensure_dir(sample_dir / "diag")
+
+        sample_meta = {
+            "sample_id": int(rec.frame_id),
+            "frame_id": int(rec.frame_id),
+            "placement": rec.placement,
+            "camera_path": f"samples/{rec.frame_id}/camera.json",
+            "refs_path": f"samples/{rec.frame_id}/refs.json",
+            "source_meta_path": f"samples/{rec.frame_id}/source_meta.json",
+            "render_rgb_path": f"samples/{rec.frame_id}/render_rgb.png",
+            "render_depth_path": f"samples/{rec.frame_id}/render_depth.npy",
+            "target_rgb_left_path": f"samples/{rec.frame_id}/target_rgb_left.png",
+            "target_rgb_right_path": f"samples/{rec.frame_id}/target_rgb_right.png",
+            "target_depth_path": f"samples/{rec.frame_id}/target_depth.npy",
+            "target_depth_for_refine_path": f"samples/{rec.frame_id}/target_depth_for_refine.npy",
+            "ref_rgb_left_path": f"samples/{rec.frame_id}/ref_rgb_left.png",
+            "ref_rgb_right_path": f"samples/{rec.frame_id}/ref_rgb_right.png",
+        }
+        if fusion_paths:
+            sample_meta.update(fusion_paths)
+        if brpo_paths:
+            sample_meta.update(brpo_paths)
+        samples_meta.append(sample_meta)
+
+    cache_manifest = {
+        "schema_version": SCHEMA_VERSION,
+        "scene_name": args.scene_name,
+        "run_key": args.run_key,
+        "backend": "s3po_internal",
+        "internal_cache_root": str(internal_cache_root.resolve()),
+        "stage_tag": args.stage_tag,
+        "target_rgb_source": args.target_rgb_source,
+        "has_fusion_root": bool(default_fusion_root(run_root).exists()),
+        "verification_root": str(default_verification_root(run_root, args.stage_tag)) if default_verification_root(run_root, args.stage_tag).exists() else None,
+        "fusion_root": str(default_fusion_root(run_root)) if default_fusion_root(run_root).exists() else None,
+        "num_samples": len(records),
+        "sample_ids": [r.frame_id for r in records],
+        "samples": samples_meta,
+    }
+    if not args.dry_run:
+        write_json(pseudo_cache / "manifest.json", cache_manifest)
+    pack_manifest = {
+        "scene_name": args.scene_name,
+        "run_key": args.run_key,
+        "stage_tag": args.stage_tag,
+        "schema_version": SCHEMA_VERSION,
+        "pseudo_ids": [r.frame_id for r in records],
+        "target_rgb_source": args.target_rgb_source,
+        "has_fusion_root": bool(default_fusion_root(run_root).exists()),
+        "has_brpo_mask_root": bool(args.brpo_mask_root or default_verification_root(run_root, args.stage_tag).exists()),
+        "num_samples": len(records),
+    }
+    if not args.dry_run:
+        write_json(run_root / "manifests" / "pack_manifest.json", pack_manifest)
+    print(json.dumps(pack_manifest, indent=2, ensure_ascii=False))
+
+
+def main():
+    args = parse_args()
+    internal_cache_root = Path(args.internal_cache_root)
+    run_root = Path(args.output_root) if args.output_root else build_default_output_root(internal_cache_root, args.run_key)
+    ensure_dir(run_root)
+    ensure_dir(run_root / "manifests")
+    if args.stage in ("select", "all"):
+        stage_select(args, run_root)
+    if args.stage in ("difix", "all"):
+        stage_difix(args, run_root)
+    if args.stage in ("fusion", "all"):
+        stage_fusion(args, run_root)
+    if args.stage in ("verify", "all"):
+        stage_verify(args, run_root)
+    if args.stage in ("pack", "all"):
+        stage_pack(args, run_root)
+
+
+if __name__ == "__main__":
+    main()

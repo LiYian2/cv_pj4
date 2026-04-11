@@ -337,30 +337,14 @@ def load_real_viewpoints(train_manifest_path: str, train_rgb_dir: str | None):
     return views, str(train_rgb_dir)
 
 
-def resolve_brpo_confidence_candidates(target_side: str):
-    if target_side == "fused":
-        return ["confidence_mask_brpo_fused.npy", "confidence_mask_brpo.npy"]
-    if target_side == "right":
-        return ["confidence_mask_brpo_right.npy", "confidence_mask_brpo.npy"]
-    return ["confidence_mask_brpo_left.npy", "confidence_mask_brpo.npy"]
-
-
-def resolve_brpo_confidence_path(frame_dir: Path, target_side: str):
-    for name in resolve_brpo_confidence_candidates(target_side):
-        p = frame_dir / name
-        if p.exists():
-            return p
-    return None
-
-
-def load_brpo_confidence_mask(brpo_mask_root: Path, frame_id: int, target_side: str = "left") -> tuple[np.ndarray, Path]:
+def load_brpo_confidence_mask(brpo_mask_root: Path, frame_id: int) -> np.ndarray:
     frame_dir = brpo_mask_root / f"frame_{int(frame_id):04d}"
-    conf_path = resolve_brpo_confidence_path(frame_dir, target_side)
-    if conf_path is None:
+    conf_path = frame_dir / "confidence_mask_brpo.npy"
+    if not conf_path.exists():
         raise FileNotFoundError(
-            f"Missing BRPO confidence mask for frame_id={frame_id}, target_side={target_side}: {frame_dir}"
+            f"Missing BRPO confidence mask for frame_id={frame_id}: {conf_path}"
         )
-    return np.load(conf_path).astype(np.float32), conf_path
+    return np.load(conf_path).astype(np.float32)
 
 
 def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str, confidence_mask_source: str = "legacy", brpo_mask_root: str = None):
@@ -404,15 +388,16 @@ def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str, confidence_
         
         # Load confidence mask
         if confidence_mask_source == "brpo":
-            local_brpo = resolve_brpo_confidence_path(sd, target_side)
-            if local_brpo is not None:
+            local_brpo = sd / "confidence_mask_brpo.npy"
+            if local_brpo.exists():
                 conf_path = local_brpo
-                conf_source_kind = f"sample_local_brpo_{target_side}"
+                conf_source_kind = "sample_local_brpo"
                 conf = np.load(local_brpo).astype(np.float32)
             else:
                 frame_id = int(cam.get("frame_id", sid))
-                conf, conf_path = load_brpo_confidence_mask(brpo_root, frame_id, target_side)
-                conf_source_kind = f"external_brpo_root_{target_side}"
+                conf_path = (brpo_root / f"frame_{int(frame_id):04d}" / "confidence_mask_brpo.npy") if brpo_root else None
+                conf_source_kind = "external_brpo_root"
+                conf = load_brpo_confidence_mask(brpo_root, frame_id)
         elif target_side == "fused":
             conf_path = sd / conf_name
             if not conf_path.exists():

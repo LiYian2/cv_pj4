@@ -375,7 +375,7 @@ run_pseudo_refinement_v2 (Stage A only)
 ### 6.4 下一阶段待办 ⏳
 
 - [ ] 用新 schema 跑一轮最小 `left/right/fused` consumer/refine 对照
-- [ ] 把 `run_pseudo_refinement_v2.py` 的 Stage A 从 smoke 推进到可评估版本
+- [ ] 规划并实现 `run_pseudo_refinement_v2.py` 的 Stage A only
 - [ ] 只有在 schema 与 Stage A 稳定后，再考虑 Stage B joint optimize
 
 ### 6.5 当前不建议优先推进的事项 🚫

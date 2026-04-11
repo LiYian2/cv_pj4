@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-11 17:20
+> 更新时间：2026-04-11 16:57
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -52,10 +52,9 @@
 - 已完成 `part2 full rerun → internal cache → replay consistency → internal prepare + Difix + BRPO verification → mask-only ablation`；
 - 已证明 current BRPO verification 链路**能跑通**，但当前 `brpo mask` 在 `v1 fixed-pose RGB-only refine` 下**还没有优于 legacy mask**；
 - **Phase 6 第一轮核心 plumbing 已完成**：`fusion + side-aware/fused BRPO mask + canonical pack schema + refine consumer` 已经打通，并在 3-frame prototype 上通过真实 smoke；
-- **Phase 7 / Stage A 最小版已启动并跑通 smoke**：`run_pseudo_refinement_v2.py` 已能在 `fused + brpo` 口径下优化 pseudo pose delta / exposure 并导出 pseudo camera states；
-- 下一阶段不再继续回到旧 left-only v1 mask 对照，而是基于新的 canonical schema 和 Stage A 骨架，继续收口 BRPO-style refine v2。
+- 下一阶段不再继续回到旧 left-only v1 mask 对照，而是基于新的 canonical schema，决定做小规模 fused/side-aware ablation，或直接推进 `run_pseudo_refinement_v2 / Stage A`。
 
-一句话说：**internal route 已经完成 Phase 1–6 的 schema 打通，并已进入 Phase 7A 的最小实现；当前最优先的是把 Stage A 从 smoke 推进到可用实验骨架。**
+一句话说：**internal route 已经完成 Phase 1–5，并在 Phase 6 完成第一轮 schema 打通；当前最优先的是在新 schema 上做最小验证闭环，而不是继续在旧消费方式上调 mask。**
 
 ## 2. 数据结构
 
@@ -220,7 +219,6 @@ samples/<frame_id>/
 | `prepare_stage1_difix_dataset_s3po_internal.py` | internal select / difix / fusion / verify / pack | ✅ 可用 | 当前已支持 `all = select→difix→fusion→verify→pack` |
 | `brpo_build_mask_from_internal_cache.py` | 从 internal cache 构建 BRPO verification / confidence mask | ✅ 可用 | 当前 verification 已支持吃 Difix left/right repaired 图 |
 | `run_pseudo_refinement.py` | v1 standalone refine 入口 | ✅ 可用 | 当前支持 `confidence_mask_source=legacy|brpo` |
-| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 最小版已落地 | 当前已支持 Stage A only：pseudo pose delta + exposure + masked RGBD loss |
 
 ### 3.2 pseudo_branch
 
@@ -356,8 +354,6 @@ run_pseudo_refinement_v2 (Stage A only)
 - [x] **Phase 6 第一轮 plumbing 已完成**：`fusion` stage、`target_rgb_fused`、`target_depth_for_refine`、`confidence_mask_brpo_{left,right,fused}`、pack schema、refine consumer 适配均已落地
 - [x] 真实 3-frame prototype 已重跑 `fusion → verify → pack`，新 schema 已落到 `pseudo_cache/`
 - [x] `run_pseudo_refinement.py` 已在 `target_side=fused + confidence_mask_source=brpo` 下完成 2-iter smoke
-- [x] `run_pseudo_refinement_v2.py`、`pseudo_camera_state.py`、`pseudo_loss_v2.py`、`pseudo_refine_scheduler.py` 已落地
-- [x] Stage A 2-iter smoke 已完成：`fused + brpo` 口径下 pseudo pose delta / exposure 已出现非零更新，并成功导出 `pseudo_camera_states_{init,stageA,final}.json` 与 `stageA_history.json`
 
 ### 6.2 当前判断 ⚠️
 
@@ -368,14 +364,16 @@ run_pseudo_refinement_v2 (Stage A only)
 
 ### 6.3 当前进行中 ⚠️
 
-- [ ] 把 `run_pseudo_refinement_v2.py` 的 Stage A 从 smoke 扩成可用实验骨架（更完整 CLI / 输出 / 正则 /日志）
+- [ ] 同步更新 docs / runbook，使其反映 Phase 6 第一轮代码已完成
 - [ ] 在新 schema 上做小规模 `left/right/fused` refine 对照，确认最小消费闭环
-- [ ] 为 `run_pseudo_refinement_v2 / Stage B` 明确输入契约与切换边界
+- [ ] 为 `run_pseudo_refinement_v2 / Stage A` 明确最终输入契约
 
 ### 6.4 下一阶段待办 ⏳
 
-- [ ] 用新 schema 跑一轮最小 `left/right/fused` consumer/refine 对照
-- [ ] 把 `run_pseudo_refinement_v2.py` 的 Stage A 从 smoke 推进到可评估版本
+- [ ] 在 `internal prepare` 中正式接入 `fusion` stage
+- [ ] 写出 `target_rgb_fused.png / fusion_meta.json`
+- [ ] 定义 `confidence_mask_brpo_left / right / fused`
+- [ ] 规划并实现 `run_pseudo_refinement_v2.py` 的 Stage A only
 - [ ] 只有在 schema 与 Stage A 稳定后，再考虑 Stage B joint optimize
 
 ### 6.5 当前不建议优先推进的事项 🚫

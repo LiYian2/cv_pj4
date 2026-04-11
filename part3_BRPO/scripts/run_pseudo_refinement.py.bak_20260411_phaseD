@@ -337,30 +337,14 @@ def load_real_viewpoints(train_manifest_path: str, train_rgb_dir: str | None):
     return views, str(train_rgb_dir)
 
 
-def resolve_brpo_confidence_candidates(target_side: str):
-    if target_side == "fused":
-        return ["confidence_mask_brpo_fused.npy", "confidence_mask_brpo.npy"]
-    if target_side == "right":
-        return ["confidence_mask_brpo_right.npy", "confidence_mask_brpo.npy"]
-    return ["confidence_mask_brpo_left.npy", "confidence_mask_brpo.npy"]
-
-
-def resolve_brpo_confidence_path(frame_dir: Path, target_side: str):
-    for name in resolve_brpo_confidence_candidates(target_side):
-        p = frame_dir / name
-        if p.exists():
-            return p
-    return None
-
-
-def load_brpo_confidence_mask(brpo_mask_root: Path, frame_id: int, target_side: str = "left") -> tuple[np.ndarray, Path]:
+def load_brpo_confidence_mask(brpo_mask_root: Path, frame_id: int) -> np.ndarray:
     frame_dir = brpo_mask_root / f"frame_{int(frame_id):04d}"
-    conf_path = resolve_brpo_confidence_path(frame_dir, target_side)
-    if conf_path is None:
+    conf_path = frame_dir / "confidence_mask_brpo.npy"
+    if not conf_path.exists():
         raise FileNotFoundError(
-            f"Missing BRPO confidence mask for frame_id={frame_id}, target_side={target_side}: {frame_dir}"
+            f"Missing BRPO confidence mask for frame_id={frame_id}: {conf_path}"
         )
-    return np.load(conf_path).astype(np.float32), conf_path
+    return np.load(conf_path).astype(np.float32)
 
 
 def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str, confidence_mask_source: str = "legacy", brpo_mask_root: str = None):
@@ -368,8 +352,7 @@ def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str, confidence_
     manifest = load_json(pseudo_cache_path / "manifest.json")
     brpo_root = Path(brpo_mask_root) if brpo_mask_root else None
     if confidence_mask_source == "brpo" and brpo_root is None:
-        # allowed if each sample already contains local confidence_mask_brpo.npy
-        pass
+        raise ValueError("confidence_mask_source=brpo requires --brpo_mask_root")
     
     # Determine target RGB filename and confidence mask based on target_side
     if target_side == "fused":
@@ -383,13 +366,6 @@ def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str, confidence_
         conf_name = "confidence_mask.npy"
 
     views = []
-    pseudo_manifest_info = {
-        "schema_version": manifest.get("schema_version"),
-        "scene_name": manifest.get("scene_name"),
-        "run_key": manifest.get("run_key"),
-        "stage_tag": manifest.get("stage_tag"),
-        "target_rgb_source": manifest.get("target_rgb_source"),
-    }
     for sid in manifest["sample_ids"]:
         sd = pseudo_cache_path / "samples" / str(sid)
         cam = load_json(sd / "camera.json")
@@ -404,15 +380,8 @@ def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str, confidence_
         
         # Load confidence mask
         if confidence_mask_source == "brpo":
-            local_brpo = resolve_brpo_confidence_path(sd, target_side)
-            if local_brpo is not None:
-                conf_path = local_brpo
-                conf_source_kind = f"sample_local_brpo_{target_side}"
-                conf = np.load(local_brpo).astype(np.float32)
-            else:
-                frame_id = int(cam.get("frame_id", sid))
-                conf, conf_path = load_brpo_confidence_mask(brpo_root, frame_id, target_side)
-                conf_source_kind = f"external_brpo_root_{target_side}"
+            frame_id = int(cam.get("frame_id", sid))
+            conf = load_brpo_confidence_mask(brpo_root, frame_id)
         elif target_side == "fused":
             conf_path = sd / conf_name
             if not conf_path.exists():
@@ -420,35 +389,21 @@ def load_pseudo_viewpoints(pseudo_cache_path: str, target_side: str, confidence_
                     f"Missing {conf_name} for sample {sid} with target_side=fused. "
                     f"Run build_pseudo_cache.py with fusion enabled first."
                 )
-            conf_source_kind = "sample_fused_confidence"
             conf = np.load(conf_path)
         else:
             conf_path = sd / conf_name
-            if conf_path.exists():
-                conf_source_kind = "sample_legacy_confidence"
-                conf = np.load(conf_path)
-            else:
-                conf_source_kind = "depth_valid_fallback"
-                conf = (depth > 0).astype(np.float32)
-
-        conf = conf.astype(np.float32)
-        positive = conf[conf > 0]
+            conf = np.load(conf_path) if conf_path.exists() else (depth > 0).astype(np.float32)
+        
         views.append({
             "kind": "pseudo",
             "sample_id": int(sid),
             "frame_id": int(cam.get("frame_id", sid)),
-            "target_rgb_path": str(target_rgb_path),
-            "target_depth_path": str(sd / "target_depth.npy"),
-            "confidence_path": str(conf_path) if conf_path is not None else None,
-            "confidence_source_kind": conf_source_kind,
-            "confidence_nonzero_ratio": float((conf > 0).sum() / conf.size),
-            "confidence_mean_positive": float(positive.mean()) if positive.size > 0 else 0.0,
             "vp": create_viewpoint(cam, rgb, uid=int(sid)),
             "rgb": rgb,
             "depth": depth.astype(np.float32),
-            "conf": conf,
+            "conf": conf.astype(np.float32),
         })
-    return views, pseudo_manifest_info
+    return views
 
 
 def sample_indices(n_total: int, n_sample: int, rng: np.random.Generator):
@@ -516,7 +471,7 @@ def main():
     if gaussians.max_radii2D.shape[0] != len(gaussians.get_xyz):
         gaussians.max_radii2D = torch.zeros(len(gaussians.get_xyz), device="cuda")
 
-    pseudo_views, pseudo_manifest_info = load_pseudo_viewpoints(args.pseudo_cache, args.target_side, args.confidence_mask_source, args.brpo_mask_root)
+    pseudo_views = load_pseudo_viewpoints(args.pseudo_cache, args.target_side, args.confidence_mask_source, args.brpo_mask_root)
     if not pseudo_views:
         raise RuntimeError(f"No pseudo viewpoints found under {args.pseudo_cache}")
     print(f"  Loaded {len(pseudo_views)} pseudo viewpoints (target_side={args.target_side})")
@@ -667,21 +622,6 @@ def main():
                 "num_real_viewpoints_loaded": len(real_views),
                 "num_pseudo_viewpoints_loaded": len(pseudo_views),
                 "num_fused_samples_used": len(pseudo_views) if args.target_side == "fused" else 0,
-                "pseudo_manifest_info": pseudo_manifest_info,
-                "confidence_mask_source": args.confidence_mask_source,
-                "pseudo_sample_meta": [
-                    {
-                        "sample_id": int(v["sample_id"]),
-                        "frame_id": int(v["frame_id"]),
-                        "target_rgb_path": v.get("target_rgb_path"),
-                        "target_depth_path": v.get("target_depth_path"),
-                        "confidence_path": v.get("confidence_path"),
-                        "confidence_source_kind": v.get("confidence_source_kind"),
-                        "confidence_nonzero_ratio": v.get("confidence_nonzero_ratio"),
-                        "confidence_mean_positive": v.get("confidence_mean_positive"),
-                    }
-                    for v in pseudo_views
-                ],
                 "resolved_train_rgb_dir": resolved_train_rgb_dir,
                 "pseudo_trainable_params": sorted(pseudo_trainable_params),
                 "pseudo_frozen_params": sorted(pseudo_frozen_params),
