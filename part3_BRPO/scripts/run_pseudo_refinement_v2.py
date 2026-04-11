@@ -50,7 +50,18 @@ def parse_args():
     p.add_argument('--stageA_lr_trans', type=float, default=0.001)
     p.add_argument('--stageA_lr_exp', type=float, default=0.01)
     p.add_argument('--stageA_disable_depth', action='store_true')
-    p.add_argument('--stageA_target_depth_mode', choices=['auto', 'target_depth_for_refine', 'target_depth', 'render_depth'], default='auto')
+    p.add_argument(
+        '--stageA_mask_mode',
+        choices=['auto', 'train_mask', 'seed_support_only', 'legacy'],
+        default='train_mask',
+        help='Which upstream mask layer Stage A should actually consume.',
+    )
+    p.add_argument(
+        '--stageA_target_depth_mode',
+        choices=['auto', 'blended_depth', 'render_depth_only', 'target_depth_for_refine', 'target_depth', 'render_depth'],
+        default='blended_depth',
+        help='Which depth target Stage A should actually consume.',
+    )
     p.add_argument('--num_pseudo_views', type=int, default=4)
     p.add_argument('--sh_degree', type=int, default=0)
     p.add_argument('--seed', type=int, default=0)
@@ -64,13 +75,22 @@ def sample_indices(n_total: int, n_sample: int, rng: np.random.Generator):
     return rng.choice(n_total, n_sample, replace=False).tolist()
 
 
+def _resolve_depth_mode_alias(mode: str):
+    if mode == 'blended_depth':
+        return 'target_depth_for_refine'
+    if mode == 'render_depth_only':
+        return 'render_depth'
+    return mode
+
+
 def resolve_depth_target_path(sample_dir: Path, mode: str):
+    resolved_mode = _resolve_depth_mode_alias(mode)
     candidates = []
-    if mode == 'target_depth_for_refine':
+    if resolved_mode == 'target_depth_for_refine':
         candidates = [('target_depth_for_refine', sample_dir / 'target_depth_for_refine.npy')]
-    elif mode == 'target_depth':
+    elif resolved_mode == 'target_depth':
         candidates = [('target_depth', sample_dir / 'target_depth.npy')]
-    elif mode == 'render_depth':
+    elif resolved_mode == 'render_depth':
         candidates = [('render_depth', sample_dir / 'render_depth.npy')]
     else:
         candidates = [
@@ -82,6 +102,65 @@ def resolve_depth_target_path(sample_dir: Path, mode: str):
         if path.exists():
             return kind, path
     raise FileNotFoundError(f'No depth target candidate found under {sample_dir} for mode={mode}')
+
+
+def _mask_train_candidates(target_side: str):
+    if target_side == 'fused':
+        return ['train_confidence_mask_brpo_fused.npy', 'confidence_mask_brpo_fused.npy', 'confidence_mask_brpo.npy']
+    if target_side == 'right':
+        return ['train_confidence_mask_brpo_right.npy', 'confidence_mask_brpo_right.npy', 'confidence_mask_brpo.npy']
+    return ['train_confidence_mask_brpo_left.npy', 'confidence_mask_brpo_left.npy', 'confidence_mask_brpo.npy']
+
+
+def _compose_seed_support_mask(sample_dir: Path, target_side: str):
+    seed_left = np.load(sample_dir / 'seed_support_left.npy').astype(np.float32)
+    seed_right = np.load(sample_dir / 'seed_support_right.npy').astype(np.float32)
+    seed_both = np.load(sample_dir / 'seed_support_both.npy').astype(np.float32)
+    seed_single = np.load(sample_dir / 'seed_support_single.npy').astype(np.float32)
+
+    if target_side == 'fused':
+        conf = np.zeros_like(seed_both, dtype=np.float32)
+        conf[seed_both > 0.5] = 1.0
+        conf[seed_single > 0.5] = 0.5
+        return conf, 'generated::seed_support_fused'
+
+    if target_side == 'right':
+        right_only = (seed_right > 0.5) & ~(seed_both > 0.5)
+        conf = np.zeros_like(seed_both, dtype=np.float32)
+        conf[seed_both > 0.5] = 1.0
+        conf[right_only] = 0.5
+        return conf, 'generated::seed_support_right'
+
+    left_only = (seed_left > 0.5) & ~(seed_both > 0.5)
+    conf = np.zeros_like(seed_both, dtype=np.float32)
+    conf[seed_both > 0.5] = 1.0
+    conf[left_only] = 0.5
+    return conf, 'generated::seed_support_left'
+
+
+def resolve_stageA_mask(sample_dir: Path, target_side: str, requested_mode: str, default_conf: np.ndarray, default_path: str | None, default_kind: str | None):
+    if requested_mode == 'auto':
+        if default_conf is not None:
+            return default_conf.astype(np.float32), default_path, default_kind, 'auto'
+        requested_mode = 'train_mask'
+
+    if requested_mode == 'legacy':
+        if default_conf is None:
+            raise FileNotFoundError(f'No legacy/default confidence mask available under {sample_dir}')
+        return default_conf.astype(np.float32), default_path, default_kind or 'legacy_default', 'legacy'
+
+    if requested_mode == 'train_mask':
+        for name in _mask_train_candidates(target_side):
+            path = sample_dir / name
+            if path.exists():
+                return np.load(path).astype(np.float32), str(path), f'sample_explicit_{name}', 'train_mask'
+        raise FileNotFoundError(f'No train-mask candidate found under {sample_dir} for target_side={target_side}')
+
+    if requested_mode == 'seed_support_only':
+        conf, kind = _compose_seed_support_mask(sample_dir, target_side)
+        return conf, kind, kind, 'seed_support_only'
+
+    raise ValueError(f'Unsupported stageA_mask_mode={requested_mode}')
 
 
 def load_stageA_pseudo_views(args):
@@ -96,13 +175,44 @@ def load_stageA_pseudo_views(args):
         sample_dir = Path(view['target_rgb_path']).parent
         source_meta_path = sample_dir / 'source_meta.json'
         source_meta = json.load(open(source_meta_path)) if source_meta_path.exists() else {}
+
+        conf_arr, conf_path, conf_kind, conf_mode = resolve_stageA_mask(
+            sample_dir=sample_dir,
+            target_side=args.target_side,
+            requested_mode=args.stageA_mask_mode,
+            default_conf=view.get('conf'),
+            default_path=view.get('confidence_path'),
+            default_kind=view.get('confidence_source_kind'),
+        )
+        positive = conf_arr[conf_arr > 0]
+        view['conf'] = conf_arr.astype(np.float32)
+        view['confidence_path'] = conf_path
+        view['confidence_source_kind'] = conf_kind
+        view['stageA_mask_mode_effective'] = conf_mode
+        view['confidence_nonzero_ratio'] = float((conf_arr > 0).sum() / conf_arr.size)
+        view['confidence_mean_positive'] = float(positive.mean()) if positive.size > 0 else 0.0
+
         depth_kind, depth_for_refine = resolve_depth_target_path(sample_dir, args.stageA_target_depth_mode)
         depth_arr = np.load(depth_for_refine).astype(np.float32)
+        depth_meta_path = sample_dir / 'target_depth_for_refine_meta.json'
+        depth_meta = json.load(open(depth_meta_path)) if depth_meta_path.exists() else {}
+        source_map_path = sample_dir / 'target_depth_for_refine_source_map.npy'
+        source_map = np.load(source_map_path) if source_map_path.exists() else None
+
         view['source_meta'] = source_meta
+        view['depth_meta'] = depth_meta
         view['target_depth_for_refine_kind'] = depth_kind
+        view['stageA_target_depth_mode_effective'] = _resolve_depth_mode_alias(args.stageA_target_depth_mode)
         view['target_depth_for_refine_path'] = str(depth_for_refine)
+        view['target_depth_for_refine_source_map_path'] = str(source_map_path) if source_map_path.exists() else None
         view['depth_for_refine'] = depth_arr
         view['target_depth_nonzero_ratio'] = float((depth_arr > 1e-6).sum() / depth_arr.size)
+        if source_map is not None:
+            view['target_depth_verified_ratio'] = float((source_map != 0).sum() / source_map.size)
+            view['target_depth_render_fallback_ratio'] = float((source_map == 0).sum() / source_map.size)
+        else:
+            view['target_depth_verified_ratio'] = depth_meta.get('verified_ratio')
+            view['target_depth_render_fallback_ratio'] = depth_meta.get('render_fallback_ratio')
         make_viewpoint_trainable(view['vp'])
     return pseudo_views, pseudo_manifest_info
 
@@ -142,6 +252,12 @@ def main():
     if not pseudo_views:
         raise RuntimeError(f'No pseudo viewpoints found under {args.pseudo_cache}')
     print(f'  Loaded {len(pseudo_views)} pseudo viewpoints (target_side={args.target_side}, confidence_mask_source={args.confidence_mask_source})')
+    print(
+        '  StageA effective sources: '
+        f"mask_mode={args.stageA_mask_mode}, depth_mode={args.stageA_target_depth_mode}, "
+        f"mean_mask_cov={np.mean([v['confidence_nonzero_ratio'] for v in pseudo_views]):.4f}, "
+        f"mean_depth_verified={np.mean([v.get('target_depth_verified_ratio') or 0.0 for v in pseudo_views]):.4f}"
+    )
 
     init_states = [export_view_state(v) for v in pseudo_views]
     save_json(output_dir / 'pseudo_camera_states_init.json', init_states)
@@ -229,6 +345,14 @@ def main():
         'stage_mode': args.stage_mode,
         'pseudo_manifest_info': pseudo_manifest_info,
         'num_pseudo_viewpoints_loaded': len(pseudo_views),
+        'effective_source_summary': {
+            'stageA_mask_mode_requested': args.stageA_mask_mode,
+            'stageA_target_depth_mode_requested': args.stageA_target_depth_mode,
+            'stageA_disable_depth': bool(args.stageA_disable_depth),
+            'mean_confidence_nonzero_ratio': float(np.mean([v.get('confidence_nonzero_ratio', 0.0) for v in pseudo_views])),
+            'mean_target_depth_verified_ratio': float(np.mean([(v.get('target_depth_verified_ratio') or 0.0) for v in pseudo_views])),
+            'mean_target_depth_render_fallback_ratio': float(np.mean([(v.get('target_depth_render_fallback_ratio') or 0.0) for v in pseudo_views])),
+        },
         'pseudo_sample_meta': [
             {
                 'sample_id': int(v['sample_id']),
@@ -236,10 +360,15 @@ def main():
                 'target_rgb_path': v.get('target_rgb_path'),
                 'target_depth_for_refine_path': v.get('target_depth_for_refine_path'),
                 'target_depth_for_refine_kind': v.get('target_depth_for_refine_kind'),
+                'stageA_target_depth_mode_effective': v.get('stageA_target_depth_mode_effective'),
                 'target_depth_nonzero_ratio': v.get('target_depth_nonzero_ratio'),
+                'target_depth_verified_ratio': v.get('target_depth_verified_ratio'),
+                'target_depth_render_fallback_ratio': v.get('target_depth_render_fallback_ratio'),
                 'target_depth_for_refine_source': v.get('source_meta', {}).get('target_depth_for_refine_source'),
+                'target_depth_for_refine_source_map_path': v.get('target_depth_for_refine_source_map_path'),
                 'confidence_path': v.get('confidence_path'),
                 'confidence_source_kind': v.get('confidence_source_kind'),
+                'stageA_mask_mode_effective': v.get('stageA_mask_mode_effective'),
                 'confidence_nonzero_ratio': v.get('confidence_nonzero_ratio'),
                 'confidence_mean_positive': v.get('confidence_mean_positive'),
             }
@@ -247,6 +376,7 @@ def main():
         ],
         'history': history,
         'stageA_disable_depth': bool(args.stageA_disable_depth),
+        'stageA_mask_mode': args.stageA_mask_mode,
         'stageA_target_depth_mode': args.stageA_target_depth_mode,
         'final_states': stageA_states,
         'final_delta_summary': [
