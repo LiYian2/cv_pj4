@@ -1,10 +1,11 @@
 # -*- coding: utf-8 -*-
 """BRPO-style single-branch reprojection verification.
 
-Phase B prototype only:
+Phase B/M3 prototype:
 - no EDP dependency
 - no refine integration
 - use matcher + ref depth rendered on-demand from stage PLY
+- additionally export pseudo-view sparse verified depth maps for Stage M3
 """
 import os
 from typing import Dict, List, Tuple
@@ -159,6 +160,8 @@ def verify_single_branch(
     reproj_error_map = np.zeros((h, w), dtype=np.float32)
     rel_depth_error_map = np.zeros((h, w), dtype=np.float32)
     match_density = np.zeros((h, w), dtype=np.int32)
+    projected_depth_map = np.zeros((h, w), dtype=np.float32)
+    projected_depth_valid_mask = np.zeros((h, w), dtype=np.float32)
 
     x = np.round(pts_pseudo[:, 0]).astype(int)
     y = np.round(pts_pseudo[:, 1]).astype(int)
@@ -169,18 +172,24 @@ def verify_single_branch(
         match_density[yi, xi] += 1
         if support[i]:
             support_mask[yi, xi] = 1.0
+            if projected_depth_valid_mask[yi, xi] == 0 or rel_depth_err[i] < rel_depth_error_map[yi, xi] or rel_depth_error_map[yi, xi] == 0:
+                projected_depth_map[yi, xi] = reproj_z[i]
+                projected_depth_valid_mask[yi, xi] = 1.0
         if reproj_error_map[yi, xi] == 0 or reproj_err[i] < reproj_error_map[yi, xi]:
             reproj_error_map[yi, xi] = reproj_err[i]
         if np.isfinite(rel_depth_err[i]) and (rel_depth_error_map[yi, xi] == 0 or rel_depth_err[i] < rel_depth_error_map[yi, xi]):
             rel_depth_error_map[yi, xi] = rel_depth_err[i]
 
+    num_projected_depth = int((projected_depth_valid_mask > 0.5).sum())
     stats = {
         "num_matches": int(len(pts_pseudo)),
         "num_valid_ref_depth": int(valid_ref_depth.sum()),
         "num_valid_pseudo_depth": int(valid_pseudo_depth.sum()),
         "num_support": int(support.sum()),
+        "num_projected_depth": num_projected_depth,
         "support_ratio_vs_matches": float(support.sum() / max(len(pts_pseudo), 1)),
         "support_ratio_vs_image": float((support_mask > 0).sum() / float(h * w)),
+        "projected_depth_ratio_vs_image": float(num_projected_depth / float(h * w)),
         "mean_reproj_error": float(reproj_err[support].mean()) if support.any() else None,
         "mean_rel_depth_error": float(rel_depth_err[support].mean()) if support.any() else None,
         "tau_reproj_px": float(tau_reproj_px),
@@ -192,6 +201,8 @@ def verify_single_branch(
         "reproj_error_map": reproj_error_map,
         "rel_depth_error_map": rel_depth_error_map,
         "match_density": match_density.astype(np.float32),
+        "projected_depth_map": projected_depth_map,
+        "projected_depth_valid_mask": projected_depth_valid_mask,
         "stats": stats,
     }
 

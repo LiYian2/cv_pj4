@@ -7,7 +7,11 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
-SCHEMA_VERSION = "pseudo-cache-internal-v1.3"
+import numpy as np
+
+from pseudo_branch.brpo_depth_target import build_blended_target_depth
+
+SCHEMA_VERSION = "pseudo-cache-internal-v1.4"
 CAMERA_SCHEMA = "cam-internal-v1"
 
 
@@ -44,9 +48,16 @@ def parse_args():
     p.add_argument("--left-fixed-root", default=None)
     p.add_argument("--right-fixed-root", default=None)
 
-    # BRPO mask source (already built elsewhere for now)
+    # BRPO / M2 / M3 controls
     p.add_argument("--brpo-mask-root", default=None)
     p.add_argument("--strict-brpo-mask", action="store_true")
+    p.add_argument("--verification-mode", choices=["branch_first", "fused_first"], default="branch_first")
+    p.add_argument("--train-mask-mode", choices=["none", "propagate"], default="propagate")
+    p.add_argument("--prop-radius-px", type=int, default=2)
+    p.add_argument("--prop-tau-rel-depth", type=float, default=0.01)
+    p.add_argument("--prop-tau-rgb-l1", type=float, default=0.05)
+    p.add_argument("--depth-fallback-mode", choices=["render_depth", "none"], default="render_depth")
+    p.add_argument("--depth-both-mode", choices=["average"], default="average")
 
     # Difix args
     p.add_argument("--prompt", type=str, default="remove degradation")
@@ -363,6 +374,32 @@ def maybe_link_brpo_artifacts(sample_dir: Path, brpo_mask_root: Optional[str], f
         "support_right.npy": "support_right_path",
         "support_both.npy": "support_both_path",
         "support_single.npy": "support_single_path",
+        "seed_support_left.npy": "seed_support_left_path",
+        "seed_support_left.png": "seed_support_left_png_path",
+        "seed_support_right.npy": "seed_support_right_path",
+        "seed_support_right.png": "seed_support_right_png_path",
+        "seed_support_both.npy": "seed_support_both_path",
+        "seed_support_both.png": "seed_support_both_png_path",
+        "seed_support_single.npy": "seed_support_single_path",
+        "seed_support_single.png": "seed_support_single_png_path",
+        "train_confidence_mask_brpo_fused.npy": "train_confidence_mask_brpo_fused_path",
+        "train_confidence_mask_brpo_fused.png": "train_confidence_mask_brpo_fused_png_path",
+        "train_confidence_mask_brpo_left.npy": "train_confidence_mask_brpo_left_path",
+        "train_confidence_mask_brpo_left.png": "train_confidence_mask_brpo_left_png_path",
+        "train_confidence_mask_brpo_right.npy": "train_confidence_mask_brpo_right_path",
+        "train_confidence_mask_brpo_right.png": "train_confidence_mask_brpo_right_png_path",
+        "train_support_left.npy": "train_support_left_path",
+        "train_support_left.png": "train_support_left_png_path",
+        "train_support_right.npy": "train_support_right_path",
+        "train_support_right.png": "train_support_right_png_path",
+        "train_support_both.npy": "train_support_both_path",
+        "train_support_both.png": "train_support_both_png_path",
+        "train_support_single.npy": "train_support_single_path",
+        "train_support_single.png": "train_support_single_png_path",
+        "projected_depth_left.npy": "projected_depth_left_path",
+        "projected_depth_right.npy": "projected_depth_right_path",
+        "projected_depth_valid_left.npy": "projected_depth_valid_left_path",
+        "projected_depth_valid_right.npy": "projected_depth_valid_right_path",
         "verification_meta.json": "verification_meta_path",
     }
     present = {}
@@ -389,8 +426,10 @@ def maybe_link_brpo_artifacts(sample_dir: Path, brpo_mask_root: Optional[str], f
     return present
 
 
-def default_verification_root(run_root: Path, stage_tag: str) -> Path:
-    return run_root / "verification" / "brpo_phaseC" / stage_tag
+def default_verification_root(run_root: Path, stage_tag: str, verification_mode: str = "branch_first") -> Path:
+    if verification_mode == "branch_first":
+        return run_root / "verification" / "brpo_phaseC" / stage_tag
+    return run_root / "verification" / f"brpo_phaseC_{verification_mode}" / stage_tag
 
 
 def maybe_link_fusion_artifacts(sample_dir: Path, run_root: Path, frame_id: int, strict: bool = False):
@@ -421,7 +460,7 @@ def stage_verify(args, run_root: Path):
 
     records = load_internal_records(run_root)
     frame_ids = [r.frame_id for r in records]
-    out_root = default_verification_root(run_root, args.stage_tag)
+    out_root = default_verification_root(run_root, args.stage_tag, args.verification_mode)
     ensure_dir(out_root)
 
     cmd = [
@@ -438,8 +477,18 @@ def stage_verify(args, run_root: Path):
 
     left_root = run_root / "difix" / "left_fixed"
     right_root = run_root / "difix" / "right_fixed"
+    fused_root = default_fusion_root(run_root)
     if left_root.exists() and right_root.exists():
         cmd += ["--pseudo-left-root", str(left_root), "--pseudo-right-root", str(right_root)]
+    if fused_root.exists():
+        cmd += ["--pseudo-fused-root", str(fused_root)]
+    cmd += [
+        "--verification-mode", args.verification_mode,
+        "--train-mask-mode", args.train_mask_mode,
+        "--prop-radius-px", str(args.prop_radius_px),
+        "--prop-tau-rel-depth", str(args.prop_tau_rel_depth),
+        "--prop-tau-rgb-l1", str(args.prop_tau_rgb_l1),
+    ]
 
     if args.dry_run:
         print("[dry-run]", " ".join(cmd))
@@ -453,10 +502,16 @@ def stage_verify(args, run_root: Path):
         "frame_ids": frame_ids,
         "internal_cache_root": str(Path(args.internal_cache_root).resolve()),
         "stage_tag": args.stage_tag,
+        "verification_mode": args.verification_mode,
+        "train_mask_mode": args.train_mask_mode,
+        "prop_radius_px": int(args.prop_radius_px),
+        "prop_tau_rel_depth": float(args.prop_tau_rel_depth),
+        "prop_tau_rgb_l1": float(args.prop_tau_rgb_l1),
         "tau_reproj_px": 4.0,
         "tau_rel_depth": 0.15,
         "pseudo_left_root": str(left_root.resolve()) if left_root.exists() else None,
         "pseudo_right_root": str(right_root.resolve()) if right_root.exists() else None,
+        "pseudo_fused_root": str(fused_root.resolve()) if fused_root.exists() else None,
     })
 
 
@@ -468,6 +523,15 @@ def stage_pack(args, run_root: Path):
     pseudo_cache = run_root / "pseudo_cache"
     ensure_dir(pseudo_cache)
     samples_meta = []
+
+    verification_manifest_path = run_root / "manifests" / "verification_manifest.json"
+    verification_manifest = load_json(verification_manifest_path) if verification_manifest_path.exists() else {}
+    default_brpo_root = default_verification_root(run_root, args.stage_tag, args.verification_mode)
+    effective_brpo_root = args.brpo_mask_root
+    if effective_brpo_root is None and verification_manifest.get("verification_root"):
+        effective_brpo_root = verification_manifest.get("verification_root")
+    elif effective_brpo_root is None and default_brpo_root.exists():
+        effective_brpo_root = str(default_brpo_root)
 
     for rec in records:
         sample_dir = pseudo_cache / "samples" / str(rec.frame_id)
@@ -496,10 +560,6 @@ def stage_pack(args, run_root: Path):
             "right_ref_rgb_path": str(Path(right_ref["image_path"])),
             "ref_pose_source": {"type": "internal_eval_cache.camera_states", "stage_tag": args.stage_tag},
         }
-        effective_brpo_root = args.brpo_mask_root
-        default_brpo_root = default_verification_root(run_root, args.stage_tag)
-        if effective_brpo_root is None and default_brpo_root.exists():
-            effective_brpo_root = str(default_brpo_root)
 
         target_left_source = None
         target_right_source = None
@@ -510,6 +570,7 @@ def stage_pack(args, run_root: Path):
             "render_depth_source": rec.render_depth_path,
             "target_depth_source": rec.render_depth_path,
             "target_depth_for_refine_source": rec.render_depth_path,
+            "target_depth_for_refine_mode": "render_depth_fallback",
             "left_ref_rgb_source": str(Path(left_ref["image_path"])),
             "right_ref_rgb_source": str(Path(right_ref["image_path"])),
             "target_rgb_source_mode": args.target_rgb_source,
@@ -526,14 +587,12 @@ def stage_pack(args, run_root: Path):
             symlink_force(render_rgb_src, sample_dir / "render_rgb.png")
             symlink_force(render_depth_src, sample_dir / "render_depth.npy")
             symlink_force(render_depth_src, sample_dir / "target_depth.npy")
-            symlink_force(render_depth_src, sample_dir / "target_depth_for_refine.npy")
             symlink_force(Path(left_ref["image_path"]), sample_dir / "ref_rgb_left.png")
             symlink_force(Path(right_ref["image_path"]), sample_dir / "ref_rgb_right.png")
 
         left_fixed = resolve_fixed_path(args.left_fixed_root, rec.image_name)
         right_fixed = resolve_fixed_path(args.right_fixed_root, rec.image_name)
         if args.target_rgb_source == "difix":
-            # fall back to run_root/difix if roots not provided
             left_fixed = left_fixed or Path(rec.left_fixed_path)
             right_fixed = right_fixed or Path(rec.right_fixed_path)
             if not left_fixed.exists() or not right_fixed.exists():
@@ -556,16 +615,70 @@ def stage_pack(args, run_root: Path):
         if fusion_paths.get("target_rgb_fused_path"):
             target_fused_source = str((fusion_frame_root(run_root, rec.frame_id) / "target_rgb_fused.png").resolve())
 
+        brpo_paths = {}
+        if not args.dry_run:
+            brpo_paths = maybe_link_brpo_artifacts(sample_dir, effective_brpo_root, rec.frame_id, args.strict_brpo_mask)
+            ensure_dir(sample_dir / "diag")
+
+        target_depth_for_refine_created = False
+        target_depth_source_map_path = None
+        target_depth_meta_path = None
+        if not args.dry_run:
+            projected_left_path = sample_dir / "projected_depth_left.npy"
+            projected_right_path = sample_dir / "projected_depth_right.npy"
+            projected_valid_left_path = sample_dir / "projected_depth_valid_left.npy"
+            projected_valid_right_path = sample_dir / "projected_depth_valid_right.npy"
+            if projected_left_path.exists() and projected_right_path.exists():
+                render_depth = np.load(render_depth_src).astype(np.float32)
+                projected_left = np.load(projected_left_path).astype(np.float32)
+                projected_right = np.load(projected_right_path).astype(np.float32)
+                valid_left = np.load(projected_valid_left_path).astype(np.float32) if projected_valid_left_path.exists() else None
+                valid_right = np.load(projected_valid_right_path).astype(np.float32) if projected_valid_right_path.exists() else None
+
+                depth_target = build_blended_target_depth(
+                    render_depth=render_depth,
+                    projected_depth_left=projected_left,
+                    projected_depth_right=projected_right,
+                    valid_left=valid_left,
+                    valid_right=valid_right,
+                    fallback_mode=args.depth_fallback_mode,
+                    both_mode=args.depth_both_mode,
+                )
+
+                target_depth_path = sample_dir / "target_depth_for_refine.npy"
+                if target_depth_path.exists() or target_depth_path.is_symlink():
+                    target_depth_path.unlink()
+                np.save(target_depth_path, depth_target["target_depth_for_refine"])
+
+                target_depth_source_map_path = sample_dir / "target_depth_for_refine_source_map.npy"
+                np.save(target_depth_source_map_path, depth_target["target_depth_for_refine_source_map"])
+                np.save(sample_dir / "verified_depth_mask.npy", depth_target["verified_depth_mask"])
+
+                target_depth_meta_path = sample_dir / "target_depth_for_refine_meta.json"
+                write_json(target_depth_meta_path, {
+                    **depth_target["summary"],
+                    "projected_depth_left_path": str(projected_left_path.relative_to(sample_dir.parent.parent)),
+                    "projected_depth_right_path": str(projected_right_path.relative_to(sample_dir.parent.parent)),
+                    "projected_depth_valid_left_path": str(projected_valid_left_path.relative_to(sample_dir.parent.parent)) if projected_valid_left_path.exists() else None,
+                    "projected_depth_valid_right_path": str(projected_valid_right_path.relative_to(sample_dir.parent.parent)) if projected_valid_right_path.exists() else None,
+                })
+                target_depth_for_refine_created = True
+                source_meta["target_depth_for_refine_source"] = "blended_m3_from_projected_depth"
+                source_meta["target_depth_for_refine_mode"] = depth_target["summary"]["depth_target_mode"]
+                source_meta["target_depth_for_refine_fallback_mode"] = args.depth_fallback_mode
+                source_meta["target_depth_for_refine_both_mode"] = args.depth_both_mode
+                source_meta["target_depth_for_refine_source_map"] = str(target_depth_source_map_path.relative_to(sample_dir.parent.parent))
+                source_meta["verified_depth_mask_path"] = str((sample_dir / "verified_depth_mask.npy").relative_to(sample_dir.parent.parent))
+                source_meta["target_depth_for_refine_summary"] = depth_target["summary"]
+
+        if not args.dry_run and not target_depth_for_refine_created:
+            symlink_force(render_depth_src, sample_dir / "target_depth_for_refine.npy")
+
         source_meta["target_rgb_left_source"] = target_left_source
         source_meta["target_rgb_right_source"] = target_right_source
         source_meta["target_rgb_fused_source"] = target_fused_source
         if not args.dry_run:
             write_json(sample_dir / "source_meta.json", source_meta)
-
-        brpo_paths = {}
-        if not args.dry_run:
-            brpo_paths = maybe_link_brpo_artifacts(sample_dir, effective_brpo_root, rec.frame_id, args.strict_brpo_mask)
-            ensure_dir(sample_dir / "diag")
 
         sample_meta = {
             "sample_id": int(rec.frame_id),
@@ -587,6 +700,10 @@ def stage_pack(args, run_root: Path):
             sample_meta.update(fusion_paths)
         if brpo_paths:
             sample_meta.update(brpo_paths)
+        if target_depth_source_map_path is not None:
+            sample_meta["target_depth_for_refine_source_map_path"] = str(target_depth_source_map_path.relative_to(sample_dir.parent.parent))
+        if target_depth_meta_path is not None:
+            sample_meta["target_depth_for_refine_meta_path"] = str(target_depth_meta_path.relative_to(sample_dir.parent.parent))
         samples_meta.append(sample_meta)
 
     cache_manifest = {
@@ -598,8 +715,18 @@ def stage_pack(args, run_root: Path):
         "stage_tag": args.stage_tag,
         "target_rgb_source": args.target_rgb_source,
         "has_fusion_root": bool(default_fusion_root(run_root).exists()),
-        "verification_root": str(default_verification_root(run_root, args.stage_tag)) if default_verification_root(run_root, args.stage_tag).exists() else None,
+        "verification_root": effective_brpo_root,
         "fusion_root": str(default_fusion_root(run_root)) if default_fusion_root(run_root).exists() else None,
+        "train_mask_mode": args.train_mask_mode,
+        "propagation_policy": {
+            "radius_px": int(args.prop_radius_px),
+            "tau_rel_depth": float(args.prop_tau_rel_depth),
+            "tau_rgb_l1": float(args.prop_tau_rgb_l1),
+        },
+        "depth_target_policy": {
+            "fallback_mode": args.depth_fallback_mode,
+            "both_mode": args.depth_both_mode,
+        },
         "num_samples": len(records),
         "sample_ids": [r.frame_id for r in records],
         "samples": samples_meta,
@@ -614,13 +741,16 @@ def stage_pack(args, run_root: Path):
         "pseudo_ids": [r.frame_id for r in records],
         "target_rgb_source": args.target_rgb_source,
         "has_fusion_root": bool(default_fusion_root(run_root).exists()),
-        "has_brpo_mask_root": bool(args.brpo_mask_root or default_verification_root(run_root, args.stage_tag).exists()),
+        "verification_mode": args.verification_mode,
+        "train_mask_mode": args.train_mask_mode,
+        "depth_fallback_mode": args.depth_fallback_mode,
+        "depth_both_mode": args.depth_both_mode,
+        "has_brpo_mask_root": bool(effective_brpo_root),
         "num_samples": len(records),
     }
     if not args.dry_run:
         write_json(run_root / "manifests" / "pack_manifest.json", pack_manifest)
     print(json.dumps(pack_manifest, indent=2, ensure_ascii=False))
-
 
 def main():
     args = parse_args()
