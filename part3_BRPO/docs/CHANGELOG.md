@@ -5,6 +5,235 @@
 
 ---
 
+## 2026-04-12
+
+### Mask problem route：M1 fused-first verification + compatibility layer
+
+根据 `CURRENT_MASK_PROBLEM.md` 与 `SOLVE_MASK_PROBLEM.md` 的判断，开始把主线从“继续扩 Stage A”转到“先解决 upstream mask problem”。
+
+这一轮的重点不是 refine，而是 verification / pack / consumer 之间的 upstream 结构修正。
+
+代码修改：
+- `pseudo_branch/brpo_confidence_mask.py`
+- `scripts/brpo_build_mask_from_internal_cache.py`
+- `scripts/prepare_stage1_difix_dataset_s3po_internal.py`
+- `docs/SOLVE_MASK_PROBLEM.md`
+
+关键实现：
+- `verification_mode=branch_first|fused_first` 双模式落地；
+- `fused_first` 模式可直接消费 `fusion/samples/<id>/target_rgb_fused.png`；
+- verification 输出新增 `seed_support_left/right/both/single`；
+- 同时保留 `support_*` 与 `confidence_mask_brpo_*` 兼容层，不污染旧实验与现有 consumer；
+- `pack` 已能在 `verification_mode=fused_first` 下把 `seed_support_*` 带入 sample。
+
+真实检查：
+- `fused_first` 已在当前 3-frame prototype 上跑通；
+- 但与旧 `branch_first` 相比，coverage 改善并不明显；
+- 这验证了：**单纯改 verification 顺序还不够，M2 的 propagation 仍然必要。**
+
+### Mask problem route：M2 train mask propagation 第一轮实现
+
+在 M1 之后，开始做 `seed_support → train_confidence_mask` 的第一轮工程化传播。
+
+新增文件：
+- `pseudo_branch/brpo_train_mask.py`
+
+关键实现：
+- verify 阶段新增 `train_mask_mode=propagate`；
+- 新增：
+  - `train_confidence_mask_brpo_{left,right,fused}`
+  - `train_support_{left,right,both,single}`
+- 当前训练真正消费的 mask 通过 alias 保持兼容：
+  - `confidence_mask_brpo_*` → 指向 train mask
+  - `support_*` → 指向 seed support
+- propagation 仍保留在 verify/pack upstream，不塞回 refine。
+
+中途问题与修复：
+- 第一版 M2 因重复落盘（seed/train/alias 全部物理保存）触发 `No space left on device`；
+- 随后把 alias 改成 symlink，保留兼容的同时避免重复写大文件；
+- 清掉失败的中间 verify 目录后重跑，验证通过。
+
+真实结果：
+- 机制成立，coverage 从 `~1%` 量级显著抬升；
+- 但默认参数明显过宽：
+  - frame 10: `~75.1%`
+  - frame 50: `~68.0%`
+  - frame 120: `~68.9%`
+- 说明 propagation 机制是对的，但默认超参不能直接作为最终 training mask 定义。
+
+### Mask problem route：M2.5 propagation 合理区间小范围研究
+
+为了判断当前 propagation 的“合理区间”，没有继续大规模重跑 verify，而是基于现有 `fused_first + seed_support` 结果做了离线小范围 sweep。
+
+目的：
+- 不是寻找唯一最优超参；
+- 而是先判断：哪些组合明显太稀、哪些组合明显太稠、哪些组合更像训练可用区间。
+
+代表性结果：
+- `radius=1, tau_rel_depth=0.01, tau_rgb_l1=0.03` → `avg_fused_nonzero ≈ 8.2%`
+- `radius=1, tau_rel_depth=0.02, tau_rgb_l1=0.03` → `≈ 9.7%`
+- `radius=2, tau_rel_depth=0.01, tau_rgb_l1=0.05` → `≈ 19.4%`
+- `radius=2, tau_rel_depth=0.02, tau_rgb_l1=0.05` → `≈ 25.1%`
+- `radius=3, tau_rel_depth=0.03, tau_rgb_l1=0.08` → `≈ 52.3%`
+- `radius=5, tau_rel_depth=0.03, tau_rgb_l1=0.08` → `≈ 70.7%`
+
+阶段判断：
+- 当前 propagation 的合理研究区间明显更接近 `10% ~ 25%` coverage；
+- 因此后续不应继续使用当前过宽默认值，而应优先围绕：
+  - `radius ∈ {1,2}`
+  - `tau_rel_depth ∈ [0.01, 0.02]`
+  - `tau_rgb_l1 ∈ [0.03, 0.05]`
+  做进一步收紧。
+
+### Mask problem route：M3 blended `target_depth_for_refine` 落地
+
+在 M2.5 之后，正式进入 M3：把 upstream depth target 从“render-depth fallback 占位符”升级成可审计的 blended target。
+
+新增文件：
+- `pseudo_branch/brpo_depth_target.py`
+
+代码修改：
+- `pseudo_branch/brpo_reprojection_verify.py`
+- `scripts/brpo_build_mask_from_internal_cache.py`
+- `scripts/prepare_stage1_difix_dataset_s3po_internal.py`
+
+关键实现：
+- verification 侧新增 pseudo-view sparse verified depth 输出：
+  - `projected_depth_left.npy`
+  - `projected_depth_right.npy`
+  - `projected_depth_valid_left.npy`
+  - `projected_depth_valid_right.npy`
+- pack 阶段正式构造：
+  - `target_depth_for_refine.npy`
+  - `target_depth_for_refine_source_map.npy`
+  - `target_depth_for_refine_meta.json`
+  - `verified_depth_mask.npy`
+- `target_depth_for_refine` 当前定义为：
+  - `both` → 双边 verified depth average
+  - `left/right` → 单边 verified depth
+  - unsupported → `render_depth` fallback
+
+真实 smoke：
+- 新开 prototype 目录：
+  - `.../internal_prepare/re10k1__internal_afteropt__brpo_proto_v4_stage3/`
+- 在 3-frame（10/50/120）上重跑 `verify → pack` 成功；
+- sample 层已真实出现：
+  - `projected_depth_*`
+  - `target_depth_for_refine.npy`
+  - `target_depth_for_refine_source_map.npy`
+  - `target_depth_for_refine_meta.json`
+
+代表性结果：
+- frame 10 verified depth ratio：`~1.63%`
+- frame 50 verified depth ratio：`~1.51%`
+- frame 120 verified depth ratio：`~1.55%`
+- 其余区域为 `render_depth` fallback
+
+阶段判断：
+- M3 已完成 upstream depth target 的真实落地；
+- 当前 `target_depth_for_refine.npy` 已不再只是 schema 预留位；
+- 但当前 verified depth 覆盖偏保守，更像 sparse correction source，而不是大覆盖 supervision 主体。
+
+提交：
+- `c7965b4` — `part3: implement Stage M3 blended target_depth_for_refine pipeline`
+
+### Mask problem route：M4 Stage A consumer 显式接入新 target
+
+在 M3 之后，继续做 M4：让 `run_pseudo_refinement_v2.py` 明确消费新的 train mask 与 blended depth target，而不是继续依赖含糊 fallback。
+
+代码修改：
+- `scripts/run_pseudo_refinement_v2.py`
+
+关键实现：
+- Stage A 现在显式支持：
+  - `stageA_mask_mode=train_mask|seed_support_only|legacy|auto`
+  - `stageA_target_depth_mode=blended_depth|render_depth_only|target_depth_for_refine|target_depth|render_depth|auto`
+- history 现在会显式记录：
+  - 实际 confidence source / path
+  - 实际 depth source / path
+  - effective mask/depth mode
+  - mask coverage
+  - verified depth ratio / render fallback ratio
+- 通过 sample 内显式文件读取 `train_confidence_mask_brpo_*` 与 `target_depth_for_refine.npy`，不再让 consumer 靠隐式默认值漂移。
+
+真实 smoke：
+- 目录：
+  - `.../2026-04-12_m4_stageA_smoke/blended_depth/`
+  - `.../2026-04-12_m4_stageA_smoke/render_depth_only/`
+- `train_mask + blended_depth`：
+  - mean mask coverage `~19.4%`
+  - mean verified depth ratio `~1.56%`
+  - `loss_depth ≈ 0.00478`（非零）
+- `train_mask + render_depth_only`：
+  - `loss_depth ≈ 0`
+- 额外 debug quick smoke：
+  - `seed_support_only + blended_depth` 2 iter 可跑，mean mask coverage `~1.56%`
+
+阶段判断：
+- M4 consumer 已真实接通；
+- `blended_depth` 与 `render_depth_only` 在 Stage A 中已能被区分；
+- 这说明 M3→M4 链路不是“名义接通”，而是 depth signal 已实际进入 loss。
+
+提交：
+- `63abe22` — `part3: wire Stage A to explicit M4 mask and depth modes`
+
+### Mask problem route：M4.5 Stage A 长一点对照（blended vs render-only）
+
+在 M4 smoke 之后，继续做一轮更长一点的 Stage A eval，目的不是追最终指标，而是回答：
+- depth signal 是否真的被消费；
+- 当前 depth signal 在更长一点的 Stage A 中是否会动起来；
+- `blended_depth` 与 `render_depth_only` 的差异是否只停留在 smoke 级别。
+
+实验目录：
+- `.../2026-04-12_m45_stageA_eval/blended_depth_long/`
+- `.../2026-04-12_m45_stageA_eval/render_depth_only_long/`
+- `.../2026-04-12_m45_stageA_eval/analysis/summary.json`
+- `.../2026-04-12_m45_stageA_eval/analysis/compare.txt`
+
+实验口径：
+- `target_side=fused`
+- `confidence_mask_source=brpo`
+- `stageA_mask_mode=train_mask`
+- `num_pseudo_views=3`
+- `stageA_iters=300`
+- 唯一变量：
+  - `stageA_target_depth_mode=blended_depth`
+  - vs `stageA_target_depth_mode=render_depth_only`
+
+结果：
+- 两组 `loss_rgb` 基本一致：
+  - `0.00915 -> 0.00734`
+- `blended_depth_long`：
+  - `loss_depth ≈ 0.004783`（非零）
+  - `loss_total first -> last: 0.00784 -> 0.02269`
+- `render_depth_only_long`：
+  - `loss_depth ≈ 4.4e-07 ≈ 0`
+  - `loss_total first -> last: 0.00641 -> 0.02207`
+- 当前 `pose_reg` 会随着迭代持续增长，两组量级接近；
+- 当前 `blended_depth` 虽然已非零，但在 300 iter 中基本不下降。
+
+阶段判断：
+- `blended_depth` 与 `render_depth_only` 的差异已经真实存在；
+- 但当前差异主要体现在“depth loss 是否非零”，而不是“depth 是否明显驱动了更好的优化轨迹”；
+- 更准确的结论是：
+
+**depth signal 已接入，但当前 Stage A 对它的利用仍偏弱。**
+
+因此下一步应进入 **M4.6 / depth-flatness diagnosis**，而不是直接跳到 Stage B。
+
+### 文档恢复后的同步补写
+
+由于误删并恢复了 `docs/`，本轮重新按写作规范同步补回：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+
+补回原则：
+- `STATUS.md` 只写当前状态，不追加过程细节；
+- `DESIGN.md` 只写当前设计判断与默认实验方案；
+- `CHANGELOG.md` 记录 M1 / M2 / M2.5 / M3 / M4 / M4.5 的真实过程与结果；
+- 避免把“现状”和“历史过程”混写。
+
 ## 2026-04-11
 
 ### Internal cache / replay：Phase 1 与 Phase 2 跑通
@@ -178,11 +407,7 @@ replay eval（same internal camera states, after_opt）结果：
   - `confidence_mask_brpo_right.npy/png`
   - `confidence_mask_brpo_fused.npy/png`
   同时保留旧的 `confidence_mask_brpo.npy/png` 作为兼容 alias；
-- `run_pseudo_refinement.py` 的 BRPO consumer 改为按 `target_side` 解析 confidence：
-  - left → `confidence_mask_brpo_left.npy`
-  - right → `confidence_mask_brpo_right.npy`
-  - fused → `confidence_mask_brpo_fused.npy`
-  并保留回退到旧 `confidence_mask_brpo.npy` 的兼容逻辑。
+- `run_pseudo_refinement.py` 的 BRPO consumer 改为按 `target_side` 解析 confidence。
 
 真实验证：
 - 在现有 prototype `re10k1__internal_afteropt__brpo_proto_v3` 上，实际重跑了：
@@ -192,9 +417,7 @@ replay eval（same internal camera states, after_opt）结果：
 - 随后补上 pack linkfix，并只重跑 `pack`，确认 `pseudo_cache/samples/10/` 中已真实出现：
   - `target_rgb_fused.png`
   - `target_depth_for_refine.npy`
-  - `confidence_mask_brpo_left.npy/png`
-  - `confidence_mask_brpo_right.npy/png`
-  - `confidence_mask_brpo_fused.npy/png`
+  - `confidence_mask_brpo_left/right/fused.npy`
 
 consumer smoke：
 - 直接调用 `load_pseudo_viewpoints(...)`，确认以下三种模式都能正确解析本地 sample 内的新文件：
@@ -205,122 +428,4 @@ consumer smoke：
   - `target_side=fused`
   - `confidence_mask_source=brpo`
   - `num_iterations=2`
-  - 成功加载 3 个 pseudo viewpoints，进入训练循环，并正常落盘到：
-    `/home/bzhang512/my_storage_500G/CV_Project/output/part3_stage1_internal/re10k-1/full/2026-04-11_phase6_schema_smoke/fused_brpo_2iter`
-- 读取该次 `refinement_history.json` 可确认 `pseudo_sample_meta` 中实际记录的是：
-  - `target_rgb_fused.png`
-  - `confidence_mask_brpo_fused.npy`
-  - `confidence_source_kind = sample_local_brpo_fused`
-
-阶段判断：
-- Phase 6 的**第一轮 schema plumbing 已完成并通过 smoke**；
-- 当前不再是“设计想要这样”，而是 `prepare → pack → refine consumer` 已经真实走通；
-- 下一步应基于新 schema 决定做最小 `left/right/fused` refine 对照，或直接切入 `run_pseudo_refinement_v2` 的 Stage A。
-
-### Phase 7A：`run_pseudo_refinement_v2.py` 最小版落地与 Stage A smoke
-
-在 Phase 6 第一轮 schema 打通后，继续进入 BRPO-style refine 的 Stage A。
-
-新增文件：
-- `part3_BRPO/scripts/run_pseudo_refinement_v2.py`
-- `part3_BRPO/pseudo_branch/pseudo_camera_state.py`
-- `part3_BRPO/pseudo_branch/pseudo_loss_v2.py`
-- `part3_BRPO/pseudo_branch/pseudo_refine_scheduler.py`
-
-这一版不是 full two-stage，而是 **Stage A only** 的最小版。
-
-当前实现：
-- 复用 v1 的 pseudo cache loader 读取 Phase 6 的 canonical `pseudo_cache/`；
-- 把 pseudo viewpoint 上原本存在但未参与训练的：
-  - `cam_rot_delta`
-  - `cam_trans_delta`
-  - `exposure_a`
-  - `exposure_b`
-  正式提升为可训练参数；
-- 新增 Stage A loss：
-  - masked RGB loss
-  - masked depth loss
-  - pose regularization
-  - exposure regularization
-- 新增 Stage A optimizer / history / state export；
-- 输出：
-  - `pseudo_camera_states_init.json`
-  - `pseudo_camera_states_stageA.json`
-  - `pseudo_camera_states_final.json`
-  - `stageA_history.json`
-  - `refinement_history.json`（当前与 stageA_history 同步）
-
-真实 smoke：
-- 实际运行：
-  - `target_side=fused`
-  - `confidence_mask_source=brpo`
-  - `stageA_iters=2`
-  - `num_pseudo_views=3`
-- 输出目录：
-  `/home/bzhang512/my_storage_500G/CV_Project/output/part3_stage1_internal/re10k-1/full/2026-04-11_stageA_v2_smoke/fused_brpo_stageA_2iter`
-
-关键验证结果：
-- 脚本成功加载 3 个 pseudo viewpoints；
-- 训练循环正常进入并完成；
-- `pseudo_camera_states_stageA.json` 中可见非零更新，例如：
-  - sample 10: `rot_norm ≈ 0.00867`, `trans_norm ≈ 0.00275`
-  - sample 50: `rot_norm ≈ 0.00615`, `trans_norm ≈ 0.00117`
-  - sample 120: `rot_norm ≈ 0.00719`, `trans_norm ≈ 0.00276`
-- `exposure_a / exposure_b` 也已出现非零更新；
-- 说明 Stage A 当前不是“只写出文件”，而是 pseudo pose delta / exposure 已经真的进了优化图。
-
-阶段判断：
-- Phase 7A 已经从文档规划进入代码与 smoke 阶段；
-- 当前最合理的下一步不是马上上 full Stage B，而是先把 Stage A 的 CLI / logging / 输出契约继续收紧，然后决定做最小对照还是继续往 Stage B 接。
-
-### 文档与下一阶段设计判断
-
-本次同步调整的方向是：
-- 不再把 Phase 4 的结果解释为“BRPO 路线不行”；
-- 当前更稳妥的结论是：**schema 还没定好，尤其是 fused target 与 side-aware BRPO mask 还没进入 canonical internal pseudo_cache**；
-- 下一阶段应优先进入 **Phase 6**：固定 `Difix 双侧 + fuse + BRPO mask variants` 的 canonical schema；
-- 在 schema 固定后，再进入 `run_pseudo_refinement_v2.py` 的 **Stage A only**（pseudo pose delta + exposure stabilization）。
-
-相关文档更新：
-- `STATUS.md`
-- `DESIGN.md`
-- `STAGE1_INTERNAL_CACHE_REPLAY_RUNBOOK.md`
-- `charles.md`
-
----
-
-## 2026-04-10
-
-### 协议重估：GT 提升 ≠ pipeline 已验证成功
-
-基于 `external infer` 新结果，重新审视了前面的 Stage1 结论。当前更准确的判断是：
-- 之前 A/B/C/D/E 的提升，主要说明 **external GT 固定相机口径**下的渲染更接近 GT；
-- 这还不能自动等价于“refine 真正改善了 pose-sensitive protocol”；
-- 当前 Stage1 更像 **fixed-pose appearance refinement**，而不是已被充分证明的 pose-aware refinement。
-
-### Re10k-1 sparse：infer 口径 external eval
-
-实验目录：
-`/home/bzhang512/my_storage_500G/CV_Project/output/part3_stage1/re10k-1/sparse/2026-04-10_fused_experiment/E_fused_rgb_only/`
-
-**GT 口径**（`pose_mode=gt`）：
-- `avg_psnr = 21.7843`
-- `avg_ssim = 0.7984`
-- `avg_lpips = 0.2002`
-- `num_frames = 270`
-
-**Infer 口径**（`pose_mode=infer`, `infer_init_mode=gt_first`）：
-- `avg_psnr = 13.6111`
-- `avg_ssim = 0.5067`
-- `avg_lpips = 0.4061`
-- `ate_rmse = 0.0389 m`
-- `pose_success_rate = 67.4%`（`182/270` 帧成功）
-
-与 part2 baseline 对照：
-- sparse infer baseline：`13.3265 / 0.5027 / 0.3791`
-- full infer baseline：`13.1458 / 0.4960 / 0.3894`
-
-结论：
-- relative to baseline，infer 口径只有很小变化；
-- 这不足以支持“当前 refine 已显著改善 pose-sensitive 表现”；
-- 当前 external infer 更像是在暴露 pose inference 自身的瓶颈，而不是稳定放大 refined PLY 的优势。
+  - 成功进入训练循环并正常落盘。
