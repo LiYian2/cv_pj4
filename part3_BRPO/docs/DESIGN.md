@@ -1,7 +1,7 @@
 # DESIGN.md - Part3 设计文档
 
 > 本文档记录**当前实际采用**的设计决策、接口定义与默认实验方案。
-> 最后更新：2026-04-12 14:25
+> 最后更新：2026-04-12 15:15
 
 ---
 
@@ -15,11 +15,11 @@
 - internal route 的主线仍是：
   `part2 full rerun → internal cache → prepare → difix → fuse → verify → train_mask/depth target → Stage A consumer → replay/eval`；
 - 旧 EDP 线继续保留，但与 BRPO 新线文件级隔离，不混写；
-- **当前最优先的问题不再是根因定位，而是：在补回 S3PO 原始 residual pose 闭环之后，这套 M5 supervision 是否已经足够强。**
+- **当前最优先的问题不再是根因定位，而是：在补回 S3PO 原始 residual pose 闭环之后，这套 M5 supervision 目前只表现为弱下降，并且现有 `pose_reg` 已不再约束累计位姿偏移。**
 
 也就是说，现在的主线已经不是继续盲目扩 depth loss 或直接进 Stage B，而是：
 
-**先基于已恢复的 `tau -> update_pose -> R/T` 闭环做修复后验证，再决定后续 Stage A / Stage B 的设计。**
+**先基于已恢复的 `tau -> update_pose -> R/T` 闭环做修复后参数/结构评估，再决定后续 Stage A / Stage B 的设计。**
 
 ### 1.2 当前阶段定义
 
@@ -95,7 +95,7 @@ M5 的结果进一步收紧了问题范围：
 
 因此问题已经不再只是“fallback 稀释”或“depth target 太 sparse”。
 
-### 2.4 当前最新判断：Stage A 已补回 S3PO residual-pose 闭环，但效果仍需验证
+### 2.4 当前最新判断：Stage A 已补回 S3PO residual-pose 闭环，但当前进入“弱下降 + 缺少 absolute pose prior”的评估阶段
 
 最新 diagnosis 的关键结论是：
 

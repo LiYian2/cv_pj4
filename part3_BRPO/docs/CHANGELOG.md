@@ -456,6 +456,75 @@
 - 但也要老实说：修复闭环之后，depth 只是开始轻微下降，还没有出现非常强的下降趋势；
 - 所以下一步不应直接进入 Stage B，而应先做修复后的中等规模验证，再决定是否需要继续加强 loss / 训练长度 / 更深层 renderer 改动。
 
+
+### Stage A 修复后 300-iter 参数/规模验证
+
+在补回 `apply_pose_residual_()` 之后，没有直接进入下一阶段，而是先做一轮修复后的 300-iter 参数/规模验证，确认当前问题更像训练规模、权重还是结构。
+
+实验目录：
+- `.../2026-04-12_m55_pose_fix_scale_eval/default_300`
+- `.../2026-04-12_m55_pose_fix_scale_eval/depth_heavy_300`
+- `.../2026-04-12_m55_pose_fix_scale_eval/no_exposure_300`
+- 汇总：`.../analysis/m55_summary.json`
+
+实验口径：
+1. `default_300`
+   - `beta_rgb=0.7`
+   - `lambda_depth_seed=1.0`
+   - `lambda_depth_dense=0.35`
+   - `lr_exp=0.01`
+2. `depth_heavy_300`
+   - `beta_rgb=0.3`
+   - `lambda_depth_seed=1.0`
+   - `lambda_depth_dense=1.0`
+   - `lr_exp=0.01`
+3. `no_exposure_300`
+   - `beta_rgb=0.7`
+   - `lambda_depth_seed=1.0`
+   - `lambda_depth_dense=0.35`
+   - `lr_exp=0.0`
+
+结果：
+- `default_300`
+  - `loss_total: 0.02701 -> 0.02577`
+  - `loss_depth: 0.06867 -> 0.06816`
+  - `loss_depth_seed: 0.05796 -> 0.05750`
+  - `loss_depth_dense: 0.03062 -> 0.03047`
+- `depth_heavy_300`
+  - `loss_total: 0.06475 -> 0.06364`
+  - `loss_depth: 0.08857 -> 0.08747`
+  - `loss_depth_seed: 0.05796 -> 0.05731`
+  - `loss_depth_dense: 0.03062 -> 0.03016`
+- `no_exposure_300`
+  - `loss_total: 0.02701 -> 0.02696`
+  - `loss_rgb: 0.00915 -> 0.00928`
+  - `loss_depth: 0.06867 -> 0.06822`
+
+附加分析：真实 pose 累计变化（init -> final）
+- `default_300`
+  - mean `trans_delta_l2 ≈ 0.00138`
+  - mean `rot_delta_rad ≈ 0.00498`
+- `depth_heavy_300`
+  - mean `trans_delta_l2 ≈ 0.00390`
+  - mean `rot_delta_rad ≈ 0.00453`
+- `no_exposure_300`
+  - mean `trans_delta_l2 ≈ 0.00141`
+  - mean `rot_delta_rad ≈ 0.00463`
+
+阶段判断：
+- 修复后，depth 已经不是完全平线；
+- 但三组设置都只表现出“弱下降”，没有出现质变；
+- `depth_heavy_300` 的确更强一点，但提升仍有限；
+- 冻结 exposure 会让 RGB 更差，但不会显著改善 depth；
+- 这说明问题已经从“闭环断了”进一步收敛成：
+
+**当前更像是权重/尺度与结构设计问题，而不再是链路完全断开。**
+
+新的结构发现：
+- 因为现在每步都会 `apply_pose_residual_()` 并清零 residual，当前 `pose_reg_loss = ||cam_rot_delta|| + ||cam_trans_delta||` 会在训练中几乎始终为 0；
+- 这意味着 `stageA_lambda_pose` 当前已经无法约束“累计位姿偏移”；
+- 因此下一步需要重点判断：是否要补一个基于 `R/T` 相对初值的 **absolute pose prior**，而不是继续只对 residual 本身做正则。
+
 ### 文档恢复后的同步补写
 
 由于误删并恢复了 `docs/`，本轮重新按写作规范同步补回：

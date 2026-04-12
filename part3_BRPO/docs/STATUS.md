@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-12 14:25
+> 更新时间：2026-04-12 15:15
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -51,10 +51,10 @@
 当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但阶段判断已经更新：
 - 已完成 `M1 / M2 / M2.5 / M3 / M4 / M4.5`，证明 upstream schema 和 Stage A consumer 都已接通；
 - 已完成 `M5-0 / M5-1 / M5-2`：depth signal 结构诊断、densified depth target、source-aware depth loss；
-- 当前已确认：**upstream depth coverage 问题已被显著缓解，并且 Stage A 已补回 S3PO 原始的 `tau -> update_pose -> R/T` 闭环；当前进入修复后效果评估阶段**；
+- 当前已确认：**upstream depth coverage 问题已被显著缓解，并且 Stage A 已补回 S3PO 原始的 `tau -> update_pose -> R/T` 闭环；当前进入修复后参数/结构评估阶段**；
 - 最新 diagnosis 表明：renderer 前向对 `cam_rot_delta / cam_trans_delta` 的响应几乎为零，但 backward 却返回非零 pose 梯度，因此当前 Stage A pose refine 机制不可信。
 
-一句话说：**当前最优先的问题已经从“找根因”切换成“根因已修后，这套 M5 depth supervision 是否足够强、值得继续放大实验并最终推进下一阶段”。**
+一句话说：**当前最优先的问题已经从“找根因”切换成“根因已修后，这套 M5 depth supervision 只表现为弱下降，而且当前 `pose_reg` 无法约束累计 pose drift；因此还需要继续做参数/结构评估，不能直接推进下一阶段”。**
 
 ## 2. 数据结构
 
@@ -191,7 +191,7 @@ samples/<frame_id>/
 | `prepare_stage1_difix_dataset_s3po_internal.py` | internal `select / difix / fusion / verify / pack` | ✅ 可用 | 当前已支持 M1/M2/M3/M5 sample 固化 |
 | `brpo_build_mask_from_internal_cache.py` | 从 internal cache 构建 verification / seed / train mask / projected depth | ✅ 可用 | 当前已支持 `branch_first|fused_first` 与 M3 depth 输出 |
 | `run_pseudo_refinement.py` | v1 standalone refine 入口 | ✅ 可用 | fixed-pose appearance tuning |
-| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 当前已补回每步后 `apply_pose_residual_()` 的 S3PO 闭环，并支持 M5 source-aware loss |
+| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 当前已补回每步后 `apply_pose_residual_()` 的 S3PO 闭环，并支持修复后参数/结构对照 |
 | `analyze_m5_depth_signal.py` | M5-0：分析当前 depth signal 在 train-mask 内的结构 | ✅ 可用 | 不改训练，仅诊断 |
 | `materialize_m5_depth_targets.py` | M5-1：写出 `target_depth_for_refine_v2` 与 densify 产物 | ✅ 可用 | 当前 selected 参数已验证 |
 | `diagnose_stageA_gradients.py` | M5 diagnosis：检查 forward sensitivity 与 grad 连通性 | ✅ 可用 | 当前已发现 Stage A pose path 异常 |
@@ -325,8 +325,9 @@ Stage B                          -> 明确不建议现在进入 ❌
 | `M3 verified depth ratio` | `~1.56%` | 原始 verified depth 覆盖 |
 | `M5 non-fallback ratio` | `~15.8%` | densify 后整图新几何区域 |
 | `M5 non-fallback within train_mask` | `~81.2%` | train-mask 内真正有新几何信息的区域 |
-| `M5 source-aware loss_depth` | `~0.0687` | 已接通但仍基本不下降 |
-| `pose forward sensitivity probe` | `0.0` | 手动加 pose delta 后 render RGB/depth 几乎不变 |
+| `M5 source-aware loss_depth (fixed path)` | `0.06867 -> 0.06816` | 修复后开始轻微下降，但仍偏弱 |
+| `default_300 mean pose change` | `trans ~0.00138`, `rot ~0.00498 rad` | 修复后真实累计位姿变化不大但存在 |
+| `pose_reg during fixed-path training` | `≈ 0` | 当前 residual 每步清零后，`stageA_lambda_pose` 不再约束累计 pose drift |
 
 ## 6. 状态
 

@@ -1,7 +1,7 @@
 # CURRENT_MASK_PROBLEM.md
 
-> 最后更新：2026-04-12 14:25
-> 主题：mask problem 的第一阶段已经基本解决；当前已经确认并修回了 Stage A 偏离 S3PO 原始 residual pose 闭环的问题。新的状态是：**pose 闭环接回后，Stage A 不再是假优化，但 depth 目前只出现轻微下降，是否足以进入下一阶段仍需继续验证。**
+> 最后更新：2026-04-12 15:15
+> 主题：mask problem 的第一阶段已经基本解决；Stage A 的 S3PO residual pose 闭环也已修回。当前新的问题不是“还在假优化”，而是：**修复后 depth 只表现为弱下降，而且 current `pose_reg` 在 residual 每步清零后几乎失效，说明现在更像是参数/尺度与绝对位姿约束的问题。**
 
 ---
 
@@ -267,7 +267,75 @@ render(using current R/T)
 
 也就是说，这次修复证明了：
 
-**之前 loss 不动的主要根因之一确实是 pose 闭环没接回；但把闭环接回之后，depth supervision 目前仍然只是弱有效，而不是一下子变得非常强。**
+**之前 loss 不动的主要根因之一确实是 pose 闭环没接回；但把闭环接回之后，depth supervision 目前仍然只是弱有效，而不是一下子变得非常强。进一步的 300-iter 验证表明，这个“弱有效”不是 80 iter 偶然现象，而是当前参数/结构下的稳定状态。**
+
+
+## 5.5 修复后的 300-iter 验证：不是“完全无效”，但目前仍然偏弱
+
+在修回 `apply_pose_residual_()` 之后，又做了三组 300-iter 验证：
+
+1. `default_300`
+   - `beta_rgb=0.7`
+   - `lambda_depth_seed=1.0`
+   - `lambda_depth_dense=0.35`
+   - `lr_exp=0.01`
+
+2. `depth_heavy_300`
+   - `beta_rgb=0.3`
+   - `lambda_depth_seed=1.0`
+   - `lambda_depth_dense=1.0`
+   - `lr_exp=0.01`
+
+3. `no_exposure_300`
+   - `beta_rgb=0.7`
+   - `lambda_depth_seed=1.0`
+   - `lambda_depth_dense=0.35`
+   - `lr_exp=0.0`
+
+结果：
+
+- `default_300`
+  - `loss_total: 0.02701 -> 0.02577`
+  - `loss_depth: 0.06867 -> 0.06816`
+  - `loss_depth_seed: 0.05796 -> 0.05750`
+  - `loss_depth_dense: 0.03062 -> 0.03047`
+
+- `depth_heavy_300`
+  - `loss_total: 0.06475 -> 0.06364`
+  - `loss_depth: 0.08857 -> 0.08747`
+  - `loss_depth_seed: 0.05796 -> 0.05731`
+  - `loss_depth_dense: 0.03062 -> 0.03016`
+
+- `no_exposure_300`
+  - `loss_total: 0.02701 -> 0.02696`
+  - `loss_rgb: 0.00915 -> 0.00928`（几乎不降，甚至略坏）
+  - `loss_depth: 0.06867 -> 0.06822`
+
+这说明：
+- 修复后，depth 的确已经不是“完全平线”；
+- 但无论 default、加重 depth、还是冻结 exposure，目前都只是**弱下降**；
+- `depth_heavy_300` 比 default 稍强一点，但也没有出现质变。
+
+### 5.6 修复后暴露出来的新结构问题
+
+当前还有一个新的结构点需要明确：
+
+**在每步都 `apply_pose_residual_()` 之后，当前 `pose_reg_loss = ||cam_rot_delta|| + ||cam_trans_delta||` 基本会回到 0。**
+
+这意味着：
+- `stageA_lambda_pose` 现在不再约束“累计位姿偏移”；
+- 它只能约束当前一步 residual，但 residual 在 step 后立即清零；
+- 所以从设计上说，当前 Stage A 已经缺少了一个“absolute pose drift prior”。
+
+这和实验现象是吻合的：
+- 300 iter 后真实 pose 的累计变化并不大，但确实存在；
+- `default_300` 的平均位移变化约 `0.00138`，平均旋转变化约 `0.00498 rad`；
+- `depth_heavy_300` 的平均位移变化约 `0.00390`，平均旋转变化约 `0.00453 rad`；
+- `no_exposure_300` 的平均位移变化约 `0.00141`，平均旋转变化约 `0.00463 rad`。
+
+这说明当前问题已经进一步收敛成：
+
+**闭环修复后，优化终于是真的了；但当前 depth signal 只在较小尺度上推动位姿变化，而且当前 loss 结构里缺少一个对“累计 pose drift”的明确约束。**
 
 
 ## 6. 现在应该如何判断问题
@@ -288,8 +356,9 @@ render(using current R/T)
 
 在这个问题没查清之前：
 - 现在已经可以重新开始相信 Stage A 的 loss 曲线有解释价值；
-- 但当前 depth 只出现轻微下降，所以仍然不宜直接进入 Stage B；
-- 下一步更合理的是先做修复后的中等规模验证，再决定是否继续放大。
+- 修复后的 300-iter 结果表明 depth 确实会下降，但仍然只是弱下降；
+- 同时新的结构问题也暴露出来了：当前 `pose_reg` 无法约束累计位姿偏移；
+- 因此下一步更合理的是在不进入 Stage B 的前提下，继续做参数/结构层面的诊断。
 
 ---
 
