@@ -221,6 +221,177 @@
 
 因此下一步应进入 **M4.6 / depth-flatness diagnosis**，而不是直接跳到 Stage B。
 
+
+### Mask problem route：M5-0 depth signal diagnosis
+
+在 M4.5 之后，没有直接继续推进 Stage B，而是先做一轮更结构化的 diagnosis，确认当前 depth signal 到底卡在哪里。
+
+新增文件：
+- `scripts/analyze_m5_depth_signal.py`
+
+实验目录：
+- `.../2026-04-12_m50_m51_eval/analysis/m50_depth_signal.json`
+
+关键结果：
+- `train_mask coverage ≈ 19.41%`
+- `verified depth coverage ≈ 1.56%`
+- `verified_within_train_mask_ratio ≈ 8.05%`
+- `render_fallback_within_train_mask_ratio ≈ 91.95%`
+
+解释：
+- 当前 depth loss 不是没接上；
+- 但在训练真正消费的 mask 区域里，绝大多数像素仍然只是 fallback depth；
+- 这说明旧的 M3 target 在 train-mask 内部的“新几何信息占比”确实太低。
+
+阶段判断：
+- M5-0 证明旧问题真实存在；
+- 下一步值得先尝试 densify correction field，而不是继续堆 M4.5 式对照。
+
+### Mask problem route：M5-1 densify depth correction field
+
+根据 M5 规划，开始新增一层受控的 local depth correction densify，而不是去放宽 verify 阈值。
+
+新增文件：
+- `pseudo_branch/brpo_depth_densify.py`
+- `scripts/materialize_m5_depth_targets.py`
+
+代码修改：
+- `pseudo_branch/brpo_depth_target.py`
+
+关键实现：
+- 在 verified seed 上构造 `log-depth correction`，而不是传播 absolute depth；
+- 先实现首版 `patch-wise constant correction`；
+- 输出：
+  - `target_depth_for_refine_v2.npy`
+  - `target_depth_dense_source_map.npy`
+  - `depth_correction_seed.npy`
+  - `depth_correction_dense.npy`
+  - `depth_seed_valid_mask.npy`
+  - `depth_dense_valid_mask.npy`
+  - `depth_densify_meta.json`
+
+默认参数第一次运行结果：
+- 只把 densified 区域提升到 `~2.08%`
+- 总 non-fallback 只有 `~3.64%`
+- 结论：太保守，不足以支撑下游对照
+
+随后做了小范围 sweep，目标不是追求极大 coverage，而是找一个“明显增强但仍受控”的配置。
+
+当前选中的一组参数：
+- `patch_size = 11`
+- `stride = 5`
+- `min_seed_count = 4`
+- `max_seed_delta_std = 0.08`
+
+在这组参数下：
+- `seed_ratio ≈ 1.56%`
+- `densified_ratio ≈ 14.21%`
+- `total_nonfallback_ratio ≈ 15.77%`
+- `render_fallback_ratio ≈ 84.23%`
+
+更关键的是，在 train-mask 内部：
+- `nonfallback_within_train_mask_ratio ≈ 81.22%`
+- `seed_within_train_mask_ratio ≈ 8.05%`
+- `dense_within_train_mask_ratio ≈ 73.17%`
+
+阶段判断：
+- M5-1 upstream 是可行的；
+- 这一步已经把真正有新几何信息的区域从 seed 级抬到了 train-mask 的大部分区域；
+- 因此后续值得测试 source-aware depth loss，而不是继续纠结 upstream coverage 是否还太低。
+
+提交：
+- `8a9c224` — `part3: add M5 depth signal analysis and densify targets`
+
+### Mask problem route：M5-2 source-aware depth loss 接入 Stage A
+
+在 M5-1 之后，继续把 Stage A 接到新的 densified target，并把 depth loss 按 source 拆开。
+
+代码修改：
+- `pseudo_branch/pseudo_loss_v2.py`
+- `scripts/run_pseudo_refinement_v2.py`
+
+关键实现：
+- `run_pseudo_refinement_v2.py` 新增：
+  - `stageA_target_depth_mode=blended_depth_m5`
+  - `stageA_depth_loss_mode=legacy|source_aware`
+- `pseudo_loss_v2.py` 新增：
+  - `loss_depth_seed`
+  - `loss_depth_dense`
+  - `loss_depth_fallback`
+- 当前 source-aware 默认权重：
+  - `lambda_depth_seed = 1.0`
+  - `lambda_depth_dense = 0.35`
+  - `lambda_depth_fallback = 0.0`
+
+实验目录：
+- `.../2026-04-12_m52_stageA_loss_eval/`
+
+对照结果：
+1. `M5 + legacy depth loss`
+   - `loss_depth ≈ 0.02770`
+   - 300 iter 中基本完全不动
+2. `M5 + source-aware depth loss`
+   - `loss_depth ≈ 0.06867`
+   - 其中：
+     - `loss_depth_seed ≈ 0.05796`
+     - `loss_depth_dense ≈ 0.03062`
+     - `loss_depth_fallback ≈ 0`
+   - 300 iter 中同样基本完全不动
+
+阶段判断：
+- source-aware depth loss 已经真实接通；
+- fallback 也已基本从 depth loss 主体中剔除；
+- 但 depth 仍然不动，说明问题已经不再只是 coverage 或 fallback 稀释。
+
+提交：
+- `d700194` — `part3: add M5 source-aware stageA depth loss`
+
+### Stage A diagnosis：pose/render forward-backward 可疑不一致
+
+在 M5-2 之后，继续追查为什么 loss 仍完全不动，并审核 refine 过程本身是否存在更底层的问题。
+
+新增文件：
+- `scripts/diagnose_stageA_gradients.py`
+
+实验目录：
+- `.../2026-04-12_m53_stageA_diagnosis/m53_gradients.json`
+
+代码审计先确认：
+- `cam_rot_delta / cam_trans_delta` 确实传进了 `gaussian_renderer`
+- optimizer 也确实在更新它们
+
+但真正关键的 diagnosis 结果是：
+
+1. **forward sensitivity probe 极其异常**
+   - 人工把 `cam_rot_delta / cam_trans_delta` 设到 `0.01 / 0.01`、`0.05 / 0.05`、`0.1 / 0.1`、`0.2 / 0.2`
+   - 重新 render RGB / depth
+   - 与 base render 比较，结果始终：
+     - `rgb_mean_abs_change = 0.0`
+     - `depth_mean_abs_change = 0.0`
+
+2. **backward 却返回了非零 pose 梯度**
+   - `mean_grad_rgb_rot ≈ 0.265`
+   - `mean_grad_rgb_trans ≈ 0.0786`
+   - `mean_grad_depth_legacy_rot ≈ 0.504`
+   - `mean_grad_depth_legacy_trans ≈ 0.197`
+   - `mean_grad_depth_src_rot ≈ 1.732`
+   - `mean_grad_depth_src_trans ≈ 0.550`
+
+3. **pose regularization 在初始化为 0 时梯度也是 0**
+   - 因此最开始没有任何“拉回 pose”的约束力
+
+阶段判断：
+- 当前最可疑的问题已经不是 depth target 本身，而是：
+
+**Stage A 的 pose-delta 路径在 renderer / rasterizer 中很可能存在 forward / backward 不一致。**
+
+这也解释了为什么：
+- loss 基本不下降；
+- pose delta 却会持续增大；
+- 当前 Stage A 的 pose refine 结果不应被直接信任。
+
+因此当前明确不建议直接进入 Stage B。
+
 ### 文档恢复后的同步补写
 
 由于误删并恢复了 `docs/`，本轮重新按写作规范同步补回：

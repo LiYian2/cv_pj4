@@ -1,31 +1,27 @@
 # CURRENT_MASK_PROBLEM.md
 
-> 最后更新：2026-04-12 02:20
-> 主题：mask problem 已从“BRPO support 太稀，不能当训练 mask”推进到“train mask 已基本可用，但 verified depth 仍过稀，导致 blended depth 在 Stage A 中接上了却几乎不动”。
+> 最后更新：2026-04-12 13:35
+> 主题：mask problem 的第一阶段已经基本解决；当前新的主问题不是 train mask 不够，而是 **verified/densified depth 虽然已经变强，但 Stage A 的 pose/render 连通性存在异常，导致 depth 与 pose refine 都不可信地“发力失败”。**
 
 ---
 
-## 1. 当前结论
+## 1. 当前一句话结论
 
-现在不能再笼统说“mask 还太稀”。更准确的说法是：
+现在不能再把问题简单表述成“BRPO mask 太稀”。更准确的说法是：
 
-1. **train mask 这一层已经基本可用。**
-   经过 `M1 → M2 → M2.5`，当前 `train_confidence_mask_brpo_fused` 的 coverage 已经从 seed-level 的 `~1.5%` 抬到大约 `18% ~ 20%`，落在此前判断的合理训练区间 `10% ~ 25%` 内。
-
-2. **verified depth 这一层仍然过稀。**
-   当前 `target_depth_for_refine` 中，真正来自 BRPO verified depth 的区域仍只有 `~1.56%`；其余 `~98.4%` 都是 `render_depth` fallback。
-
-3. **两者不是同一层产物。**
-   - `train_mask` 是从 `seed_support` 经过 propagation 扩出来的训练 supervision mask；
-   - `verified depth` 当前仍直接来自 verify 阶段的 sparse projected depth，没有跟着 propagation 一起变大。
+- **train mask 这一层已经基本可用**：`train_mask coverage ≈ 19.4%`，处于此前判断更合理的 `10% ~ 25%` 区间；
+- **原始 verified depth 的确太稀**：M3 下真正来自 verified projection 的区域只有 `~1.56%`；
+- **M5 densify 已经把 depth 新信息区域显著抬高**：在 selected M5 参数下，`train_mask` 内非 fallback 区域已经到 `~81.2%`；
+- **但即使做了 densify 和 source-aware depth loss，Stage A 的 depth loss 依然基本不动**；
+- 进一步诊断发现：**当前 renderer 前向对 pose delta 看起来几乎不敏感，但反向却返回非零 pose 梯度**，这说明当前 Stage A 的 pose refine 路径本身就存在很大可疑点。
 
 一句话说：
 
-**mask problem 的第一阶段已经基本解决（train mask 不再只是 seed）；但新的主问题已经转成：verified depth 过稀，导致 M3/M4 的 blended depth 虽然接上了，却还没在 Stage A 里真正“动起来”。**
+**mask problem 已经从“train mask 太稀”演变成“depth target 已增强，但 Stage A pose/render 路径可能有 forward/backward 不一致，导致 refine 过程本身不可信”。**
 
 ---
 
-## 2. 当前精确统计：coverage 到底是多少
+## 2. 当前关键统计
 
 当前统计基于：
 
@@ -38,69 +34,67 @@
 
 样本帧：`10 / 50 / 120`
 
-### 2.1 seed support coverage
+### 2.1 M3 之前已经确认的 coverage
 
-平均：
 - `seed_support_union_coverage ≈ 1.5608%`
-- `seed_support_both_coverage ≈ 0.7975%`
-
-逐帧：
-- frame 10: union `1.6285%`, both `0.7496%`
-- frame 50: union `1.5076%`, both `0.7389%`
-- frame 120: union `1.5465%`, both `0.9041%`
-
-这说明 verify 的几何 seed 仍然是典型的 **高精度 / 低覆盖** 信号。
-
-### 2.2 train mask coverage
-
-平均：
 - `train_mask_coverage ≈ 19.4126%`
-
-逐帧：
-- frame 10: `20.1538%`
-- frame 50: `18.0340%`
-- frame 120: `20.0500%`
-
-这说明当前 `train_mask` 已经不再是“几乎没 coverage”的状态，而是已经进入此前 M2.5 认为更合理的区间（大约 `10% ~ 25%`）。
-
-### 2.3 verified depth coverage
-
-平均：
 - `verified_depth_coverage ≈ 1.5608%`
 
-逐帧：
-- frame 10: `1.6285%`
-- frame 50: `1.5076%`
-- frame 120: `1.5465%`
+这说明：
+- `seed_support -> propagation -> train_mask` 这条链已经把训练 mask 从 seed-level 扩成了可训练覆盖；
+- 但 `verified depth` 在 M3 里仍然停留在 seed/support 级别。
 
-注意这里一个关键事实：
+### 2.2 M5-0：当前 depth signal 被覆盖结构严重限制
 
-**当前 verified depth coverage 与 seed support union coverage 是一样的。**
+M5-0 的诊断重点不是再看整图，而是看 **train_mask 内部**。
 
-这不是巧合，而是当前实现逻辑决定的：
-- 只有通过 verify 的支持点，才会写入 `projected_depth_left/right`；
-- 后续 `target_depth_for_refine` 的 verified 区域，正是这些 projected depth 的有效并集。
+结果：
+- `mean_train_mask_coverage ≈ 19.41%`
+- `mean_verified_depth_coverage ≈ 1.56%`
+- `mean_verified_within_train_mask_ratio ≈ 8.05%`
+- `mean_render_fallback_within_train_mask_ratio ≈ 91.95%`
 
-### 2.4 当前 source map 说明了什么
+解释：
+- 在训练真正消费的 mask 区域里，只有大约 `8%` 的像素落在 verified depth 区域；
+- 剩下大约 `92%` 虽然也在 mask 里，但 depth target 仍然只是 fallback。
 
-当前 `target_depth_for_refine_source_map.npy` 统计大致是：
-- `both_fused`: `~0.74% ~ 0.90%`
-- `left_only + right_only`: `~0.61% ~ 0.88%`
-- `render_fallback`: `~98.4%`
+所以 M4.5 的“depth 不动”不只是因为 depth loss 值小，而是因为：
 
-因此当前 M3 的语义非常明确：
+**当前 train_mask 内真正携带新几何信息的区域比例太小。**
 
-**它不是大覆盖 depth supervision，而是“少量 BRPO verified depth correction + 大部分 render depth fallback”。**
+### 2.3 M5-1：densify 之后的 depth coverage 已经明显增强
 
-注意：
-- `target_depth_for_refine.npy` 本身因为有 fallback，所以几乎是整张图都有值；
-- 当前 `~1.56%` 指的不是它“有没有值”，而是其中有多少像素是**真正来自 BRPO verified depth 的新信息**。
+默认参数（`patch=11, stride=5, min_seed=6, max_std=0.08`）过于保守，只把 densified 区域抬到 `~2.08%`，总 non-fallback 也只有 `~3.64%`，不够。
+
+经过小范围 sweep 后，当前选中的一组参数是：
+
+```text
+patch_size = 11
+stride = 5
+min_seed_count = 4
+max_seed_delta_std = 0.08
+```
+
+在这组参数下：
+- `mean_seed_ratio ≈ 1.56%`
+- `mean_densified_ratio ≈ 14.21%`
+- `mean_total_nonfallback_ratio ≈ 15.77%`
+- `mean_render_fallback_ratio ≈ 84.23%`
+
+更关键的是，在 `train_mask` 内部：
+- `nonfallback_within_train_mask_ratio ≈ 81.22%`
+- `seed_within_train_mask_ratio ≈ 8.05%`
+- `dense_within_train_mask_ratio ≈ 73.17%`
+
+这说明 M5-1 已经把“真正有新几何信息的区域”从 seed 级抬到了**train_mask 的大部分区域**。
+
+所以到这一步，问题已经不再是“depth 还是太 sparse，什么都没法做”。
 
 ---
 
-## 3. 逻辑链：train mask 和 verified depth 到底是什么关系
+## 3. 逻辑链：train mask、verified depth、densified depth 到底是什么关系
 
-当前链路可以概括为：
+当前链路应理解为：
 
 ```text
 left/right verify
@@ -109,99 +103,42 @@ seed_support_left/right/both/single
   ├─→ propagation → train_confidence_mask_brpo_*
   └─→ projected_depth_left/right (仅 support 像素)
                       ↓
-                build_blended_target_depth
+                M3: blended target_depth_for_refine
                       ↓
-              target_depth_for_refine.npy
+                M5: densify correction field
+                      ↓
+              target_depth_for_refine_v2.npy
 ```
 
-也就是说，当前有两条分叉：
+这意味着当前有三层不同的概念：
 
-1. **mask 分支**
-   - `seed_support` → propagation → `train_mask`
-   - 这条分支会把 coverage 从 `~1.5%` 扩到 `~19%`
+1. **train mask**
+   - 回答“哪些像素参与监督、权重多大”
+   - 来自 `seed_support -> propagation`
 
-2. **depth 分支**
-   - `seed_support / verify support` → `projected_depth_*`
-   - 再组装 `target_depth_for_refine`
-   - 这条分支当前**没有**跟着 propagation 一起扩张
+2. **verified depth**
+   - 回答“哪些 support 像素有高置信深度值”
+   - 来自 `projected_depth_*`
+   - M3 下只覆盖 `~1.56%`
 
-因此当前不能说：
-- “verified depth coverage 变大了，是因为 train mask 变大了”
+3. **densified depth**
+   - 回答“如何把 sparse correction 受控地扩进 train-mask 区域”
+   - 来自 `render_depth + sparse log-depth correction + patch-wise densify`
+   - M5-1 下已经能把非 fallback 提到 `~15.8%` 整图、`~81.2%` 的 train-mask 内部区域
 
-更应该说：
-- `train_mask` 已经被 propagation 放大；
-- `verified depth` 还停留在 seed / support 级别，所以仍然很稀。
+因此当前不能再说：
+- verified depth 会随着 train mask 变大而自动变大；
+- 或 M5 之后的 dense 区域还只是“和以前一样太 sparse”。
 
----
-
-## 4. mask 和 depth 各自的用处
-
-这是当前最需要分清楚的地方。
-
-### 4.1 mask 的用处
-
-mask 回答的是：
-
-**哪些像素应该参与监督，参与监督时权重多大。**
-
-当前 `train_mask` 主要服务：
-- masked RGB loss
-- masked depth loss 的支持区域
-
-它本质上是一个 **where / confidence** 问题。
-
-### 4.2 depth 的用处
-
-depth 回答的是：
-
-**这些可信像素的目标深度值到底是多少。**
-
-当前 `projected_depth_*` 和 `target_depth_for_refine.npy` 主要服务：
-- 给 Stage A / 后续 Stage B 提供 depth target
-
-它本质上是一个 **what depth value** 问题。
-
-### 4.3 为什么 mask 可以扩散，但 depth 没跟着扩散
-
-因为两者风险不同：
-- 扩 mask，本质上是在扩大“允许监督的区域”；
-- 扩 depth，本质上是在把一个 sparse depth 数值传播到周围区域。
-
-后者风险更大，因为一旦传播错，就不是单纯“监督范围变大”，而是会把错误几何值写进 target。
-
-所以当前实现选择了更保守的做法：
-- `seed_support -> propagation -> train_mask`
-- `projected_depth` 先保持 sparse
-- 再和 `render_depth` 混成 `target_depth_for_refine`
-
-也正因此，当前会出现：
-- `train_mask ≈ 19.4%`
-- `verified depth ≈ 1.56%`
-
-这种明显不对称。
+到 M5-1 为止，**upstream depth target 已经从“太 sparse 无法讨论”提升到“足够强，应该能测试 downstream 是否真的在用”。**
 
 ---
 
-## 5. 当前 loss 结构，以及浅 verified depth 对 loss 的影响
+## 4. 当前 loss 结构，以及为什么新的问题不再只是 coverage
 
-### 5.1 旧的 v1 逻辑是什么
+### 4.1 旧的 Stage A 结构
 
-最早的 `run_pseudo_refinement.py`（v1）本质上是：
-- pseudo pose 固定
-- 直接更新 Gaussian / PLY
-- 主要用 confidence-weighted RGB loss
-- 更像 **fixed-pose appearance tuning**
-
-所以你说的“最早不就是 RGB 加权 loss 且 PLY 会更新”，这个理解是对的，指的是 **v1**。
-
-### 5.2 现在的 Stage A 在优化什么
-
-当前 `run_pseudo_refinement_v2.py` 的 **Stage A** 不是 final refine，它做的是 warm-up / alignment：
-- **更新 pseudo pose delta**
-- **更新 exposure**
-- **不更新 Gaussian / PLY**
-
-当前总 loss 大致是：
+当前 Stage A 的总 loss 仍然大致是：
 
 ```text
 L = β * L_rgb
@@ -210,121 +147,160 @@ L = β * L_rgb
   + λ_exp * L_exp_reg
 ```
 
-其中：
-- `L_rgb`：在 `train_mask` 上算，所以当前有效训练区域约 `19.4%`
-- `L_depth`：也乘同一个 mask，但其中真正来自 BRPO verified depth 的新信号只有 `~1.56%`
-- `L_pose_reg`：防止 pseudo pose delta 乱飘
-- `L_exp_reg`：防止 exposure 乱飘
+这里：
+- `L_rgb` 在 `train_mask` 上算；
+- `L_depth` 在当前 target depth 上算；
+- Stage A 只更新 pseudo pose delta 和 exposure，不改 Gaussian / PLY。
 
-所以 Stage A 的作用不是“改地图”，而是：
+### 4.2 M5-2 之后的结果
 
-**先把 pseudo supervision 和当前地图对齐一点，再决定要不要进入会真正改 Gaussian 的 Stage B。**
+第三阶段（M5-2）我已经把 consumer 接成两组：
 
-### 5.3 现在这个浅 verified depth 会怎么影响 loss
+1. `M5 densified target + old depth loss`
+2. `M5 densified target + source-aware depth loss`
 
-当前最关键的影响是：
-- RGB 分支用的是扩大后的 `train_mask`，因此有一块相对大的有效监督区域；
-- depth 分支虽然也在算，但真正携带“新几何信息”的区域只有 `~1.56%`；
-- 剩下 `~98.4%` 的区域只是 `render_depth fallback`，更多是保底完整图，而不是新约束。
+结果很关键：
+- `M5 + old depth loss`：`loss_depth ≈ 0.02770`，300 iter 中基本不动；
+- `M5 + source-aware depth loss`：`loss_depth ≈ 0.06867`，300 iter 中也基本不动；
+- 其中 source-aware 已经显式拆成：
+  - `loss_depth_seed ≈ 0.05796`
+  - `loss_depth_dense ≈ 0.03062`
+  - `loss_depth_fallback ≈ 0`
 
-因此当前会出现：
-- `blended_depth` 的 depth loss **非零**，说明它确实接进来了；
-- 但 depth loss 在 Stage A 中几乎不下降，说明它对当前优化的牵引还不够强。
+这意味着：
+- 当前问题已经**不再只是 fallback 稀释**；
+- 因为就算把 fallback 基本去掉，`seed` 和 `dense` 两项还是不动。
 
-### 5.4 这对 Stage B 的意义是什么
+所以到这一步，问题从“depth 太 sparse”继续推进成：
 
-原本 two-stage 的规划是：
-- **Stage A**：先调 pseudo pose / exposure，把 pseudo supervision 对齐
-- **Stage B**：再让 Gaussian + pseudo pose 做 joint refinement，也就是开始真正改地图 / PLY
-
-所以现在如果 depth 还是这么稀，就会有一个风险：
-- 如果直接进入 Stage B，地图更新更可能被 RGB 主导；
-- sparse depth correction 太弱，不足以稳定地约束几何；
-- 这样 Stage B 可能会把“对齐不够清楚的 supervision”直接写进 Gaussian。
-
-这就是为什么当前不适合直接自信地进 Stage B。
+**depth target 已经增强，但 Stage A 仍然没有把它转化成有效的 pose/render 对齐。**
 
 ---
 
-## 6. 当前问题已经演变成什么
+## 5. 新的关键诊断：Stage A pose/render 路径本身很可疑
 
-到现在，问题应该重命名成更准确的表述：
+这是当前最重要的新发现。
 
-### 6.1 已经基本解决的部分
+### 5.1 代码审计结果
 
-- `fused-first verification` 已打通
-- `seed_support` 与 `train_mask` 已明确拆层
-- `train_mask` coverage 已进入可训练区间
-- `blended target_depth_for_refine` 已落地
-- Stage A consumer 已能显式区分：
-  - `train_mask`
-  - `seed_support_only`
-  - `blended_depth`
-  - `render_depth_only`
+- `cam_rot_delta / cam_trans_delta` 确实被传进 `gaussian_renderer`；
+- `run_pseudo_refinement_v2.py` 的 optimizer 也确实在更新这两个参数；
+- 所以“参数没接上”不是主问题。
 
-### 6.2 当前新的主问题
+### 5.2 但前向 sensitivity probe 的结果非常异常
 
-当前新的主问题不再是：
-- `BRPO mask 有没有做出来`
-- 或 `train_mask coverage 能不能从 seed 变大`
+我做了一个直接 probe：
+- 固定同一张 pseudo view
+- 人工把 `cam_rot_delta / cam_trans_delta` 设到：
+  - `(0.01, 0.01)`
+  - `(0.05, 0.05)`
+  - `(0.1, 0.1)`
+  - `(0.2, 0.2)`
+- 重新 render RGB / depth
+- 比较与 base render 的差异
 
-而是：
-
-**verified depth 仍停留在 seed/support 级别，coverage 约 `1.56%`，导致 `blended_depth` 在 Stage A 中虽然已接通，但 depth signal 基本不动。**
-
-因此当前问题已经更像：
-
-**depth-flatness problem on top of solved train-mask problem**
-
----
-
-## 7. 我现在的判断：下一步应该做什么
-
-我觉得当前最合理的下一步不是直接进 Stage B，而是先做一轮 **M4.6 / depth-flatness diagnosis**。
-
-重点不是再堆更多长跑，而是把当前问题拆清楚：
-
-1. 现在 `L_depth` 不动，主要是因为 verified depth 太稀，还是因为当前 loss / optimizer 对它不敏感？
-2. 当前 `L_depth` 里，真正来自 `verified region` 的贡献占多少？是不是被大面积 fallback 区域“稀释”了？
-3. 后面如果要增强 depth 作用，应该先：
-   - 调 Stage A 的 loss / 权重 / 诊断口径
-   - 还是回 upstream 做更受控的 depth-valid coverage 扩张
-
-我现在不建议的事是：
-- 直接进入 Stage B
-- 或者在没搞清楚前，重新回到 `50% ~ 70%` 的宽 propagation
-
-当前最稳的推进顺序应该是：
+结果是：
 
 ```text
-先做 M4.6：解释为什么 depth 不动
-  ↓
-如果是 loss/sensitivity 问题，就先改 Stage A
-  ↓
-如果是 verified depth 太稀，就研究更受控的 depth-valid 扩张
-  ↓
-只有这两件事更清楚后，再决定是否进入 Stage B
+rgb_mean_abs_change = 0.0
+depth_mean_abs_change = 0.0
 ```
+
+即使到 `0.2 / 0.2` 这种量级，前向 render 结果仍然完全不变。
+
+这说明一个非常严重的问题：
+
+**当前 forward 看起来对 pose delta 根本不敏感。**
+
+### 5.3 但 backward 却给出了非零 pose 梯度
+
+更诡异的是，autograd 诊断里：
+- `grad_rgb_only` 对 pose 的梯度非零；
+- `grad_depth_legacy_only` 对 pose 的梯度非零；
+- `grad_depth_source_aware_only` 对 pose 的梯度也非零，而且更大。
+
+summary 大致是：
+- `mean_grad_rgb_rot ≈ 0.265`
+- `mean_grad_rgb_trans ≈ 0.0786`
+- `mean_grad_depth_legacy_rot ≈ 0.504`
+- `mean_grad_depth_legacy_trans ≈ 0.197`
+- `mean_grad_depth_src_rot ≈ 1.732`
+- `mean_grad_depth_src_trans ≈ 0.550`
+
+这和前向 probe 组合起来，非常像：
+
+**renderer 的 pose-delta forward / backward 存在不一致，或者当前 theta/rho 路径在 forward 中没有真正生效，但 backward 仍返回了梯度。**
+
+### 5.4 这解释了为什么当前现象那么怪
+
+这可以同时解释几件之前看起来很怪的事：
+
+1. **loss 基本不下降**
+   - 因为 forward render 对 pose 变化几乎没有响应
+
+2. **pose delta 却一直在涨**
+   - 因为 backward 仍然在给非零梯度，optimizer 照样更新
+
+3. **初始 loss 看起来偏低**
+   - 因为当前 target 本来就建立在当前 render 基础上（尤其 depth）；
+   - 再加上 pose 变化对 forward 基本不起作用，loss 自然很难大幅变化
+
+4. **RGB loss 还有一点下降**
+   - 更像是 exposure 在起作用，而不是 pose 真正改动了 render
+
+### 5.5 regularization 当前也不能真正兜底
+
+另一个细节是：
+- `pose_reg_loss = ||rot|| + ||trans||`
+- 在初始化为 0 的时候，它的梯度也是 0
+
+所以在最开始：
+- regularization 不能提供任何“拉回去”的力；
+- 一旦 supervision 分支给了不可靠的 pose 梯度，pose 就会直接被带走。
 
 ---
 
-## 8. 当前结论（供后续引用）
+## 6. 现在应该如何判断问题
+
+到当前阶段，问题已经不再是单一的“depth coverage 少”。更准确地说，有两个层次：
+
+### 6.1 Upstream 问题：基本已经推进到可用程度
+
+- train mask 已基本可用；
+- M5 densify 也已把 non-fallback depth 区域抬到了有训练意义的量级；
+- 因此 upstream 现在**不是最先该怀疑的地方**。
+
+### 6.2 Downstream 问题：Stage A pose/render 连通性需要优先审计
+
+当前最优先的问题已经变成：
+
+**Stage A 中，pose delta 对 renderer 的前向影响看起来失效，但 backward 却仍返回了非零梯度。**
+
+在这个问题没查清之前：
+- 不宜继续靠看 loss 曲线判断 depth target 是否有效；
+- 更不宜直接进入 Stage B；
+- 否则可能会把一个 forward/backward 不一致的 pose path 继续带入 joint refine。
+
+---
+
+## 7. 当前结论（供后续引用）
 
 当前结论固定为：
 
 1. **train mask 问题已经基本解决。**
    当前 `train_mask coverage ≈ 19.4%`，已不再只是 seed-level support。
 
-2. **verified depth 稀疏问题仍未解决。**
-   当前 `verified_depth coverage ≈ 1.56%`，与 `seed_support_union` 基本一致，说明它还停留在 verify/support 级别。
+2. **verified depth 原始版本确实太稀，但 M5 densify 已显著改善。**
+   当前 M5 selected 参数下，整图 `non-fallback ratio ≈ 15.8%`，在 `train_mask` 内部约 `81.2%` 的区域已是非 fallback depth。
 
-3. **当前实现下，verified depth 不会被 train mask 直接放大。**
-   两者共享上游 seed，但分叉后：
-   - `train_mask` 走 propagation
-   - `verified depth` 走 sparse projected depth
+3. **M5-2 说明仅靠 densify + source-aware loss 仍不足以让 Stage A 的 depth loss 动起来。**
+   这意味着问题不再只是 fallback 稀释。
 
-4. **当前 Stage A 不是 final refine，而是 pose/exposure alignment warm-up。**
-   它现在还不更新 Gaussian / PLY，真正改地图的是后续 Stage B。
+4. **当前最大的异常是 Stage A pose/render 路径可能存在 forward/backward 不一致。**
+   前向 probe 下，即使较大的 pose delta 也几乎不改变 render；但 backward 仍返回非零 pose 梯度。
 
-5. **当前新的主问题是：**
-   `train_mask 已经够大，但 verified depth 仍太稀，导致 blended depth 在 Stage A 中已接通却几乎不动。`
+5. **因此当前不适合直接进入 Stage B。**
+   在修清 Stage A pose path 之前，任何继续往 joint refine 推进的实验都会带着不可信的 pose 更新机制。
+
+6. **当前最合理的下一步是：**
+   先把 renderer / pose-delta 的前向与反向连通性审计清楚，再决定是否继续推进第 4 阶段。

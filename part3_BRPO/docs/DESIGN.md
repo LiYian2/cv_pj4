@@ -1,7 +1,7 @@
 # DESIGN.md - Part3 设计文档
 
 > 本文档记录**当前实际采用**的设计决策、接口定义与默认实验方案。
-> 最后更新：2026-04-12 01:45
+> 最后更新：2026-04-12 13:35
 
 ---
 
@@ -9,15 +9,17 @@
 
 ### 1.1 当前主线边界
 
-当前 Part3 Stage1 主线已经明确切到 **mask-problem route on top of internal route**，而不是继续把 sparse external GT 或旧 v1 对照当作默认主线。
-
-当前边界是：
+当前 Part3 Stage1 主线仍然是 **mask-problem route on top of internal route**，但当前的设计判断已经更新：
 - pseudo 不进入 S3PO frontend tracking；
 - Stage1 仍然是 standalone refine，不接 `slam.py` 主队列；
-- internal route 的目标先固定为：
+- internal route 的主线仍是：
   `part2 full rerun → internal cache → prepare → difix → fuse → verify → train_mask/depth target → Stage A consumer → replay/eval`；
 - 旧 EDP 线继续保留，但与 BRPO 新线文件级隔离，不混写；
-- 当前重点已经不是“有没有 BRPO mask”，而是 **如何让 upstream 输出以正确形式被 Stage A 消费**。
+- **当前最优先的问题不再只是 depth coverage，而是 Stage A 的 pose/render 连通性异常。**
+
+也就是说，现在的主线已经不是继续盲目扩 depth loss 或直接进 Stage B，而是：
+
+**先确认 pose delta 在 renderer 前向里是否真的生效，再决定后续 Stage A / Stage B 的设计。**
 
 ### 1.2 当前阶段定义
 
@@ -35,8 +37,11 @@
 | Phase M3 | ✅ | pseudo-view sparse verified depth + blended `target_depth_for_refine` |
 | Phase M4 | ✅ | Stage A consumer 显式消费 `train_mask + blended_depth` |
 | Phase M4.5 | ✅ | `blended_depth vs render_depth_only` 的 Stage A long eval |
-| Phase M4.6 | 当前主线 | 诊断为什么 depth signal 已接通但在 Stage A 中基本不动 |
-| Phase 7B | 后续主线 | Gaussian + pseudo pose joint refinement |
+| Phase M5-0 | ✅ | 诊断 M3 depth signal 在 train-mask 内部的结构 |
+| Phase M5-1 | ✅ | densify correction field，生成 `target_depth_for_refine_v2` |
+| Phase M5-2 | ✅ | source-aware depth loss 接入 Stage A |
+| Phase M5-3 | 进行中 | 诊断 Stage A pose/render 前向与反向是否一致 |
+| Phase 7B | ❌ 暂缓 | 在 Stage A pose path 修清前，不进入 joint refine |
 
 ---
 
@@ -52,46 +57,65 @@
 - pseudo 相机固定；
 - 用 confidence-weighted RGB loss 优化 Gaussian；
 - 支持 `legacy|brpo` 两类 confidence mask 来源；
-- depth 当前不作为 v1 的正式几何监督主线。
+- depth 不作为 v1 的正式几何监督主线。
 
-因此 v1 更像 **fixed-pose appearance tuning**，不适合作为 M3/M4 的最终承载器。
+因此 v1 本质上仍然是 **fixed-pose appearance tuning**。
 
-### 2.2 Phase 4 之后的关键判断
+### 2.2 M3 / M4 / M4.5 之后的判断
 
-已完成的 3-frame internal ablation 说明：
-- `legacy mask` 的 replay 结果优于 `brpo mask`；
-- 但这不等价于 BRPO verification 无效；
-- 更合理的解释是：**当前 BRPO verification 产出的信号，在旧 v1 消费方式下没有被以最合适方式使用。**
+到 M4.5 为止，已经确认：
+- M3 upstream 已经接通；
+- M4 consumer 已经接通；
+- M4.5 表明 `blended_depth` 在 Stage A 中是“已接通但偏平”的。
 
-因此主线判断切换为：
-1. 先把 verify 输出拆成 `seed_support / train_mask / depth target` 三层；
-2. 再让 `run_pseudo_refinement_v2.py` 明确消费它们；
-3. 最后才判断 BRPO-style supervision 本身是否有效。
-
-### 2.3 M3 / M4 / M4.5 之后的最新判断
-
-当前已经可以确认三件事：
-
-1. **M3 upstream 已经接通。**
-   `target_depth_for_refine.npy` 现在是 blended target，而不是单纯 render-depth fallback 占位符。
-
-2. **M4 consumer 已经接通。**
-   `run_pseudo_refinement_v2.py` 现在已能显式区分：
-   - `train_mask`
-   - `seed_support_only`
-   - `blended_depth`
-   - `render_depth_only`
-   并把实际使用来源写进 `stageA_history.json`。
-
-3. **M4.5 表明 depth signal 是“接通但偏平”的。**
-   在 `blended_depth_long` 与 `render_depth_only_long` 的 300-iter Stage A 对照中：
-   - `blended_depth` 的 depth loss 非零；
-   - `render_depth_only` 的 depth loss 近似为零；
-   - 但 `blended_depth` 的 depth loss 在当前设置下几乎不下降。
-
-所以当前最准确的结论不是“depth 没有被接入”，而是：
+也就是说，M4.5 结束时最合理的判断是：
 
 **depth supervision 已接入，但在当前 Stage A 配置下，对优化的实际牵引还偏弱。**
+
+### 2.3 M5-0 / M5-1 / M5-2 之后的判断
+
+M5 的结果进一步收紧了问题范围：
+
+1. **M5-0 表明旧问题确实存在。**
+   在旧 M3 结构下，`train_mask` 内真正落在 verified depth 区域的比例只有约 `8%`，说明 depth signal 结构确实被 coverage 限制得很厉害。
+
+2. **M5-1 表明 upstream densify 是可行的。**
+   在选中的参数下：
+   - `seed_ratio ≈ 1.56%`
+   - `densified_ratio ≈ 14.21%`
+   - `non-fallback within train_mask ≈ 81.2%`
+
+   这说明 upstream 已经能把真正有新几何信息的区域扩进大部分 train-mask。
+
+3. **M5-2 表明仅靠 densify + source-aware depth loss 仍不足以让 Stage A 动起来。**
+   结果上：
+   - `M5 + legacy depth loss`：`loss_depth ≈ 0.0277`，300 iter 中基本不动；
+   - `M5 + source-aware depth loss`：`loss_depth ≈ 0.0687`，300 iter 中也基本不动；
+   - 但这次已经能明确看到：`loss_depth_seed` 与 `loss_depth_dense` 都被显式接通了。
+
+因此问题已经不再只是“fallback 稀释”或“depth target 太 sparse”。
+
+### 2.4 当前最新判断：Stage A pose/render 路径本身可疑
+
+最新 diagnosis 的关键结论是：
+
+- `cam_rot_delta / cam_trans_delta` 确实传进了 renderer；
+- backward 也确实能返回非零 pose 梯度；
+- **但 forward sensitivity probe 显示：即使手动把 pose delta 调到相当大的量级，render RGB / render depth 仍然完全不变。**
+
+更具体地说，probe 下即使到：
+- `rot = 0.2`
+- `trans = 0.2`
+
+前向 render 的平均与最大变化仍然是 `0.0`。
+
+这和 backward 里的非零梯度一起看，当前最合理的工程判断是：
+
+**pose-delta 路径在 renderer / rasterizer 中很可能存在 forward / backward 不一致。**
+
+所以当前最准确的结论已经变成：
+
+**当前 Stage A 的 loss 不下降，不一定主要是 depth target 不好；更大的嫌疑是 pose refine 本身就没有通过一个可信的 forward path 影响 render。**
 
 ---
 
@@ -118,15 +142,15 @@
 <run_root>/internal_prepare/<prepare_key>/pseudo_cache/
 ```
 
-当前需要明确分成三层：
-- `seed_support_*`：高精度几何种子
-- `train_confidence_mask_*`：训练真正消费的 mask
-- `target_depth_for_refine.npy`：M3 的 blended depth target
+当前 sample 侧已经有两代 depth target：
+- `target_depth_for_refine.npy`：M3 blended depth target
+- `target_depth_for_refine_v2.npy`：M5 densified depth target
 
-也就是说：
-- `internal_eval_cache/` 是长期复用的 source layer；
-- `internal_prepare/` 是 canonical training-input layer；
-- `part3 output/` 是实验输出层。
+当前需要区分四层：
+- `seed_support_*`
+- `train_confidence_mask_*`
+- `target_depth_for_refine.npy`
+- `target_depth_for_refine_v2.npy`
 
 ### 3.3 当前 prepare 流程定义
 
@@ -136,15 +160,15 @@
 select → difix(left/right) → fuse → verify → pack
 ```
 
-其中 `verify / pack` 当前已不再只产单层 support，而是进入：
-- `verification_mode=branch_first | fused_first`
+其中 `verify / pack` 当前已经能够产出：
 - `seed_support_*`
 - `train_confidence_mask_*`
 - `projected_depth_left/right`
 - `target_depth_for_refine.npy`
-- `target_depth_for_refine_source_map.npy`
+- `target_depth_for_refine_v2.npy`
+- `*_source_map.npy`
 
-这意味着当前 prepare 已经从“verification-ready prototype”演进到“consumer-ready canonical input layer”。
+所以当前 prepare 已经从“verification-ready prototype”推进到“能给 Stage A 提供两代 depth target 的 canonical input layer”。
 
 ---
 
@@ -152,217 +176,146 @@ select → difix(left/right) → fuse → verify → pack
 
 ### 4.1 sample 级输出
 
-当前 sample schema 已锁定为：
+当前 sample schema 的关键部分是：
 
 ```text
 samples/<frame_id>/
-├── camera.json
-├── refs.json
-├── source_meta.json
 ├── render_rgb.png
 ├── render_depth.npy
-├── ref_rgb_left.png
-├── ref_rgb_right.png
 ├── target_rgb_left.png
 ├── target_rgb_right.png
 ├── target_rgb_fused.png
-├── target_depth.npy
-├── target_depth_for_refine.npy
-├── target_depth_for_refine_source_map.npy
-├── target_depth_for_refine_meta.json
-├── verified_depth_mask.npy
+├── seed_support_*.npy
+├── train_confidence_mask_brpo_*.npy
 ├── projected_depth_left.npy
 ├── projected_depth_right.npy
-├── projected_depth_valid_left.npy
-├── projected_depth_valid_right.npy
-├── seed_support_left.npy
-├── seed_support_right.npy
-├── seed_support_both.npy
-├── seed_support_single.npy
-├── train_confidence_mask_brpo_left.npy
-├── train_confidence_mask_brpo_right.npy
-├── train_confidence_mask_brpo_fused.npy
-├── train_support_left.npy
-├── train_support_right.npy
-├── train_support_both.npy
-├── train_support_single.npy
-├── confidence_mask_brpo_left.npy       # alias -> train mask
-├── confidence_mask_brpo_right.npy      # alias -> train mask
-├── confidence_mask_brpo_fused.npy      # alias -> train mask
-├── support_left.npy                    # alias -> seed support
-├── support_right.npy                   # alias -> seed support
-├── support_both.npy                    # alias -> seed support
-├── support_single.npy                  # alias -> seed support
-├── fusion_meta.json
-├── verification_meta.json
-└── diag/
+├── target_depth_for_refine.npy
+├── target_depth_for_refine_source_map.npy
+├── target_depth_for_refine_v2.npy
+├── target_depth_dense_source_map.npy
+├── depth_correction_seed.npy
+├── depth_correction_dense.npy
+└── metadata json files
 ```
 
-### 4.2 三种 target_side 的消费语义
+### 4.2 三层 supervision 语义
 
-推荐并已实现的消费语义：
-- `target_side=left`：主要消费 `train_confidence_mask_brpo_left`
-- `target_side=right`：主要消费 `train_confidence_mask_brpo_right`
-- `target_side=fused`：主要消费 `train_confidence_mask_brpo_fused`
+当前必须明确分开：
 
-当前规则是：
-- **不要再让一个 mask 无差别服务所有 target mode**；
-- `fused target` 应优先配对 `fused confidence`；
-- `seed_support_only` 只作为 debug / ablation 模式，不作为默认训练层。
+1. `seed_support_*`
+   - 高精度、低覆盖几何 seed
 
-### 4.3 depth 字段的设计定位
+2. `train_confidence_mask_brpo_*`
+   - 训练真正消费的 supervision mask
 
-当前 depth 字段分三层：
-1. `render_depth.npy`：当前地图渲染深度，用于诊断 / consistency / fallback
-2. `target_depth.npy`：兼容字段，当前不作为主线 depth supervision
-3. `target_depth_for_refine.npy`：当前正式主线使用的 **blended depth target**
+3. `target_depth_for_refine{,_v2}`
+   - depth target
+   - `v1` 是 M3 的 sparse-correction + fallback
+   - `v2` 是 M5 的 densified correction + fallback
 
-当前规则是：
-- `support_both`：使用双边 verified depth（当前 `average` 组装）
-- `support_left`：使用 left verified depth
-- `support_right`：使用 right verified depth
-- unsupported：回退到 `render_depth`
+### 4.3 当前 depth target 的设计判断
 
-因此当前 `target_depth_for_refine.npy` 的语义是：
+当前设计上仍坚持：
+- 不直接 densify absolute projected depth；
+- 以 `render_depth` 作为 dense base；
+- densify 的对象是 **log-depth correction field**。
 
-**verified depth as correction signal + render depth as fallback**
+这条设计目前仍然是合理的。M5-1 的结果已经说明：
+- correction-field densify 可以把 non-fallback depth 扩到明显更有训练意义的量级；
+- upstream 这一侧没有出现“完全不受控”的扩散。
 
-而不是“纯 sparse BRPO depth 替换整张图 depth”。
+因此当前 upstream 设计判断不需要推翻。
 
 ---
 
-## 5. fuse 与 train-mask 的设计判断
+## 5. Stage A / Stage B 的当前设计判断
 
-### 5.1 为什么当前需要 fuse + train-mask + blended depth 三层同时存在
+### 5.1 现在是否还适合继续停在 Stage A？
 
-因为当前问题不是单一环节坏掉，而是三个语义层原本混在了一起：
-- verification 需要高精度几何 evidence；
-- training 需要更可用的 supervision coverage；
-- depth target 需要明确区分 verified correction 与 fallback。
+是，而且比之前更确定。
 
-因此当前设计不再尝试“一个 support / 一个 mask 解决所有问题”，而是显式拆层。
+原因不是“depth 还不够好”，而是：
 
-### 5.2 当前 coverage 的设计判断
+**当前 Stage A 的 pose/render 前向都还没审计清楚，根本不适合把这条不可信的 pose path 再带进 Stage B。**
 
-这里要明确区分两种 coverage：
+### 5.2 为什么当前明确不适合进入 Stage B
 
-1. **train_mask coverage**
-   - 当前目标区间：**约 `10% ~ 25%`**
-   - 当前主线 prototype：约 `18% ~ 20%`
-   - 这是训练真正消费的 mask 覆盖
+如果现在直接上 Stage B，会把几个还没解开的风险一起耦合进去：
+- pose delta 前向是否真的影响 render？
+- backward pose gradient 是否可信？
+- 当前 Stage A 的 pose drift 是否只是伪梯度导致？
+- densified depth signal 是否真的在驱动 geometry，而不是只在 loss 里“看起来有值”？
 
-2. **verified depth coverage**
-   - 当前量级：**约 `1.5% ~ 1.6%`**
-   - 这是 source map 中真正来自 BRPO verified depth 的区域
-   - 不应把它和 train_mask coverage 混为一谈
+在这些问题没拆清楚前，直接进入 Stage B 等于把可疑的 pose 路径直接带入 joint refine。
 
-因此当前判断是：
-- `~1.5%` 如果当 train_mask，确实太稀；
-- 但如果当“depth correction source”，它可以接受，只是当前显得偏保守。
+### 5.3 当前推荐的 Stage A 口径
 
----
+当前推荐的 Stage A 口径已经分成两层：
 
-## 6. Stage A / two-stage refine 的当前设计判断
-
-### 6.1 为什么当前值得继续停在 Stage A
-
-当前更缺的是：
-- depth signal 为什么不动的诊断；
-- upstream coverage 与 downstream optimizer sensitivity 的分离判断；
-- replay / eval 层面对 blended depth 是否真有收益的证据。
-
-这些都比“尽快进入 Stage B”更优先。
-
-### 6.2 为什么当前不适合直接上 full Stage B
-
-因为现在如果直接上 full Stage B，会把几个未回答问题混在一起：
-- verified depth 太稀，还是足够？
-- depth loss 设计不够敏感，还是权重/正则问题？
-- 当前 pose delta 是否被 RGB 主导？
-- blended depth 的收益能否在 replay / eval 里真正体现？
-
-在这些问题没拆清楚前，直接上 Stage B 会增加调试耦合。
-
-### 6.3 当前推荐的 Stage A 口径
-
-当前推荐默认口径：
+**upstream / target 层：**
 - `target_side=fused`
 - `confidence_mask_source=brpo`
 - `stageA_mask_mode=train_mask`
-- `stageA_target_depth_mode=blended_depth`
+- `stageA_target_depth_mode=blended_depth_m5`
 
-同时保留 debug / ablation 开关：
-- `seed_support_only`
-- `legacy`
-- `render_depth_only`
+**diagnosis / loss 层：**
+- `stageA_depth_loss_mode=source_aware`
+- `lambda_depth_seed=1.0`
+- `lambda_depth_dense=0.35`
+- `lambda_depth_fallback=0.0`
 
-当前 Stage A 的最关键要求不是“马上拉高指标”，而是：
-- **history 必须可审计**；
-- **不同 source mode 必须能真实区分**；
-- **不要再让 consumer 悄悄 fallback 到隐式默认值。**
+但是在 pose path 修清之前，这套口径更多是 **diagnosis mode**，不是 final training default。
 
 ---
 
-## 7. 下一步最适合做什么
+## 6. 当前推荐的下一步
 
-### 7.1 当前最优先
+### 6.1 当前最优先
 
 当前最优先的下一步不是：
-- 直接进 Stage B；
-- 或继续堆更多 `blended vs render` 长跑而不解释原因。
+- 继续堆更多 Stage A long run；
+- 或者直接进入 Stage B。
 
 而是：
 
 ```text
-M3 已完成
-projected_depth + blended target_depth_for_refine
+M5 upstream 已证明可行
   ↓
-M4 已完成
-Stage A consumer 显式接通
+M5 source-aware loss 已接通
   ↓
-M4.5 已完成
-blended_depth vs render_depth_only long eval
+当前最优先：审计 Stage A pose/render 连通性
   ↓
-M4.6（下一步）
-depth-flatness diagnosis
+确认 theta/rho 在 renderer/rasterizer 的 forward/backward 是否一致
   ↓
-决定是改 Stage A sensitivity
-还是回 upstream 做受控扩张
+修清后再重跑 M5 Stage A
+  ↓
+只有这一步正常后，再讨论是否进入 Stage B
 ```
 
-### 7.2 下一阶段预计修改的代码
+### 6.2 下一阶段预计修改的代码
 
-1. `scripts/run_pseudo_refinement_v2.py`
-   - 增强 history / diagnostics
-   - 必要时增加更细的 per-view / per-mode 统计
+1. `gaussian_splatting/gaussian_renderer/__init__.py`
+   - 审计 `theta / rho` 参数在 forward 中是否真的影响 render 结果
 
-2. `pseudo_branch/pseudo_loss_v2.py`
-   - 检查当前 depth loss 的有效梯度和归一化方式
-   - 评估是否需要更显式的 verified-region emphasis
+2. 底层 rasterizer 绑定 / CUDA 实现
+   - 确认 pose-delta 的 forward 与 backward 是否匹配
 
-3. `pseudo_branch/brpo_depth_target.py` / `brpo_train_mask.py`
-   - 如果诊断表明 current verified depth 太弱，做更受控的覆盖扩张研究
+3. `run_pseudo_refinement_v2.py`
+   - 在 pose path 修清前，不继续作为 Stage B 的前置合理性证据
 
-4. `scripts/replay_internal_eval.py`
-   - 如继续放大 Stage A 实验，补 replay 对照闭环
+4. `pseudo_loss_v2.py`
+   - 当前 source-aware 设计保留，但后续解释要建立在可信的 pose path 上
 
-### 7.3 当前不建议优先做的事
+### 6.3 当前不建议做的事
 
-- 在 M4.6 前直接进入 full Stage B
-- 在没有新证据前，把 verified depth 覆盖从 `~1.5%` 粗暴拉到高覆盖区
-- 在没有区分 train_mask 与 verified depth 语义前，再次混用“coverage”这一指标
+- 在 Stage A pose forward 都还不敏感时直接进 Stage B
+- 在没修清 pose path 前继续用 loss 不下降去反推“depth supervision 无效”
+- 在没排除 forward/backward 不一致前继续调大量 loss 权重
 
 ---
 
-## 8. 评估口径说明
+## 7. 当前总设计判断
 
-当前需要明确区分四层结论：
-- `external GT`：固定相机 appearance diagnostic
-- `internal replay`：当前真正的 map/protocol 闭环口径
-- `M3 upstream`：verify / train-mask / blended depth target 是否正确定义
-- `M4/M4.5 Stage A`：consumer 是否真正读到并使用这些 target
+当前可以把设计判断固定成一句话：
 
-当前 M4.5 的结论是：
-- `blended_depth` 与 `render_depth_only` 在 Stage A 中已经**可区分**；
-- 但区分主要体现在 depth loss 是否非零，而不是当前优化曲线是否大幅拉开；
-- 因此下一步应优先解释“为什么 depth 不动”，而不是匆忙宣布 depth supervision 已经有效。
+**M5 upstream 路线是可行的，densified correction target 也已经成形；但 downstream 当前最大的阻塞不是 target 设计，而是 Stage A 的 pose/render 路径存在 forward/backward 不一致嫌疑，必须先修这个问题，之后才值得继续往 Stage B 推进。**
