@@ -20,7 +20,7 @@ sys.path.insert(0, S3PO_ROOT)
 sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
 from pseudo_branch.pseudo_camera_state import make_viewpoint_trainable, export_view_state
-from pseudo_branch.pseudo_loss_v2 import build_stageA_loss
+from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
 from pseudo_branch.pseudo_refine_scheduler import StageAConfig, build_stageA_optimizer
 
 
@@ -58,10 +58,14 @@ def parse_args():
     )
     p.add_argument(
         '--stageA_target_depth_mode',
-        choices=['auto', 'blended_depth', 'render_depth_only', 'target_depth_for_refine', 'target_depth', 'render_depth'],
+        choices=['auto', 'blended_depth', 'blended_depth_m5', 'render_depth_only', 'target_depth_for_refine', 'target_depth_for_refine_v2', 'target_depth', 'render_depth'],
         default='blended_depth',
         help='Which depth target Stage A should actually consume.',
     )
+    p.add_argument('--stageA_depth_loss_mode', choices=['legacy', 'source_aware'], default='legacy')
+    p.add_argument('--stageA_lambda_depth_seed', type=float, default=1.0)
+    p.add_argument('--stageA_lambda_depth_dense', type=float, default=0.35)
+    p.add_argument('--stageA_lambda_depth_fallback', type=float, default=0.0)
     p.add_argument('--num_pseudo_views', type=int, default=4)
     p.add_argument('--sh_degree', type=int, default=0)
     p.add_argument('--seed', type=int, default=0)
@@ -78,6 +82,8 @@ def sample_indices(n_total: int, n_sample: int, rng: np.random.Generator):
 def _resolve_depth_mode_alias(mode: str):
     if mode == 'blended_depth':
         return 'target_depth_for_refine'
+    if mode == 'blended_depth_m5':
+        return 'target_depth_for_refine_v2'
     if mode == 'render_depth_only':
         return 'render_depth'
     return mode
@@ -86,21 +92,24 @@ def _resolve_depth_mode_alias(mode: str):
 def resolve_depth_target_path(sample_dir: Path, mode: str):
     resolved_mode = _resolve_depth_mode_alias(mode)
     candidates = []
-    if resolved_mode == 'target_depth_for_refine':
-        candidates = [('target_depth_for_refine', sample_dir / 'target_depth_for_refine.npy')]
+    if resolved_mode == 'target_depth_for_refine_v2':
+        candidates = [('target_depth_for_refine_v2', sample_dir / 'target_depth_for_refine_v2.npy', sample_dir / 'target_depth_dense_source_map.npy')]
+    elif resolved_mode == 'target_depth_for_refine':
+        candidates = [('target_depth_for_refine', sample_dir / 'target_depth_for_refine.npy', sample_dir / 'target_depth_for_refine_source_map.npy')]
     elif resolved_mode == 'target_depth':
-        candidates = [('target_depth', sample_dir / 'target_depth.npy')]
+        candidates = [('target_depth', sample_dir / 'target_depth.npy', None)]
     elif resolved_mode == 'render_depth':
-        candidates = [('render_depth', sample_dir / 'render_depth.npy')]
+        candidates = [('render_depth', sample_dir / 'render_depth.npy', None)]
     else:
         candidates = [
-            ('target_depth_for_refine', sample_dir / 'target_depth_for_refine.npy'),
-            ('target_depth', sample_dir / 'target_depth.npy'),
-            ('render_depth', sample_dir / 'render_depth.npy'),
+            ('target_depth_for_refine_v2', sample_dir / 'target_depth_for_refine_v2.npy', sample_dir / 'target_depth_dense_source_map.npy'),
+            ('target_depth_for_refine', sample_dir / 'target_depth_for_refine.npy', sample_dir / 'target_depth_for_refine_source_map.npy'),
+            ('target_depth', sample_dir / 'target_depth.npy', None),
+            ('render_depth', sample_dir / 'render_depth.npy', None),
         ]
-    for kind, path in candidates:
+    for kind, path, source_map_path in candidates:
         if path.exists():
-            return kind, path
+            return kind, path, source_map_path
     raise FileNotFoundError(f'No depth target candidate found under {sample_dir} for mode={mode}')
 
 
@@ -163,6 +172,24 @@ def resolve_stageA_mask(sample_dir: Path, target_side: str, requested_mode: str,
     raise ValueError(f'Unsupported stageA_mask_mode={requested_mode}')
 
 
+def _summarize_source_map(source_map: np.ndarray | None):
+    if source_map is None:
+        return {
+            'verified_ratio': None,
+            'render_fallback_ratio': None,
+            'seed_ratio': None,
+            'dense_ratio': None,
+        }
+    source_map = np.asarray(source_map)
+    total = float(source_map.size)
+    return {
+        'verified_ratio': float((source_map != 0).sum() / total),
+        'render_fallback_ratio': float((source_map == 0).sum() / total),
+        'seed_ratio': float(np.isin(source_map, [1, 2, 3]).sum() / total),
+        'dense_ratio': float((source_map == 4).sum() / total),
+    }
+
+
 def load_stageA_pseudo_views(args):
     v1 = load_v1_module()
     pseudo_views, pseudo_manifest_info = v1.load_pseudo_viewpoints(
@@ -192,27 +219,26 @@ def load_stageA_pseudo_views(args):
         view['confidence_nonzero_ratio'] = float((conf_arr > 0).sum() / conf_arr.size)
         view['confidence_mean_positive'] = float(positive.mean()) if positive.size > 0 else 0.0
 
-        depth_kind, depth_for_refine = resolve_depth_target_path(sample_dir, args.stageA_target_depth_mode)
+        depth_kind, depth_for_refine, source_map_path = resolve_depth_target_path(sample_dir, args.stageA_target_depth_mode)
         depth_arr = np.load(depth_for_refine).astype(np.float32)
         depth_meta_path = sample_dir / 'target_depth_for_refine_meta.json'
         depth_meta = json.load(open(depth_meta_path)) if depth_meta_path.exists() else {}
-        source_map_path = sample_dir / 'target_depth_for_refine_source_map.npy'
-        source_map = np.load(source_map_path) if source_map_path.exists() else None
+        source_map = np.load(source_map_path) if source_map_path is not None and source_map_path.exists() else None
+        source_summary = _summarize_source_map(source_map)
 
         view['source_meta'] = source_meta
         view['depth_meta'] = depth_meta
         view['target_depth_for_refine_kind'] = depth_kind
         view['stageA_target_depth_mode_effective'] = _resolve_depth_mode_alias(args.stageA_target_depth_mode)
         view['target_depth_for_refine_path'] = str(depth_for_refine)
-        view['target_depth_for_refine_source_map_path'] = str(source_map_path) if source_map_path.exists() else None
+        view['target_depth_for_refine_source_map_path'] = str(source_map_path) if source_map_path is not None and source_map_path.exists() else None
+        view['target_depth_source_map'] = source_map
         view['depth_for_refine'] = depth_arr
         view['target_depth_nonzero_ratio'] = float((depth_arr > 1e-6).sum() / depth_arr.size)
-        if source_map is not None:
-            view['target_depth_verified_ratio'] = float((source_map != 0).sum() / source_map.size)
-            view['target_depth_render_fallback_ratio'] = float((source_map == 0).sum() / source_map.size)
-        else:
-            view['target_depth_verified_ratio'] = depth_meta.get('verified_ratio')
-            view['target_depth_render_fallback_ratio'] = depth_meta.get('render_fallback_ratio')
+        view['target_depth_verified_ratio'] = source_summary['verified_ratio'] if source_summary['verified_ratio'] is not None else depth_meta.get('verified_ratio')
+        view['target_depth_render_fallback_ratio'] = source_summary['render_fallback_ratio'] if source_summary['render_fallback_ratio'] is not None else depth_meta.get('render_fallback_ratio')
+        view['target_depth_seed_ratio'] = source_summary['seed_ratio']
+        view['target_depth_dense_ratio'] = source_summary['dense_ratio']
         make_viewpoint_trainable(view['vp'])
     return pseudo_views, pseudo_manifest_info
 
@@ -254,9 +280,10 @@ def main():
     print(f'  Loaded {len(pseudo_views)} pseudo viewpoints (target_side={args.target_side}, confidence_mask_source={args.confidence_mask_source})')
     print(
         '  StageA effective sources: '
-        f"mask_mode={args.stageA_mask_mode}, depth_mode={args.stageA_target_depth_mode}, "
+        f"mask_mode={args.stageA_mask_mode}, depth_mode={args.stageA_target_depth_mode}, depth_loss_mode={args.stageA_depth_loss_mode}, "
         f"mean_mask_cov={np.mean([v['confidence_nonzero_ratio'] for v in pseudo_views]):.4f}, "
-        f"mean_depth_verified={np.mean([v.get('target_depth_verified_ratio') or 0.0 for v in pseudo_views]):.4f}"
+        f"mean_depth_verified={np.mean([v.get('target_depth_verified_ratio') or 0.0 for v in pseudo_views]):.4f}, "
+        f"mean_depth_dense={np.mean([v.get('target_depth_dense_ratio') or 0.0 for v in pseudo_views]):.4f}"
     )
 
     init_states = [export_view_state(v) for v in pseudo_views]
@@ -280,6 +307,9 @@ def main():
         'loss_total': [],
         'loss_rgb': [],
         'loss_depth': [],
+        'loss_depth_seed': [],
+        'loss_depth_dense': [],
+        'loss_depth_fallback': [],
         'loss_pose_reg': [],
         'loss_exp_reg': [],
         'sampled_sample_ids': [],
@@ -298,19 +328,38 @@ def main():
             view = pseudo_views[pidx]
             sampled_ids.append(int(view['sample_id']))
             pkg = render(view['vp'], gaussians, pipeline_params, bg)
-            loss, stats = build_stageA_loss(
-                render_rgb=pkg['render'],
-                render_depth=pkg['depth'],
-                target_rgb=view['rgb'],
-                target_depth=view['depth_for_refine'],
-                confidence_mask=view['conf'],
-                viewpoint=view['vp'],
-                beta_rgb=cfg.beta_rgb,
-                lambda_pose=cfg.lambda_pose,
-                lambda_exp=cfg.lambda_exp,
-                trans_weight=cfg.trans_reg_weight,
-                use_depth=not args.stageA_disable_depth,
-            )
+            if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
+                loss, stats = build_stageA_loss_source_aware(
+                    render_rgb=pkg['render'],
+                    render_depth=pkg['depth'],
+                    target_rgb=view['rgb'],
+                    target_depth=view['depth_for_refine'],
+                    confidence_mask=view['conf'],
+                    depth_source_map=view['target_depth_source_map'],
+                    viewpoint=view['vp'],
+                    beta_rgb=cfg.beta_rgb,
+                    lambda_pose=cfg.lambda_pose,
+                    lambda_exp=cfg.lambda_exp,
+                    trans_weight=cfg.trans_reg_weight,
+                    lambda_depth_seed=args.stageA_lambda_depth_seed,
+                    lambda_depth_dense=args.stageA_lambda_depth_dense,
+                    lambda_depth_fallback=args.stageA_lambda_depth_fallback,
+                    use_depth=not args.stageA_disable_depth,
+                )
+            else:
+                loss, stats = build_stageA_loss(
+                    render_rgb=pkg['render'],
+                    render_depth=pkg['depth'],
+                    target_rgb=view['rgb'],
+                    target_depth=view['depth_for_refine'],
+                    confidence_mask=view['conf'],
+                    viewpoint=view['vp'],
+                    beta_rgb=cfg.beta_rgb,
+                    lambda_pose=cfg.lambda_pose,
+                    lambda_exp=cfg.lambda_exp,
+                    trans_weight=cfg.trans_reg_weight,
+                    use_depth=not args.stageA_disable_depth,
+                )
             per_view_losses.append(loss)
             per_view_stats.append(stats)
 
@@ -319,20 +368,18 @@ def main():
         optimizer.step()
 
         avg_stats = {}
-        for key in ['loss_total', 'loss_rgb', 'loss_depth', 'loss_pose_reg', 'loss_exp_reg']:
+        for key in ['loss_total', 'loss_rgb', 'loss_depth', 'loss_depth_seed', 'loss_depth_dense', 'loss_depth_fallback', 'loss_pose_reg', 'loss_exp_reg']:
             avg_stats[key] = float(np.mean([s[key] for s in per_view_stats]))
 
+        for key in avg_stats:
+            history[key].append(avg_stats[key])
         history['iterations'].append(it)
-        history['loss_total'].append(avg_stats['loss_total'])
-        history['loss_rgb'].append(avg_stats['loss_rgb'])
-        history['loss_depth'].append(avg_stats['loss_depth'])
-        history['loss_pose_reg'].append(avg_stats['loss_pose_reg'])
-        history['loss_exp_reg'].append(avg_stats['loss_exp_reg'])
         history['sampled_sample_ids'].append(sampled_ids)
 
         if it == 1 or it % 20 == 0:
             print(
                 f"  iter {it}: total={avg_stats['loss_total']:.4f}, rgb={avg_stats['loss_rgb']:.4f}, depth={avg_stats['loss_depth']:.4f}, "
+                f"depth_seed={avg_stats['loss_depth_seed']:.4f}, depth_dense={avg_stats['loss_depth_dense']:.4f}, depth_fb={avg_stats['loss_depth_fallback']:.4f}, "
                 f"pose_reg={avg_stats['loss_pose_reg']:.4f}, exp_reg={avg_stats['loss_exp_reg']:.4f}"
             )
 
@@ -348,10 +395,13 @@ def main():
         'effective_source_summary': {
             'stageA_mask_mode_requested': args.stageA_mask_mode,
             'stageA_target_depth_mode_requested': args.stageA_target_depth_mode,
+            'stageA_depth_loss_mode': args.stageA_depth_loss_mode,
             'stageA_disable_depth': bool(args.stageA_disable_depth),
             'mean_confidence_nonzero_ratio': float(np.mean([v.get('confidence_nonzero_ratio', 0.0) for v in pseudo_views])),
             'mean_target_depth_verified_ratio': float(np.mean([(v.get('target_depth_verified_ratio') or 0.0) for v in pseudo_views])),
             'mean_target_depth_render_fallback_ratio': float(np.mean([(v.get('target_depth_render_fallback_ratio') or 0.0) for v in pseudo_views])),
+            'mean_target_depth_seed_ratio': float(np.mean([(v.get('target_depth_seed_ratio') or 0.0) for v in pseudo_views])),
+            'mean_target_depth_dense_ratio': float(np.mean([(v.get('target_depth_dense_ratio') or 0.0) for v in pseudo_views])),
         },
         'pseudo_sample_meta': [
             {
@@ -364,6 +414,8 @@ def main():
                 'target_depth_nonzero_ratio': v.get('target_depth_nonzero_ratio'),
                 'target_depth_verified_ratio': v.get('target_depth_verified_ratio'),
                 'target_depth_render_fallback_ratio': v.get('target_depth_render_fallback_ratio'),
+                'target_depth_seed_ratio': v.get('target_depth_seed_ratio'),
+                'target_depth_dense_ratio': v.get('target_depth_dense_ratio'),
                 'target_depth_for_refine_source': v.get('source_meta', {}).get('target_depth_for_refine_source'),
                 'target_depth_for_refine_source_map_path': v.get('target_depth_for_refine_source_map_path'),
                 'confidence_path': v.get('confidence_path'),
@@ -378,6 +430,10 @@ def main():
         'stageA_disable_depth': bool(args.stageA_disable_depth),
         'stageA_mask_mode': args.stageA_mask_mode,
         'stageA_target_depth_mode': args.stageA_target_depth_mode,
+        'stageA_depth_loss_mode': args.stageA_depth_loss_mode,
+        'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed),
+        'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense),
+        'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback),
         'final_states': stageA_states,
         'final_delta_summary': [
             {
