@@ -346,7 +346,7 @@
 提交：
 - `d700194` — `part3: add M5 source-aware stageA depth loss`
 
-### Stage A diagnosis：pose/render forward-backward 可疑不一致
+### Stage A diagnosis：确认 `theta/rho` 在 renderer 中 forward 丢弃、backward 仍回梯度
 
 在 M5-2 之后，继续追查为什么 loss 仍完全不动，并审核 refine 过程本身是否存在更底层的问题。
 
@@ -381,14 +381,19 @@
    - 因此最开始没有任何“拉回 pose”的约束力
 
 阶段判断：
-- 当前最可疑的问题已经不是 depth target 本身，而是：
+- 当前最可疑的问题已经被代码链路审计确认：
 
-**Stage A 的 pose-delta 路径在 renderer / rasterizer 中很可能存在 forward / backward 不一致。**
+**Stage A 的 `theta/rho` 在 Python 层被传入，但在 C++/CUDA forward 中被完全丢弃；与此同时 backward 仍然单独构造并返回 `dL_dtau`。**
 
 这也解释了为什么：
 - loss 基本不下降；
 - pose delta 却会持续增大；
 - 当前 Stage A 的 pose refine 结果不应被直接信任。
+
+进一步的代码证据是：
+- `diff_gaussian_rasterization/__init__.py::_RasterizeGaussians.forward()` 的 `args` 不包含 `theta/rho`；
+- `rasterize_points.h/.cu::RasterizeGaussiansCUDA` 的 forward 函数签名也没有 `theta/rho`；
+- 但 `_RasterizeGaussians.backward()` 会从 `_C.rasterize_gaussians_backward(...)` 收到 `grad_tau`，再拆成 `grad_theta / grad_rho`。
 
 因此当前明确不建议直接进入 Stage B。
 

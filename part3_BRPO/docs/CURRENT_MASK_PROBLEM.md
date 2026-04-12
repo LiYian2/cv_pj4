@@ -1,7 +1,7 @@
 # CURRENT_MASK_PROBLEM.md
 
 > 最后更新：2026-04-12 13:35
-> 主题：mask problem 的第一阶段已经基本解决；当前新的主问题不是 train mask 不够，而是 **verified/densified depth 虽然已经变强，但 Stage A 的 pose/render 连通性存在异常，导致 depth 与 pose refine 都不可信地“发力失败”。**
+> 主题：mask problem 的第一阶段已经基本解决；当前新的主问题不是 train mask 不够，而是 **Stage A 的 pose delta (`theta/rho`) 在 renderer forward 中被丢弃、但在 backward 中仍被赋予梯度，导致 depth 与 pose refine 都建立在不一致的计算图上。**
 
 ---
 
@@ -17,7 +17,7 @@
 
 一句话说：
 
-**mask problem 已经从“train mask 太稀”演变成“depth target 已增强，但 Stage A pose/render 路径可能有 forward/backward 不一致，导致 refine 过程本身不可信”。**
+**mask problem 已经从“train mask 太稀”演变成“upstream depth target 已增强，但 Stage A 的 `theta/rho` 路径前向被丢弃、反向却仍给梯度，导致 refine 过程本身不可信”。**
 
 ---
 
@@ -270,7 +270,7 @@ summary 大致是：
 - M5 densify 也已把 non-fallback depth 区域抬到了有训练意义的量级；
 - 因此 upstream 现在**不是最先该怀疑的地方**。
 
-### 6.2 Downstream 问题：Stage A pose/render 连通性需要优先审计
+### 6.2 Downstream 问题：Stage A pose path 已确认需要优先修复
 
 当前最优先的问题已经变成：
 

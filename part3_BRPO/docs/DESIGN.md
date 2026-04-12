@@ -15,11 +15,11 @@
 - internal route 的主线仍是：
   `part2 full rerun → internal cache → prepare → difix → fuse → verify → train_mask/depth target → Stage A consumer → replay/eval`；
 - 旧 EDP 线继续保留，但与 BRPO 新线文件级隔离，不混写；
-- **当前最优先的问题不再只是 depth coverage，而是 Stage A 的 pose/render 连通性异常。**
+- **当前最优先的问题不再只是 depth coverage，而是 Stage A 的 `theta/rho` 路径在 renderer 中已确认 forward/backward 不一致。**
 
 也就是说，现在的主线已经不是继续盲目扩 depth loss 或直接进 Stage B，而是：
 
-**先确认 pose delta 在 renderer 前向里是否真的生效，再决定后续 Stage A / Stage B 的设计。**
+**先修复 `theta/rho` 在 renderer/rasterizer 中的实现不一致，再决定后续 Stage A / Stage B 的设计。**
 
 ### 1.2 当前阶段定义
 
@@ -40,7 +40,7 @@
 | Phase M5-0 | ✅ | 诊断 M3 depth signal 在 train-mask 内部的结构 |
 | Phase M5-1 | ✅ | densify correction field，生成 `target_depth_for_refine_v2` |
 | Phase M5-2 | ✅ | source-aware depth loss 接入 Stage A |
-| Phase M5-3 | 进行中 | 诊断 Stage A pose/render 前向与反向是否一致 |
+| Phase M5-3 | 进行中 | 已确认 `theta/rho` forward 丢弃 / backward 回梯度，正在定位修复点 |
 | Phase 7B | ❌ 暂缓 | 在 Stage A pose path 修清前，不进入 joint refine |
 
 ---
@@ -95,13 +95,14 @@ M5 的结果进一步收紧了问题范围：
 
 因此问题已经不再只是“fallback 稀释”或“depth target 太 sparse”。
 
-### 2.4 当前最新判断：Stage A pose/render 路径本身可疑
+### 2.4 当前最新判断：Stage A 的 `theta/rho` 根因已确认
 
 最新 diagnosis 的关键结论是：
 
-- `cam_rot_delta / cam_trans_delta` 确实传进了 renderer；
-- backward 也确实能返回非零 pose 梯度；
-- **但 forward sensitivity probe 显示：即使手动把 pose delta 调到相当大的量级，render RGB / render depth 仍然完全不变。**
+- `gaussian_renderer/__init__.py` 确实把 `cam_rot_delta / cam_trans_delta` 以 `theta / rho` 传给 `diff_gaussian_rasterization` Python 层；
+- 但 `diff_gaussian_rasterization/__init__.py::_RasterizeGaussians.forward()` 在组 `args` 时直接把 `theta / rho` 丢掉了；
+- 对应的 C++ forward 入口 `rasterize_points.h/.cu::RasterizeGaussiansCUDA` 也根本没有这两个参数；
+- 所以 forward render 完全不会响应 Stage A 的 pose delta。
 
 更具体地说，probe 下即使到：
 - `rot = 0.2`
