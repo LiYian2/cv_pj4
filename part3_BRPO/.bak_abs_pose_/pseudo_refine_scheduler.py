@@ -14,7 +14,6 @@ class StageAConfig:
     beta_rgb: float = 0.7
     lambda_pose: float = 0.01
     lambda_exp: float = 0.001
-    lambda_abs_pose: float = 0.0
     trans_reg_weight: float = 1.0
     lr_rot: float = 0.003
     lr_trans: float = 0.001

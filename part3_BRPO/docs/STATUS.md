@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-12 15:15
+> 更新时间：2026-04-12 20:40
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -49,12 +49,12 @@
 ## 1. 概览
 
 当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但阶段判断已经更新：
-- 已完成 `M1 / M2 / M2.5 / M3 / M4 / M4.5`，证明 upstream schema 和 Stage A consumer 都已接通；
-- 已完成 `M5-0 / M5-1 / M5-2`：depth signal 结构诊断、densified depth target、source-aware depth loss；
-- 当前已确认：**upstream depth coverage 问题已被显著缓解，并且 Stage A 已补回 S3PO 原始的 `tau -> update_pose -> R/T` 闭环；当前进入修复后参数/结构评估阶段**；
-- 最新 diagnosis 表明：renderer 前向对 `cam_rot_delta / cam_trans_delta` 的响应几乎为零，但 backward 却返回非零 pose 梯度，因此当前 Stage A pose refine 机制不可信。
+- 已完成 `M1 / M2 / M2.5 / M3 / M4 / M4.5`，证明 upstream schema 和 Stage A consumer 已接通；
+- 已完成 `M5-0 / M5-1 / M5-2 / M5-3`：depth signal 结构诊断、densified depth target、source-aware depth loss、S3PO residual pose 闭环修回；
+- 已完成 `M5-4`：absolute pose prior 工程接入（`SE3_log + R0/T0 + stageA_lambda_abs_pose`）并做 smoke 对照；
+- 当前确认：**depth 在修复后是“弱有效”，而 absolute pose prior 在小权重（0.1）几乎无感；大权重（100）能压 drift，但未改善 depth，甚至略伤。**
 
-一句话说：**当前最优先的问题已经从“找根因”切换成“根因已修后，这套 M5 depth supervision 只表现为弱下降，而且当前 `pose_reg` 无法约束累计 pose drift；因此还需要继续做参数/结构评估，不能直接推进下一阶段”。**
+一句话说：**当前最优先的问题已经从“链路是否断开”切换成“absolute pose prior 如何做尺度化/权重标定，才能在抑制累计 drift 的同时不压制 depth 对齐”。**
 
 ## 2. 数据结构
 
@@ -170,14 +170,17 @@ samples/<frame_id>/
 ├── 2026-04-12_m45_stageA_eval/
 ├── 2026-04-12_m50_m51_eval/
 ├── 2026-04-12_m52_stageA_loss_eval/
-└── 2026-04-12_m53_stageA_diagnosis/
+├── 2026-04-12_m54_pose_fix_smoke/
+├── 2026-04-12_m55_pose_fix_scale_eval/
+└── 2026-04-12_m56_abs_pose_eval/
 ```
 
 当前最重要结果目录：
 - **M4.5**：`.../2026-04-12_m45_stageA_eval/`
 - **M5-0 / M5-1**：`.../2026-04-12_m50_m51_eval/analysis/`
 - **M5-2**：`.../2026-04-12_m52_stageA_loss_eval/`
-- **当前 diagnosis**：`.../2026-04-12_m53_stageA_diagnosis/m53_gradients.json`
+- **M5-3**：`.../2026-04-12_m54_pose_fix_smoke/` 与 `.../2026-04-12_m55_pose_fix_scale_eval/`
+- **M5-4**：`.../2026-04-12_m56_abs_pose_eval/`
 
 ## 3. 代码脚本
 
@@ -191,7 +194,7 @@ samples/<frame_id>/
 | `prepare_stage1_difix_dataset_s3po_internal.py` | internal `select / difix / fusion / verify / pack` | ✅ 可用 | 当前已支持 M1/M2/M3/M5 sample 固化 |
 | `brpo_build_mask_from_internal_cache.py` | 从 internal cache 构建 verification / seed / train mask / projected depth | ✅ 可用 | 当前已支持 `branch_first|fused_first` 与 M3 depth 输出 |
 | `run_pseudo_refinement.py` | v1 standalone refine 入口 | ✅ 可用 | fixed-pose appearance tuning |
-| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 当前已补回每步后 `apply_pose_residual_()` 的 S3PO 闭环，并支持修复后参数/结构对照 |
+| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 当前已补回 `apply_pose_residual_()` 闭环，并支持 `stageA_lambda_abs_pose` 与 abs-drift 导出 |
 | `analyze_m5_depth_signal.py` | M5-0：分析当前 depth signal 在 train-mask 内的结构 | ✅ 可用 | 不改训练，仅诊断 |
 | `materialize_m5_depth_targets.py` | M5-1：写出 `target_depth_for_refine_v2` 与 densify 产物 | ✅ 可用 | 当前 selected 参数已验证 |
 | `diagnose_stageA_gradients.py` | M5 diagnosis：检查 forward sensitivity 与 grad 连通性 | ✅ 可用 | 当前已发现 Stage A pose path 异常 |
@@ -207,17 +210,17 @@ samples/<frame_id>/
 | `brpo_train_mask.py` | `seed_support → train_confidence_mask` propagation | ✅ 可用 | 当前默认研究区间接近 `10% ~ 25%` coverage |
 | `brpo_depth_target.py` | 组装 M3/M5 depth target | ✅ 可用 | 当前已支持 `v1 + v2` 双版本 |
 | `brpo_depth_densify.py` | M5：densify log-depth correction field | ✅ 可用 | 当前首版 patch-wise densify 已跑通 |
-| `pseudo_camera_state.py` / `pseudo_loss_v2.py` / `pseudo_refine_scheduler.py` | Stage A pseudo camera + loss + optimizer | ✅ 可用 | 已补 `apply_pose_residual_()`，当前 residual 会在每步后折回 `R/T` |
+| `pseudo_camera_state.py` / `pseudo_loss_v2.py` / `pseudo_refine_scheduler.py` | Stage A pseudo camera + loss + optimizer | ✅ 可用 | 已补 `apply_pose_residual_()`；已接入 absolute pose prior（`R0/T0`, `SE3_log`, `lambda_abs_pose`） |
 | `pseudo_fusion.py` | left/right repaired RGB 融合 | ✅ 已接入 | 当前已作为 fused-first pseudo source |
 
 ### 3.3 下一阶段预计触达的代码
 
 | 文件 | 计划改动 |
 |------|----------|
-| `gaussian_splatting/gaussian_renderer/__init__.py` / 底层 rasterizer | 审计 `theta/rho` 在 forward/backward 中是否一致生效 |
-| `run_pseudo_refinement_v2.py` | 在 pose path 修清前，不继续扩 Stage B；必要时先限制/冻结 pose 分支 |
-| `pseudo_loss_v2.py` | 当前已完成 source-aware depth loss，下一步取决于 pose path 审计结果 |
-| `brpo_depth_target.py` / `brpo_depth_densify.py` | 当前 upstream 已足够开展诊断，不再是最优先怀疑点 |
+| `run_pseudo_refinement_v2.py` | 做 300-iter abs prior 权重扫描（含 default/depth-heavy）并固化推荐口径 |
+| `pseudo_loss_v2.py` | 将 abs pose prior 从固定权重改为尺度化版本（rotation/translation 分离或按 scene scale 归一） |
+| `pseudo_camera_state.py` | 增加 drift 统计导出（分 `rho/theta` 聚合）供实验比较 |
+| `brpo_depth_target.py` / `brpo_depth_densify.py` | 当前 upstream 已够用，优先级低于 Stage A 结构标定 |
 
 ## 4. Pipeline
 
@@ -262,7 +265,7 @@ M5-1 densify target
   ↓
 M5-2 source-aware depth loss
   ↓
-M5-3 diagnosis: pose/render forward-backward consistency audit
+M5-3 pose闭环修复 + M5-4 absolute pose prior接入与烟雾对照
 ```
 
 ### 4.3 当前结论对应的流程位置
@@ -271,8 +274,8 @@ M5-3 diagnosis: pose/render forward-backward consistency audit
 verify / pack upstream           -> 已打通 ✅
 M5 densified target generation   -> 已打通 ✅
 source-aware depth loss wiring   -> 已打通 ✅
-Stage A depth/pseudo pose use it -> 结论不可信 ⚠️
-pose/render forward consistency  -> 存在异常 ⚠️
+Stage A 闭环 pose 优化           -> 已打通（弱有效）⚠️
+absolute pose prior wiring       -> 已打通（权重未标定）⚠️
 Stage B                          -> 明确不建议现在进入 ❌
 ```
 
@@ -316,6 +319,7 @@ Stage B                          -> 明确不建议现在进入 ❌
 | source-aware loss | `lambda_depth_fallback` | `0.0` |
 | Stage A | `stageA_iters` | `300` |
 | Stage A | `num_pseudo_views` | `3` |
+| Stage A | `stageA_lambda_abs_pose` | 当前已接入，实验显示 `0.1` 过弱、`100` 过强 |
 
 ### 5.4 当前关键 coverage / diagnosis 口径
 
@@ -327,7 +331,9 @@ Stage B                          -> 明确不建议现在进入 ❌
 | `M5 non-fallback within train_mask` | `~81.2%` | train-mask 内真正有新几何信息的区域 |
 | `M5 source-aware loss_depth (fixed path)` | `0.06867 -> 0.06816` | 修复后开始轻微下降，但仍偏弱 |
 | `default_300 mean pose change` | `trans ~0.00138`, `rot ~0.00498 rad` | 修复后真实累计位姿变化不大但存在 |
-| `pose_reg during fixed-path training` | `≈ 0` | 当前 residual 每步清零后，`stageA_lambda_pose` 不再约束累计 pose drift |
+| `pose_reg during fixed-path training` | `≈ 0` | residual 每步清零后，`stageA_lambda_pose` 不约束累计 drift |
+| `m56 default abs(0.1) vs noabs` | 几乎重合 | `loss_depth` 与 `abs_pose_norm` 变化都很小，权重过弱 |
+| `m56 default abs(100)` | drift 明显下降 | `abs_pose_norm mean 0.00154 -> 0.00034`，但 `loss_depth` 略变差 |
 
 ## 6. 状态
 
@@ -348,29 +354,29 @@ Stage B                          -> 明确不建议现在进入 ❌
 - [x] M5-0：诊断当前 depth signal 在 train-mask 内部的结构
 - [x] M5-1：完成 `target_depth_for_refine_v2` densify target 并选中一组可用参数
 - [x] M5-2：完成 M5 target + source-aware depth loss wiring 与 300-iter 对照
-- [x] M5-3（诊断部分）：确认 Stage A pose/render 路径存在 forward/backward 一致性异常迹象
+- [x] M5-3：补回  闭环并完成 80/300 iter 验证
 
 ### 6.2 当前判断 ⚠️
 
-- [x] upstream depth coverage 问题已不再是唯一主矛盾：M5 已把 train-mask 内的非 fallback 区域抬到约 `81%`
-- [x] `M5 + legacy depth loss` 与 `M5 + source-aware depth loss` 都表明：loss 已接通，但 depth 仍基本不动
-- [x] 当前更大的异常是：**renderer 前向对 pose delta 几乎不敏感，但 backward 却给出非零 pose 梯度**
-- [x] 因此当前 Stage A 的 pose refine 结果不能直接当成“真实可优化性”的证据
+- [x] upstream depth coverage 已不再是唯一主矛盾：M5 已把 train-mask 内非 fallback 区域抬到约 `81%`
+- [x] M5-3 修复后，Stage A 已从“假优化”进入“弱有效”：depth 能降，但幅度小
+- [x] 现阶段核心结构问题是：`pose_reg` 约束 residual 而非累计 drift，导致 absolute prior 成为必要项
+- [x] M5-4 已证明 absolute prior 需要重标定：`0.1` 无感，`100` 能压 drift 但会压 depth
 
 ### 6.3 当前进行中 ⚠️
 
-- [ ] 审计 `theta / rho` 在 renderer / rasterizer forward 与 backward 中是否一致生效
-- [ ] 判断问题是底层 rasterizer camera-delta path 未生效，还是上层接口/封装存在错位
-- [ ] 在 pose path 修清之前，不继续把当前 Stage A loss 曲线当成 depth supervision 失效的最终结论
+- [ ] 做 300-iter `lambda_abs_pose` 扫描（建议 `10/30/100`，含 default 与 depth-heavy）
+- [ ] 设计尺度化 absolute prior（rotation/translation 分离权重，或按场景尺度归一）
+- [ ] 固化“抑制 drift 且不伤 depth”的 Stage A 默认参数
 
 ### 6.4 下一阶段待办 ⏳
 
-- [ ] 先做 renderer / pose-delta 连通性修复或最小复现实验
-- [ ] 修清后再重跑 `M5 + source-aware depth loss`，确认 loss 是否仍然平
-- [ ] 只有在 Stage A pose path 正常后，再讨论是否进入 Stage B
+- [ ] 产出 m56 扩展对照汇总（含 drift-depth tradeoff 图表）
+- [ ] 将 absolute prior 方案写入 `absolute_pose_prior.md` 的默认执行口径
+- [ ] 在 Stage A 达到“非弱下降”前，不进入 Stage B
 
 ### 6.5 当前明确不建议做的事 🚫
 
 - [ ] 现在直接进入 Stage B
-- [ ] 在 pose/render 前向都不敏感的情况下继续解释“为什么 depth 不动”而不先修底层连通性
-- [ ] 把当前 Stage A pose drift 误当成“depth / rgb 真的推动了相机对齐”
+- [ ] 把  当成“已接入就够用”的默认值
+- [ ] 把  当成最终解（当前会压 depth）

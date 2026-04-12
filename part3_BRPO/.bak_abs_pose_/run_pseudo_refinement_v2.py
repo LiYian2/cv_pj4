@@ -45,7 +45,6 @@ def parse_args():
     p.add_argument('--stageA_beta_rgb', type=float, default=0.7)
     p.add_argument('--stageA_lambda_pose', type=float, default=0.01)
     p.add_argument('--stageA_lambda_exp', type=float, default=0.001)
-    p.add_argument('--stageA_lambda_abs_pose', type=float, default=0.0)
     p.add_argument('--stageA_trans_reg_weight', type=float, default=1.0)
     p.add_argument('--stageA_lr_rot', type=float, default=0.003)
     p.add_argument('--stageA_lr_trans', type=float, default=0.001)
@@ -262,7 +261,7 @@ def main():
     print(f'  Loaded {len(pseudo_views)} pseudo viewpoints (target_side={args.target_side}, confidence_mask_source={args.confidence_mask_source})')
     print(
         '  StageA effective sources: '
-        f"mask_mode={args.stageA_mask_mode}, depth_mode={args.stageA_target_depth_mode}, depth_loss_mode={args.stageA_depth_loss_mode}, apply_pose_update={args.stageA_apply_pose_update}, lambda_abs_pose={args.stageA_lambda_abs_pose}, "
+        f"mask_mode={args.stageA_mask_mode}, depth_mode={args.stageA_target_depth_mode}, depth_loss_mode={args.stageA_depth_loss_mode}, apply_pose_update={args.stageA_apply_pose_update}, "
         f"mean_mask_cov={np.mean([v['confidence_nonzero_ratio'] for v in pseudo_views]):.4f}, "
         f"mean_depth_verified={np.mean([v.get('target_depth_verified_ratio') or 0.0 for v in pseudo_views]):.4f}, "
         f"mean_depth_dense={np.mean([v.get('target_depth_dense_ratio') or 0.0 for v in pseudo_views]):.4f}"
@@ -276,7 +275,6 @@ def main():
         beta_rgb=args.stageA_beta_rgb,
         lambda_pose=args.stageA_lambda_pose,
         lambda_exp=args.stageA_lambda_exp,
-        lambda_abs_pose=args.stageA_lambda_abs_pose,
         trans_reg_weight=args.stageA_trans_reg_weight,
         lr_rot=args.stageA_lr_rot,
         lr_trans=args.stageA_lr_trans,
@@ -286,7 +284,7 @@ def main():
     optimizer = build_stageA_optimizer(pseudo_views, cfg)
 
     history = {
-        'iterations': [], 'loss_total': [], 'loss_rgb': [], 'loss_depth': [], 'loss_depth_seed': [], 'loss_depth_dense': [], 'loss_depth_fallback': [], 'loss_pose_reg': [], 'loss_abs_pose_reg': [], 'loss_exp_reg': [], 'sampled_sample_ids': [], 'num_pose_updates_applied': []
+        'iterations': [], 'loss_total': [], 'loss_rgb': [], 'loss_depth': [], 'loss_depth_seed': [], 'loss_depth_dense': [], 'loss_depth_fallback': [], 'loss_pose_reg': [], 'loss_exp_reg': [], 'sampled_sample_ids': [], 'num_pose_updates_applied': []
     }
 
     for it in tqdm(range(1, cfg.num_iterations + 1), desc='StageA pseudo pose+exposure'):
@@ -304,11 +302,11 @@ def main():
             pkg = render(view['vp'], gaussians, pipeline_params, bg)
             if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                 loss, stats = build_stageA_loss_source_aware(
-                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose,
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth,
                 )
             else:
                 loss, stats = build_stageA_loss(
-                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose,
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, use_depth=not args.stageA_disable_depth,
                 )
             per_view_losses.append(loss)
             per_view_stats.append(stats)
@@ -329,7 +327,7 @@ def main():
                 seen.add(sid)
             num_pose_updates = len(seen)
 
-        avg_stats = {key: float(np.mean([s[key] for s in per_view_stats])) for key in ['loss_total', 'loss_rgb', 'loss_depth', 'loss_depth_seed', 'loss_depth_dense', 'loss_depth_fallback', 'loss_pose_reg', 'loss_abs_pose_reg', 'loss_exp_reg']}
+        avg_stats = {key: float(np.mean([s[key] for s in per_view_stats])) for key in ['loss_total', 'loss_rgb', 'loss_depth', 'loss_depth_seed', 'loss_depth_dense', 'loss_depth_fallback', 'loss_pose_reg', 'loss_exp_reg']}
         for key in avg_stats:
             history[key].append(avg_stats[key])
         history['iterations'].append(it)
@@ -340,7 +338,7 @@ def main():
             print(
                 f"  iter {it}: total={avg_stats['loss_total']:.4f}, rgb={avg_stats['loss_rgb']:.4f}, depth={avg_stats['loss_depth']:.4f}, "
                 f"depth_seed={avg_stats['loss_depth_seed']:.4f}, depth_dense={avg_stats['loss_depth_dense']:.4f}, depth_fb={avg_stats['loss_depth_fallback']:.4f}, "
-                f"pose_reg={avg_stats['loss_pose_reg']:.4f}, abs_pose={avg_stats['loss_abs_pose_reg']:.4f}, exp_reg={avg_stats['loss_exp_reg']:.4f}, pose_updates={num_pose_updates}"
+                f"pose_reg={avg_stats['loss_pose_reg']:.4f}, exp_reg={avg_stats['loss_exp_reg']:.4f}, pose_updates={num_pose_updates}"
             )
 
     stageA_states = [export_view_state(v) for v in pseudo_views]
@@ -355,7 +353,6 @@ def main():
             'stageA_depth_loss_mode': args.stageA_depth_loss_mode,
             'stageA_apply_pose_update': bool(args.stageA_apply_pose_update),
             'stageA_disable_depth': bool(args.stageA_disable_depth),
-            'stageA_lambda_abs_pose': float(args.stageA_lambda_abs_pose),
             'mean_confidence_nonzero_ratio': float(np.mean([v.get('confidence_nonzero_ratio', 0.0) for v in pseudo_views])),
             'mean_target_depth_verified_ratio': float(np.mean([(v.get('target_depth_verified_ratio') or 0.0) for v in pseudo_views])),
             'mean_target_depth_render_fallback_ratio': float(np.mean([(v.get('target_depth_render_fallback_ratio') or 0.0) for v in pseudo_views])),
@@ -371,7 +368,7 @@ def main():
             }
             for v in pseudo_views
         ],
-        'history': history, 'stageA_disable_depth': bool(args.stageA_disable_depth), 'stageA_mask_mode': args.stageA_mask_mode, 'stageA_target_depth_mode': args.stageA_target_depth_mode, 'stageA_depth_loss_mode': args.stageA_depth_loss_mode, 'stageA_apply_pose_update': bool(args.stageA_apply_pose_update), 'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed), 'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense), 'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback), 'stageA_lambda_abs_pose': float(args.stageA_lambda_abs_pose), 'final_states': stageA_states,
+        'history': history, 'stageA_disable_depth': bool(args.stageA_disable_depth), 'stageA_mask_mode': args.stageA_mask_mode, 'stageA_target_depth_mode': args.stageA_target_depth_mode, 'stageA_depth_loss_mode': args.stageA_depth_loss_mode, 'stageA_apply_pose_update': bool(args.stageA_apply_pose_update), 'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed), 'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense), 'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback), 'final_states': stageA_states,
         'final_delta_summary': [
             {'sample_id': int(v['sample_id']), 'frame_id': int(v['frame_id']), 'rot_norm': float(torch.norm(v['vp'].cam_rot_delta).detach().cpu().item()), 'trans_norm': float(torch.norm(v['vp'].cam_trans_delta).detach().cpu().item()), 'exposure_a': float(v['vp'].exposure_a.detach().cpu().item()), 'exposure_b': float(v['vp'].exposure_b.detach().cpu().item())}
             for v in pseudo_views

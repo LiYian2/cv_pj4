@@ -1,7 +1,7 @@
 # DESIGN.md - Part3 设计文档
 
 > 本文档记录**当前实际采用**的设计决策、接口定义与默认实验方案。
-> 最后更新：2026-04-12 15:15
+> 最后更新：2026-04-12 20:40
 
 ---
 
@@ -15,11 +15,11 @@
 - internal route 的主线仍是：
   `part2 full rerun → internal cache → prepare → difix → fuse → verify → train_mask/depth target → Stage A consumer → replay/eval`；
 - 旧 EDP 线继续保留，但与 BRPO 新线文件级隔离，不混写；
-- **当前最优先的问题不再是根因定位，而是：在补回 S3PO 原始 residual pose 闭环之后，这套 M5 supervision 目前只表现为弱下降，并且现有 `pose_reg` 已不再约束累计位姿偏移。**
+- **当前最优先的问题不再是“链路是否断开”，而是：在补回 S3PO residual pose 闭环之后，depth 只表现为弱下降，且 absolute pose prior 的权重尺度尚未标定。**
 
-也就是说，现在的主线已经不是继续盲目扩 depth loss 或直接进 Stage B，而是：
+也就是说，现在的主线已经不是继续做 pose 路径真伪排查，而是：
 
-**先基于已恢复的 `tau -> update_pose -> R/T` 闭环做修复后参数/结构评估，再决定后续 Stage A / Stage B 的设计。**
+**先基于已恢复的闭环，完成 absolute pose prior 的尺度化/权重标定，再决定是否推进 Stage B。**
 
 ### 1.2 当前阶段定义
 
@@ -41,7 +41,8 @@
 | Phase M5-1 | ✅ | densify correction field，生成 `target_depth_for_refine_v2` |
 | Phase M5-2 | ✅ | source-aware depth loss 接入 Stage A |
 | Phase M5-3 | ✅ 最小修复完成 | 已按 S3PO 原始机制补回 `tau -> update_pose -> R/T` 闭环，并完成最小验证 |
-| Phase 7B | ❌ 暂缓 | 在 Stage A pose path 修清前，不进入 joint refine |
+| Phase M5-4 | ✅ 已接入待标定 | absolute pose prior（`SE3_log + R0/T0 + lambda_abs_pose`）已接入并完成 smoke 对照 |
+| Phase 7B | ❌ 暂缓 | 在 Stage A 仍是弱有效且 abs prior 未标定前，不进入 joint refine |
 
 ---
 
@@ -95,28 +96,20 @@ M5 的结果进一步收紧了问题范围：
 
 因此问题已经不再只是“fallback 稀释”或“depth target 太 sparse”。
 
-### 2.4 当前最新判断：Stage A 已补回 S3PO residual-pose 闭环，但当前进入“弱下降 + 缺少 absolute pose prior”的评估阶段
+### 2.4 当前最新判断：闭环已恢复，当前瓶颈是 absolute pose prior 的尺度标定
 
-最新 diagnosis 的关键结论是：
+最新工程与实验结论是：
 
-- `gaussian_renderer/__init__.py` 的确把 `cam_rot_delta / cam_trans_delta` 以 `theta / rho` 传进了 Python wrapper；
-- 但 `diff_gaussian_rasterization` 的 forward 路径实际只用 `viewmatrix / projmatrix`，不直接消费 `theta / rho`；
-- 这一点和 S3PO 原始代码并不矛盾，因为它本来的设计就是：backward 求 `grad_tau`，随后由 `update_pose()` 把 tau 折回 `R/T`；
-- 我们当前 Stage A 的问题在于：**没有调用 `update_pose()`，却把 residual 当成会直接改变 forward render 的长期状态来使用。**
+- `apply_pose_residual_()` 已把 S3PO 的 residual pose 闭环补回，Stage A 不再是假优化；
+- 300 iter 下 `loss_depth` 会下降，但幅度仍小，属于“弱有效”；
+- 由于 residual 每步清零，`pose_reg` 基本为 0，无法约束累计 drift；
+- 因此 absolute pose prior 是必要项，但当前权重尺度未标定：
+  - `lambda_abs_pose=0.1` 与 noabs 几乎重合；
+  - `lambda_abs_pose=100` 能显著压 drift（`abs_pose_norm mean 0.00154 -> 0.00034`），但会轻微压制 depth 下降。
 
-更具体地说，probe 下即使到：
-- `rot = 0.2`
-- `trans = 0.2`
+所以当前最准确的设计判断是：
 
-前向 render 的平均与最大变化仍然是 `0.0`。
-
-这和 backward 里的非零梯度一起看，当前最合理的工程判断是：
-
-**pose-delta 路径在 renderer / rasterizer 中很可能存在 forward / backward 不一致。**
-
-所以当前最准确的结论已经变成：
-
-**当前 Stage A 的 loss 不下降，不一定主要是 depth target 不好；更大的嫌疑是 pose refine 本身就没有通过一个可信的 forward path 影响 render。**
+**Stage A 的主矛盾已经从“pose path 是否可信”转为“如何在 drift 抑制与 depth 对齐之间找到可用权重区间”。**
 
 ---
 
@@ -235,19 +228,18 @@ samples/<frame_id>/
 
 是，而且比之前更确定。
 
-原因不是“depth 还不够好”，而是：
+原因不是“pose path 不可信”，而是：
 
-**当前 Stage A 的 pose/render 前向都还没审计清楚，根本不适合把这条不可信的 pose path 再带进 Stage B。**
+**闭环已修后仍然只有弱下降，且 absolute pose prior 的有效权重区间还没标定；现在直接进 Stage B 会把这个未解耦问题放大。**
 
 ### 5.2 为什么当前明确不适合进入 Stage B
 
-如果现在直接上 Stage B，会把几个还没解开的风险一起耦合进去：
-- pose delta 前向是否真的影响 render？
-- backward pose gradient 是否可信？
-- 当前 Stage A 的 pose drift 是否只是伪梯度导致？
-- densified depth signal 是否真的在驱动 geometry，而不是只在 loss 里“看起来有值”？
+如果现在直接上 Stage B，会把几个还没解开的权重耦合问题一起带进去：
+- absolute pose prior 太弱时，累计 drift 约束几乎无效；
+- absolute pose prior 太强时，会压制 depth 对齐；
+- 当前尚未得到“既抑制 drift 又不伤 depth”的稳定默认配置。
 
-在这些问题没拆清楚前，直接进入 Stage B 等于把可疑的 pose 路径直接带入 joint refine。
+在这个权衡没标定清楚前，直接进入 Stage B 会把可调问题变成更难解释的 joint 问题。
 
 ### 5.3 当前推荐的 Stage A 口径
 
@@ -274,44 +266,44 @@ samples/<frame_id>/
 ### 6.1 当前最优先
 
 当前最优先的下一步不是：
-- 继续堆更多 Stage A long run；
-- 或者直接进入 Stage B。
+- 直接进入 Stage B；
+- 或只看单组 long run。
 
 而是：
 
 ```text
 M5 upstream 已证明可行
   ↓
-M5 source-aware loss 已接通
+M5-3 闭环已修回
   ↓
-当前最优先：审计 Stage A pose/render 连通性
+M5-4 absolute prior 已接入
   ↓
-确认 theta/rho 在 renderer/rasterizer 的 forward/backward 是否一致
+当前最优先：做 abs prior 权重/尺度标定
   ↓
-修清后再重跑 M5 Stage A
+确定“抑制 drift 且不伤 depth”的默认区间
   ↓
-只有这一步正常后，再讨论是否进入 Stage B
+再讨论是否进入 Stage B
 ```
 
 ### 6.2 下一阶段预计修改的代码
 
-1. `gaussian_splatting/gaussian_renderer/__init__.py`
-   - 审计 `theta / rho` 参数在 forward 中是否真的影响 render 结果
+1. `run_pseudo_refinement_v2.py`
+   - 增加 300-iter 权重扫描与汇总输出（default/depth-heavy + abs prior）
 
-2. 底层 rasterizer 绑定 / CUDA 实现
-   - 确认 pose-delta 的 forward 与 backward 是否匹配
+2. `pseudo_loss_v2.py`
+   - 将 absolute prior 改为尺度化形式（translation/rotation 分离权重）
 
-3. `run_pseudo_refinement_v2.py`
-   - 在 pose path 修清前，不继续作为 Stage B 的前置合理性证据
+3. `pseudo_camera_state.py`
+   - 增加 drift 统计导出（`rho/theta` 聚合）
 
-4. `pseudo_loss_v2.py`
-   - 当前 source-aware 设计保留，但后续解释要建立在可信的 pose path 上
+4. `absolute_pose_prior.md`
+   - 固化可执行默认方案与权重建议
 
 ### 6.3 当前不建议做的事
 
-- 在 Stage A pose forward 都还不敏感时直接进 Stage B
-- 在没修清 pose path 前继续用 loss 不下降去反推“depth supervision 无效”
-- 在没排除 forward/backward 不一致前继续调大量 loss 权重
+- 在 abs prior 权重区间未标定前直接进 Stage B
+- 继续把 `lambda_abs_pose=0.1` 当默认值（当前几乎无约束效果）
+- 继续把 `lambda_abs_pose=100` 当最终解（当前会压 depth）
 
 ---
 
@@ -319,4 +311,4 @@ M5 source-aware loss 已接通
 
 当前可以把设计判断固定成一句话：
 
-**M5 upstream 路线是可行的，densified correction target 也已经成形；但 downstream 当前最大的阻塞不是 target 设计，而是 Stage A 的 pose/render 路径存在 forward/backward 不一致嫌疑，必须先修这个问题，之后才值得继续往 Stage B 推进。**
+**M5 upstream 路线可用，Stage A pose 闭环也已修回；当前最大的阻塞已变成 absolute pose prior 的尺度标定——0.1 太弱、100 太强，需先找到抑制 drift 且不伤 depth 的区间，再推进 Stage B。**

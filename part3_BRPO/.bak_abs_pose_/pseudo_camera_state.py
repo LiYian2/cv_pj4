@@ -9,7 +9,7 @@ import torch
 from torch import nn
 
 from gaussian_splatting.utils.graphics_utils import getWorld2View2
-from utils.pose_utils import SE3_exp, SE3_log
+from utils.pose_utils import SE3_exp
 
 
 @dataclass
@@ -18,12 +18,8 @@ class ExportedPseudoCameraState:
     frame_id: int
     pose_c2w: list
     pose_w2c: list
-    pose_w2c_initial: list | None
     cam_rot_delta: list
     cam_trans_delta: list
-    abs_pose_rho: list | None
-    abs_pose_theta: list | None
-    abs_pose_norm: float | None
     exposure_a: float
     exposure_b: float
     target_rgb_path: str
@@ -37,12 +33,8 @@ class ExportedPseudoCameraState:
             'frame_id': int(self.frame_id),
             'pose_c2w': self.pose_c2w,
             'pose_w2c': self.pose_w2c,
-            'pose_w2c_initial': self.pose_w2c_initial,
             'cam_rot_delta': self.cam_rot_delta,
             'cam_trans_delta': self.cam_trans_delta,
-            'abs_pose_rho': self.abs_pose_rho,
-            'abs_pose_theta': self.abs_pose_theta,
-            'abs_pose_norm': float(self.abs_pose_norm) if self.abs_pose_norm is not None else None,
             'exposure_a': float(self.exposure_a),
             'exposure_b': float(self.exposure_b),
             'target_rgb_path': self.target_rgb_path,
@@ -68,10 +60,6 @@ def make_viewpoint_trainable(vp):
     vp.cam_trans_delta = _ensure_parameter(getattr(vp, 'cam_trans_delta', None), (3,))
     vp.exposure_a = _ensure_parameter(getattr(vp, 'exposure_a', None), (1,))
     vp.exposure_b = _ensure_parameter(getattr(vp, 'exposure_b', None), (1,))
-    if not hasattr(vp, 'R0') or vp.R0 is None:
-        vp.R0 = vp.R.detach().clone()
-    if not hasattr(vp, 'T0') or vp.T0 is None:
-        vp.T0 = vp.T.detach().clone()
     return vp
 
 
@@ -123,34 +111,13 @@ def export_view_state(view: Dict[str, Any]) -> Dict[str, Any]:
     vp = view['vp']
     w2c = current_w2c(vp).detach().cpu().numpy()
     c2w = np.linalg.inv(w2c)
-
-    w2c0_list = None
-    abs_pose_rho = None
-    abs_pose_theta = None
-    abs_pose_norm = None
-    if hasattr(vp, 'R0') and hasattr(vp, 'T0') and vp.R0 is not None and vp.T0 is not None:
-        w2c0 = torch.eye(4, device=vp.R0.device, dtype=vp.R0.dtype)
-        w2c0[:3, :3] = vp.R0
-        w2c0[:3, 3] = vp.T0
-        w2c0_list = w2c0.detach().cpu().numpy().tolist()
-
-        delta = current_w2c(vp) @ torch.linalg.inv(w2c0)
-        tau = SE3_log(delta)
-        abs_pose_rho = tau[:3].detach().cpu().tolist()
-        abs_pose_theta = tau[3:].detach().cpu().tolist()
-        abs_pose_norm = float(torch.norm(tau).detach().cpu().item())
-
     state = ExportedPseudoCameraState(
         sample_id=int(view['sample_id']),
         frame_id=int(view['frame_id']),
         pose_c2w=c2w.tolist(),
         pose_w2c=w2c.tolist(),
-        pose_w2c_initial=w2c0_list,
         cam_rot_delta=vp.cam_rot_delta.detach().cpu().tolist(),
         cam_trans_delta=vp.cam_trans_delta.detach().cpu().tolist(),
-        abs_pose_rho=abs_pose_rho,
-        abs_pose_theta=abs_pose_theta,
-        abs_pose_norm=abs_pose_norm,
         exposure_a=float(vp.exposure_a.detach().cpu().item()),
         exposure_b=float(vp.exposure_b.detach().cpu().item()),
         target_rgb_path=str(view.get('target_rgb_path', '')),

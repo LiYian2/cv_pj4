@@ -1,7 +1,7 @@
 # CURRENT_MASK_PROBLEM.md
 
-> 最后更新：2026-04-12 15:15
-> 主题：mask problem 的第一阶段已经基本解决；Stage A 的 S3PO residual pose 闭环也已修回。当前新的问题不是“还在假优化”，而是：**修复后 depth 只表现为弱下降，而且 current `pose_reg` 在 residual 每步清零后几乎失效，说明现在更像是参数/尺度与绝对位姿约束的问题。**
+> 最后更新：2026-04-12 20:40
+> 主题：mask problem 第一阶段已基本解决；Stage A 的 S3PO residual pose 闭环已修回。当前新问题是：**depth 仍是弱下降，且 absolute pose prior 呈现明显权重尺度问题（0.1 太弱，100 太强）。**
 
 ---
 
@@ -12,8 +12,8 @@
 - **train mask 这一层已经基本可用**：`train_mask coverage ≈ 19.4%`，处于此前判断更合理的 `10% ~ 25%` 区间；
 - **原始 verified depth 的确太稀**：M3 下真正来自 verified projection 的区域只有 `~1.56%`；
 - **M5 densify 已经把 depth 新信息区域显著抬高**：在 selected M5 参数下，`train_mask` 内非 fallback 区域已经到 `~81.2%`；
-- **但即使做了 densify 和 source-aware depth loss，Stage A 的 depth loss 依然基本不动**；
-- 进一步诊断发现：**当前 renderer 前向对 pose delta 看起来几乎不敏感，但反向却返回非零 pose 梯度**，这说明当前 Stage A 的 pose refine 路径本身就存在很大可疑点。
+- **在补回闭环后，Stage A 的 depth loss 已经不是完全平线，但仍只表现为弱下降**；
+- 最新 M5-4 对照显示：**absolute pose prior 已接入，但当前权重还没到可用区间**（0.1 无感，100 会压 depth）。
 
 一句话说：
 
@@ -382,4 +382,28 @@ render(using current R/T)
    根因虽然修了，但修复后 depth 只出现轻微下降，还需要先验证这是否足以支撑更大阶段。
 
 6. **当前最合理的下一步是：**
-   先做修复后的中等规模 M5 source-aware 验证与对照，再决定是否继续推进下一阶段。
+   做 300-iter absolute prior 权重扫描（建议 10/30/100）与尺度化版本对照，先找出“抑制 drift 且不伤 depth”的区间，再决定是否推进下一阶段。
+
+
+## 8. M5-4：absolute pose prior 之后，depth 现状怎么判断
+
+基于 `2026-04-12_m56_abs_pose_eval` 的 60-iter 对照，当前 depth 现状可以明确成三点：
+
+1. `lambda_abs_pose=0.1` 基本等同 noabs。
+   - default 与 depth-heavy 两组里，`loss_depth` 与 `abs_pose_norm` 都几乎重合。
+
+2. `lambda_abs_pose=100` 能明显抑制累计 drift。
+   - `abs_pose_norm mean` 大约从 `0.001535` 降到 `0.000338`。
+
+3. 但 `lambda_abs_pose=100` 没有带来 depth 改善。
+   - default 组里 `loss_depth` 反而略变差（`0.068364 -> 0.068543`）。
+
+结论：
+
+当前 depth 的问题已经不是“有没有接上”，也不是“有没有 drift 抑制”，而是 **drift 抑制与 depth 对齐之间的权衡没有标定好**。
+
+因此“100 也算不上很有效果”这个判断是成立的：
+- 它对 drift 有效；
+- 但对我们更关心的 depth 改善并不有效，至少在当前实现和权重下如此。
+
+下一步应是 300-iter 权重扫描 + 尺度化 prior，而不是把 100 当默认解。

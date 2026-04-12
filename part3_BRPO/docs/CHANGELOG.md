@@ -538,6 +538,53 @@
 - `CHANGELOG.md` 记录 M1 / M2 / M2.5 / M3 / M4 / M4.5 的真实过程与结果；
 - 避免把“现状”和“历史过程”混写。
 
+
+### Mask problem route：M5-4 absolute pose prior 接入与 smoke 对照
+
+目标：把 `absolute_pose_prior.md` 从设计文档落地为可执行代码，并验证它在当前 Stage A 闭环下是否有效。
+
+代码修改：
+- `third_party/S3PO-GS/utils/pose_utils.py`
+- `pseudo_branch/pseudo_camera_state.py`
+- `pseudo_branch/pseudo_loss_v2.py`
+- `pseudo_branch/pseudo_refine_scheduler.py`
+- `scripts/run_pseudo_refinement_v2.py`
+
+关键实现：
+- 新增 `SO3_log / SE3_log`；
+- `make_viewpoint_trainable()` 存 `R0/T0`；
+- 新增 `absolute_pose_prior_loss`（基于当前 `w2c` 相对初始 `w2c0` 的 `SE3_log`）；
+- Stage A 增加 `--stageA_lambda_abs_pose`，并写入 history 与导出状态；
+- `export_view_state` 新增 `pose_w2c_initial / abs_pose_rho / abs_pose_theta / abs_pose_norm`。
+
+最小验证：
+- `py_compile` 全通过；
+- CLI `--help` 可见 `--stageA_lambda_abs_pose`；
+- `SE3_exp -> SE3_log` roundtrip 误差约 `3.95e-09`。
+
+60-iter smoke（同一 pseudo_cache，seed=0）：
+- `default_noabs` vs `default_abs(0.1)`：几乎重合；
+- `depth_heavy_noabs` vs `depth_heavy_abs(0.1)`：几乎重合；
+- `default_abs(100)`：
+  - `abs_pose_norm mean 0.001535 -> 0.000338`（drift 明显收紧）
+  - 但 `loss_depth` 从 `0.068364` 变为 `0.068543`（略变差）。
+
+阶段判断：
+- absolute prior“接入成功”≠“参数可用”；
+- 当前结果更像权重尺度问题：`0.1` 太弱，`100` 太强；
+- 下一步应做 300-iter 权重扫描与尺度化 prior，而不是直接拿 `100` 当默认值。
+
+### 与 2026-04-11（mask problem 初始阶段）的设计差异
+
+相较昨天，当前设计变化是实质性的：
+
+1. 昨天主矛盾是 **upstream coverage 不足**（先做 verify/seed/train-mask/M3/M5）；
+2. 现在 upstream 已可用，主矛盾转为 **Stage A 结构标定**（闭环已修，开始做 abs prior）；
+3. 昨天主要在“把 depth 信号接进来”，现在是“如何在 drift 约束与 depth 对齐之间找平衡”；
+4. 因此当前不进入 Stage B 的理由也变化了：
+   - 不是“链路没接通”；
+   - 而是“已接通但参数区间未定”。
+
 ## 2026-04-11
 
 ### Internal cache / replay：Phase 1 与 Phase 2 跑通

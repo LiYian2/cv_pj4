@@ -5,9 +5,6 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 
-from pseudo_branch.pseudo_camera_state import current_w2c
-from utils.pose_utils import SE3_log
-
 SEED_SOURCE_IDS = (1, 2, 3)
 DENSE_SOURCE_ID = 4
 FALLBACK_SOURCE_ID = 0
@@ -92,19 +89,6 @@ def exposure_reg_loss(viewpoint) -> torch.Tensor:
     return viewpoint.exposure_a.abs().mean() + viewpoint.exposure_b.abs().mean()
 
 
-def absolute_pose_prior_loss(viewpoint) -> torch.Tensor:
-    if not hasattr(viewpoint, 'R0') or not hasattr(viewpoint, 'T0'):
-        return torch.zeros((), device=viewpoint.R.device, dtype=viewpoint.R.dtype)
-
-    w2c0 = torch.eye(4, device=viewpoint.R0.device, dtype=viewpoint.R0.dtype)
-    w2c0[:3, :3] = viewpoint.R0
-    w2c0[:3, 3] = viewpoint.T0
-
-    delta = current_w2c(viewpoint) @ torch.linalg.inv(w2c0)
-    tau = SE3_log(delta)
-    return torch.sum(tau * tau)
-
-
 def build_stageA_loss_source_aware(
     render_rgb,
     render_depth,
@@ -121,7 +105,6 @@ def build_stageA_loss_source_aware(
     lambda_depth_dense: float = 0.35,
     lambda_depth_fallback: float = 0.0,
     use_depth: bool = True,
-    lambda_abs_pose: float = 0.0,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     l_rgb = masked_rgb_loss(render_rgb, target_rgb, confidence_mask, viewpoint)
     if use_depth:
@@ -141,15 +124,8 @@ def build_stageA_loss_source_aware(
         l_depth = z
 
     l_pose = pose_reg_loss(viewpoint, trans_weight)
-    l_abs_pose = absolute_pose_prior_loss(viewpoint)
     l_exp = exposure_reg_loss(viewpoint)
-    total = (
-        float(beta_rgb) * l_rgb
-        + (1.0 - float(beta_rgb)) * l_depth
-        + float(lambda_pose) * l_pose
-        + float(lambda_abs_pose) * l_abs_pose
-        + float(lambda_exp) * l_exp
-    )
+    total = float(beta_rgb) * l_rgb + (1.0 - float(beta_rgb)) * l_depth + float(lambda_pose) * l_pose + float(lambda_exp) * l_exp
     stats = {
         'loss_rgb': float(l_rgb.detach().item()),
         'loss_depth': float(l_depth.detach().item()),
@@ -157,26 +133,18 @@ def build_stageA_loss_source_aware(
         'loss_depth_dense': float(l_depth_dense.detach().item()),
         'loss_depth_fallback': float(l_depth_fallback.detach().item()),
         'loss_pose_reg': float(l_pose.detach().item()),
-        'loss_abs_pose_reg': float(l_abs_pose.detach().item()),
         'loss_exp_reg': float(l_exp.detach().item()),
         'loss_total': float(total.detach().item()),
     }
     return total, stats
 
 
-def build_stageA_loss(render_rgb, render_depth, target_rgb, target_depth, confidence_mask, viewpoint, beta_rgb: float, lambda_pose: float, lambda_exp: float, trans_weight: float, use_depth: bool = True, lambda_abs_pose: float = 0.0) -> Tuple[torch.Tensor, Dict[str, float]]:
+def build_stageA_loss(render_rgb, render_depth, target_rgb, target_depth, confidence_mask, viewpoint, beta_rgb: float, lambda_pose: float, lambda_exp: float, trans_weight: float, use_depth: bool = True) -> Tuple[torch.Tensor, Dict[str, float]]:
     l_rgb = masked_rgb_loss(render_rgb, target_rgb, confidence_mask, viewpoint)
     l_depth = masked_depth_loss(render_depth, target_depth, confidence_mask) if use_depth else torch.zeros((), device=render_rgb.device)
     l_pose = pose_reg_loss(viewpoint, trans_weight)
-    l_abs_pose = absolute_pose_prior_loss(viewpoint)
     l_exp = exposure_reg_loss(viewpoint)
-    total = (
-        float(beta_rgb) * l_rgb
-        + (1.0 - float(beta_rgb)) * l_depth
-        + float(lambda_pose) * l_pose
-        + float(lambda_abs_pose) * l_abs_pose
-        + float(lambda_exp) * l_exp
-    )
+    total = float(beta_rgb) * l_rgb + (1.0 - float(beta_rgb)) * l_depth + float(lambda_pose) * l_pose + float(lambda_exp) * l_exp
     stats = {
         'loss_rgb': float(l_rgb.detach().item()),
         'loss_depth': float(l_depth.detach().item()),
@@ -184,7 +152,6 @@ def build_stageA_loss(render_rgb, render_depth, target_rgb, target_depth, confid
         'loss_depth_dense': 0.0,
         'loss_depth_fallback': 0.0,
         'loss_pose_reg': float(l_pose.detach().item()),
-        'loss_abs_pose_reg': float(l_abs_pose.detach().item()),
         'loss_exp_reg': float(l_exp.detach().item()),
         'loss_total': float(total.detach().item()),
     }
