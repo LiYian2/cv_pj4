@@ -1,11 +1,17 @@
 # -*- coding: utf-8 -*-
-"""Utilities for building blended pseudo depth targets for Stage M3."""
+"""Utilities for building blended pseudo depth targets for Stage M3/M5."""
 from __future__ import annotations
 
 from typing import Dict
 
 import numpy as np
 
+from pseudo_branch.brpo_depth_densify import (
+    build_depth_source_map_v2,
+    build_sparse_log_depth_correction,
+    densify_depth_correction_patchwise,
+    reconstruct_dense_depth_from_correction,
+)
 
 SOURCE_RENDER_FALLBACK = 0
 SOURCE_BOTH_FUSED = 1
@@ -107,5 +113,80 @@ def build_blended_target_depth(
         "verified_depth_mask": verified_mask.astype(np.float32),
         "verified_depth_left_mask": valid_left_mask.astype(np.float32),
         "verified_depth_right_mask": valid_right_mask.astype(np.float32),
+        "summary": summary,
+    }
+
+
+def build_blended_target_depth_v2(
+    render_depth: np.ndarray,
+    projected_depth_left: np.ndarray,
+    projected_depth_right: np.ndarray,
+    train_confidence_mask: np.ndarray,
+    valid_left: np.ndarray | None = None,
+    valid_right: np.ndarray | None = None,
+    patch_size: int = 11,
+    stride: int = 5,
+    min_seed_count: int = 6,
+    max_seed_delta_std: float = 0.08,
+) -> Dict[str, np.ndarray | Dict]:
+    render_depth = _as_depth(render_depth)
+    projected_depth_left = _as_depth(projected_depth_left)
+    projected_depth_right = _as_depth(projected_depth_right)
+    train_confidence_mask = _as_depth(train_confidence_mask)
+    valid_left_mask = _as_valid_mask(valid_left, projected_depth_left)
+    valid_right_mask = _as_valid_mask(valid_right, projected_depth_right)
+
+    sparse = build_sparse_log_depth_correction(
+        render_depth=render_depth,
+        projected_depth_left=projected_depth_left,
+        projected_depth_right=projected_depth_right,
+        valid_left=valid_left_mask,
+        valid_right=valid_right_mask,
+    )
+    dense = densify_depth_correction_patchwise(
+        delta_seed_sparse=sparse["delta_seed_sparse"],
+        seed_valid_mask=sparse["seed_valid_mask"],
+        render_depth=render_depth,
+        candidate_region=train_confidence_mask > 0,
+        patch_size=patch_size,
+        stride=stride,
+        min_seed_count=min_seed_count,
+        max_seed_delta_std=max_seed_delta_std,
+    )
+    recon = reconstruct_dense_depth_from_correction(
+        render_depth=render_depth,
+        delta_seed_sparse=sparse["delta_seed_sparse"],
+        seed_valid_mask=sparse["seed_valid_mask"],
+        depth_correction_dense=dense["depth_correction_dense"],
+        depth_dense_valid_mask=dense["depth_dense_valid_mask"],
+    )
+    src = build_depth_source_map_v2(
+        render_depth=render_depth,
+        seed_source_map=sparse["seed_source_map"],
+        seed_valid_mask=sparse["seed_valid_mask"],
+        depth_dense_valid_mask=dense["depth_dense_valid_mask"],
+    )
+
+    total = float(render_depth.size)
+    masked = train_confidence_mask > 0
+    summary = {
+        "depth_target_mode": "blended_m5_dense",
+        "candidate_region_ratio": float(masked.sum() / total),
+        "patch_size": int(patch_size),
+        "stride": int(stride),
+        "min_seed_count": int(min_seed_count),
+        "max_seed_delta_std": float(max_seed_delta_std),
+        **sparse["summary"],
+        **dense["summary"],
+        **src["summary"],
+    }
+
+    return {
+        "target_depth_for_refine_v2": recon["target_depth_dense"].astype(np.float32),
+        "target_depth_dense_source_map": src["target_depth_dense_source_map"],
+        "depth_correction_seed": sparse["delta_seed_sparse"].astype(np.float32),
+        "depth_correction_dense": dense["depth_correction_dense"].astype(np.float32),
+        "depth_seed_valid_mask": sparse["seed_valid_mask"].astype(np.float32),
+        "depth_dense_valid_mask": dense["depth_dense_valid_mask"].astype(np.float32),
         "summary": summary,
     }
