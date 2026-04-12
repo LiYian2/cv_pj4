@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-12 13:35
+> 更新时间：2026-04-12 14:25
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -51,10 +51,10 @@
 当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但阶段判断已经更新：
 - 已完成 `M1 / M2 / M2.5 / M3 / M4 / M4.5`，证明 upstream schema 和 Stage A consumer 都已接通；
 - 已完成 `M5-0 / M5-1 / M5-2`：depth signal 结构诊断、densified depth target、source-aware depth loss；
-- 当前已确认：**upstream depth coverage 问题已被显著缓解，但 Stage A 的 `theta/rho` 路径存在已确认的前向/反向实现不一致**；
+- 当前已确认：**upstream depth coverage 问题已被显著缓解，并且 Stage A 已补回 S3PO 原始的 `tau -> update_pose -> R/T` 闭环；当前进入修复后效果评估阶段**；
 - 最新 diagnosis 表明：renderer 前向对 `cam_rot_delta / cam_trans_delta` 的响应几乎为零，但 backward 却返回非零 pose 梯度，因此当前 Stage A pose refine 机制不可信。
 
-一句话说：**当前最优先的问题已经从“depth target 太 sparse”切换成“Stage A 的 `theta/rho` 在 renderer forward 中被丢弃、但 backward 仍返回梯度，必须先修这个实现问题，再谈 Stage B”。**
+一句话说：**当前最优先的问题已经从“找根因”切换成“根因已修后，这套 M5 depth supervision 是否足够强、值得继续放大实验并最终推进下一阶段”。**
 
 ## 2. 数据结构
 
@@ -191,7 +191,7 @@ samples/<frame_id>/
 | `prepare_stage1_difix_dataset_s3po_internal.py` | internal `select / difix / fusion / verify / pack` | ✅ 可用 | 当前已支持 M1/M2/M3/M5 sample 固化 |
 | `brpo_build_mask_from_internal_cache.py` | 从 internal cache 构建 verification / seed / train mask / projected depth | ✅ 可用 | 当前已支持 `branch_first|fused_first` 与 M3 depth 输出 |
 | `run_pseudo_refinement.py` | v1 standalone refine 入口 | ✅ 可用 | fixed-pose appearance tuning |
-| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ⚠️ 可用但当前结论不可信 | 当前已支持 M5 depth mode 与 source-aware loss，但 `theta/rho` forward 被下游 rasterizer 丢弃 |
+| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 当前已补回每步后 `apply_pose_residual_()` 的 S3PO 闭环，并支持 M5 source-aware loss |
 | `analyze_m5_depth_signal.py` | M5-0：分析当前 depth signal 在 train-mask 内的结构 | ✅ 可用 | 不改训练，仅诊断 |
 | `materialize_m5_depth_targets.py` | M5-1：写出 `target_depth_for_refine_v2` 与 densify 产物 | ✅ 可用 | 当前 selected 参数已验证 |
 | `diagnose_stageA_gradients.py` | M5 diagnosis：检查 forward sensitivity 与 grad 连通性 | ✅ 可用 | 当前已发现 Stage A pose path 异常 |
@@ -207,7 +207,7 @@ samples/<frame_id>/
 | `brpo_train_mask.py` | `seed_support → train_confidence_mask` propagation | ✅ 可用 | 当前默认研究区间接近 `10% ~ 25%` coverage |
 | `brpo_depth_target.py` | 组装 M3/M5 depth target | ✅ 可用 | 当前已支持 `v1 + v2` 双版本 |
 | `brpo_depth_densify.py` | M5：densify log-depth correction field | ✅ 可用 | 当前首版 patch-wise densify 已跑通 |
-| `pseudo_camera_state.py` / `pseudo_loss_v2.py` / `pseudo_refine_scheduler.py` | Stage A pseudo camera + loss + optimizer | ⚠️ 上层可用但底层链路有根因 | loss/optimizer 本身工作，但下游 renderer forward 不消费 `theta/rho` |
+| `pseudo_camera_state.py` / `pseudo_loss_v2.py` / `pseudo_refine_scheduler.py` | Stage A pseudo camera + loss + optimizer | ✅ 可用 | 已补 `apply_pose_residual_()`，当前 residual 会在每步后折回 `R/T` |
 | `pseudo_fusion.py` | left/right repaired RGB 融合 | ✅ 已接入 | 当前已作为 fused-first pseudo source |
 
 ### 3.3 下一阶段预计触达的代码

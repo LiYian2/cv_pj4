@@ -1,7 +1,7 @@
 # DESIGN.md - Part3 设计文档
 
 > 本文档记录**当前实际采用**的设计决策、接口定义与默认实验方案。
-> 最后更新：2026-04-12 13:35
+> 最后更新：2026-04-12 14:25
 
 ---
 
@@ -15,11 +15,11 @@
 - internal route 的主线仍是：
   `part2 full rerun → internal cache → prepare → difix → fuse → verify → train_mask/depth target → Stage A consumer → replay/eval`；
 - 旧 EDP 线继续保留，但与 BRPO 新线文件级隔离，不混写；
-- **当前最优先的问题不再只是 depth coverage，而是 Stage A 的 `theta/rho` 路径在 renderer 中已确认 forward/backward 不一致。**
+- **当前最优先的问题不再是根因定位，而是：在补回 S3PO 原始 residual pose 闭环之后，这套 M5 supervision 是否已经足够强。**
 
 也就是说，现在的主线已经不是继续盲目扩 depth loss 或直接进 Stage B，而是：
 
-**先修复 `theta/rho` 在 renderer/rasterizer 中的实现不一致，再决定后续 Stage A / Stage B 的设计。**
+**先基于已恢复的 `tau -> update_pose -> R/T` 闭环做修复后验证，再决定后续 Stage A / Stage B 的设计。**
 
 ### 1.2 当前阶段定义
 
@@ -40,7 +40,7 @@
 | Phase M5-0 | ✅ | 诊断 M3 depth signal 在 train-mask 内部的结构 |
 | Phase M5-1 | ✅ | densify correction field，生成 `target_depth_for_refine_v2` |
 | Phase M5-2 | ✅ | source-aware depth loss 接入 Stage A |
-| Phase M5-3 | 进行中 | 已确认 `theta/rho` forward 丢弃 / backward 回梯度，正在定位修复点 |
+| Phase M5-3 | ✅ 最小修复完成 | 已按 S3PO 原始机制补回 `tau -> update_pose -> R/T` 闭环，并完成最小验证 |
 | Phase 7B | ❌ 暂缓 | 在 Stage A pose path 修清前，不进入 joint refine |
 
 ---
@@ -95,14 +95,14 @@ M5 的结果进一步收紧了问题范围：
 
 因此问题已经不再只是“fallback 稀释”或“depth target 太 sparse”。
 
-### 2.4 当前最新判断：Stage A 的 `theta/rho` 根因已确认
+### 2.4 当前最新判断：Stage A 已补回 S3PO residual-pose 闭环，但效果仍需验证
 
 最新 diagnosis 的关键结论是：
 
-- `gaussian_renderer/__init__.py` 确实把 `cam_rot_delta / cam_trans_delta` 以 `theta / rho` 传给 `diff_gaussian_rasterization` Python 层；
-- 但 `diff_gaussian_rasterization/__init__.py::_RasterizeGaussians.forward()` 在组 `args` 时直接把 `theta / rho` 丢掉了；
-- 对应的 C++ forward 入口 `rasterize_points.h/.cu::RasterizeGaussiansCUDA` 也根本没有这两个参数；
-- 所以 forward render 完全不会响应 Stage A 的 pose delta。
+- `gaussian_renderer/__init__.py` 的确把 `cam_rot_delta / cam_trans_delta` 以 `theta / rho` 传进了 Python wrapper；
+- 但 `diff_gaussian_rasterization` 的 forward 路径实际只用 `viewmatrix / projmatrix`，不直接消费 `theta / rho`；
+- 这一点和 S3PO 原始代码并不矛盾，因为它本来的设计就是：backward 求 `grad_tau`，随后由 `update_pose()` 把 tau 折回 `R/T`；
+- 我们当前 Stage A 的问题在于：**没有调用 `update_pose()`，却把 residual 当成会直接改变 forward render 的长期状态来使用。**
 
 更具体地说，probe 下即使到：
 - `rot = 0.2`

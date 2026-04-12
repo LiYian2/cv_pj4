@@ -397,6 +397,65 @@
 
 因此当前明确不建议直接进入 Stage B。
 
+补充修正判断：
+- 经过进一步代码链路审计，这里更准确的结论不是“CUDA 单纯写坏了一个本该 forward 直接吃 `theta/rho` 的接口”；
+- S3PO 原始代码里，`cam_rot_delta / cam_trans_delta` 本来就是一步一清的增量 residual，`slam_frontend.py` / `slam_backend.py` 会在每次 `optimizer.step()` 后立刻调用 `update_pose(viewpoint)`，把 `tau` 折回 `R/T` 并清零；
+- 当前 Part3 Stage A 的真正问题是：**我们沿用了 residual 参数和 backward 梯度，但没有沿用 `update_pose()` 这一步，因此把 S3PO 的增量式 pose 优化闭环用断了。**
+
+
+### Stage A 修复：补回 S3PO residual pose 闭环 + 最小验证
+
+在继续追根因之后，进一步梳理了 S3PO 原始代码对 `cam_rot_delta / cam_trans_delta` 的使用方式。
+
+关键发现：
+- 原始 S3PO 不是把 `theta/rho` 当作持续直接作用于 forward render 的状态量；
+- 它把它们当作**一步一清的 pose residual**；
+- `slam_frontend.py` / `slam_backend.py` 在每次 `optimizer.step()` 后都会立刻调用 `update_pose(viewpoint)`；
+- `pose_utils.py::update_pose()` 会把 `tau=[rho, theta]` 折回 `R/T` 并清零。
+
+所以当前 Part3 Stage A 的真正问题不是“CUDA 单纯坏了”，而是：
+
+**我们沿用了 residual 参数和 backward 梯度，但没有沿用 `update_pose()` 这一步，因此把 S3PO 的增量式 pose 优化闭环用断了。**
+
+代码修改：
+- `pseudo_branch/pseudo_camera_state.py`
+- `scripts/run_pseudo_refinement_v2.py`
+
+关键实现：
+- 新增 `apply_pose_residual_()`：
+  - 用当前 `tau=[cam_trans_delta, cam_rot_delta]` 计算新的 `w2c`；
+  - 折回 `vp.R / vp.T`；
+  - 刷新 `world_view_transform / full_proj_transform / camera_center`；
+  - 清零 residual。
+- `run_pseudo_refinement_v2.py` 现在在每次 `optimizer.step()` 后，默认会对本轮参与优化的 pseudo views 调 `apply_pose_residual_()`；
+- 同时新增开关：
+  - `--stageA_apply_pose_update`（默认开启）
+  - `--stageA_no_apply_pose_update`（用于保留旧坏链路做对照）
+
+最小验证 1：手动 residual -> fold 到 R/T -> render
+- 修复后，render 会立刻随 pose 变化：
+  - `(0.01, 0.01)`：`rgb_mean ≈ 0.0679`, `depth_mean ≈ 0.1648`
+  - `(0.05, 0.05)`：`rgb_mean ≈ 0.1604`, `depth_mean ≈ 0.4364`
+  - `(0.10, 0.10)`：`rgb_mean ≈ 0.2412`, `depth_mean ≈ 0.8877`
+
+最小验证 2：M5 source-aware 80 iter smoke 对照
+- `no_apply_pose_update`（旧坏链路）：
+  - `loss_depth: 0.06867 -> 0.06867`（完全平）
+  - `pose_updates_total = 0`
+  - 最终 residual 堆积在 `rot_norm ~ 0.27~0.41`、`trans_norm ~ 0.13`
+- `apply_pose_update`（修复后闭环）：
+  - `loss_total: 0.02701 -> 0.02570`
+  - `loss_depth: 0.06867 -> 0.06826`
+  - `loss_depth_seed: 0.05796 -> 0.05760`
+  - `loss_depth_dense: 0.03062 -> 0.03046`
+  - `pose_updates_total = 240`
+  - 最终 residual 全部回到 `0.0`
+
+阶段判断：
+- 这说明当前 Stage A 已经不再是之前那种“forward 不动、backward 乱推”的假优化；
+- 但也要老实说：修复闭环之后，depth 只是开始轻微下降，还没有出现非常强的下降趋势；
+- 所以下一步不应直接进入 Stage B，而应先做修复后的中等规模验证，再决定是否需要继续加强 loss / 训练长度 / 更深层 renderer 改动。
+
 ### 文档恢复后的同步补写
 
 由于误删并恢复了 `docs/`，本轮重新按写作规范同步补回：

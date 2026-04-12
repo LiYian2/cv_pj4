@@ -8,6 +8,7 @@ import numpy as np
 import torch
 from torch import nn
 
+from gaussian_splatting.utils.graphics_utils import getWorld2View2
 from utils.pose_utils import SE3_exp
 
 
@@ -81,6 +82,29 @@ def current_w2c(vp) -> torch.Tensor:
 
 def current_c2w(vp) -> torch.Tensor:
     return torch.linalg.inv(current_w2c(vp))
+
+
+def refresh_viewpoint_transforms_(vp):
+    world_view_transform = getWorld2View2(vp.R, vp.T).transpose(0, 1)
+    vp.world_view_transform = world_view_transform
+    vp.full_proj_transform = world_view_transform.unsqueeze(0).bmm(
+        vp.projection_matrix.unsqueeze(0)
+    ).squeeze(0)
+    vp.camera_center = world_view_transform.inverse()[3, :3]
+    return vp
+
+
+def apply_pose_residual_(vp, converged_threshold: float = 1e-4) -> bool:
+    tau = torch.cat([vp.cam_trans_delta, vp.cam_rot_delta], dim=0)
+    new_w2c = current_w2c(vp)
+    vp.R = new_w2c[:3, :3].detach().clone()
+    vp.T = new_w2c[:3, 3].detach().clone()
+    refresh_viewpoint_transforms_(vp)
+    converged = bool(torch.norm(tau).detach().cpu().item() < converged_threshold)
+    with torch.no_grad():
+        vp.cam_rot_delta.zero_()
+        vp.cam_trans_delta.zero_()
+    return converged
 
 
 def export_view_state(view: Dict[str, Any]) -> Dict[str, Any]:

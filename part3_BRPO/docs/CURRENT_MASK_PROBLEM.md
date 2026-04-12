@@ -1,7 +1,7 @@
 # CURRENT_MASK_PROBLEM.md
 
-> 最后更新：2026-04-12 13:35
-> 主题：mask problem 的第一阶段已经基本解决；当前新的主问题不是 train mask 不够，而是 **Stage A 的 pose delta (`theta/rho`) 在 renderer forward 中被丢弃、但在 backward 中仍被赋予梯度，导致 depth 与 pose refine 都建立在不一致的计算图上。**
+> 最后更新：2026-04-12 14:25
+> 主题：mask problem 的第一阶段已经基本解决；当前已经确认并修回了 Stage A 偏离 S3PO 原始 residual pose 闭环的问题。新的状态是：**pose 闭环接回后，Stage A 不再是假优化，但 depth 目前只出现轻微下降，是否足以进入下一阶段仍需继续验证。**
 
 ---
 
@@ -17,7 +17,7 @@
 
 一句话说：
 
-**mask problem 已经从“train mask 太稀”演变成“upstream depth target 已增强，但 Stage A 的 `theta/rho` 路径前向被丢弃、反向却仍给梯度，导致 refine 过程本身不可信”。**
+**mask problem 已经从“train mask 太稀”演变成“upstream depth target 已增强，但我们当前 Stage A 没有沿用 S3PO 原始的 `tau -> update_pose -> R/T` 闭环，导致 `theta/rho` residual 只在 backward 起作用、却没有在训练循环里被正确折回相机位姿”。**
 
 ---
 
@@ -177,88 +177,98 @@ L = β * L_rgb
 
 ---
 
-## 5. 新的关键诊断：Stage A pose/render 路径本身很可疑
+## 5. 已确认的根因，以及最小修复后的新状态
 
-这是当前最重要的新发现。
+### 5.1 根因不是“CUDA 单纯写坏了”，而是我们没有沿用 S3PO 的原始 residual pose 闭环
 
-### 5.1 代码审计结果
+S3PO 原始代码里，`cam_rot_delta / cam_trans_delta` 是一步一清的 pose residual：
+- `camera_utils.py` 把它们定义成 `nn.Parameter`；
+- `slam_frontend.py` / `slam_backend.py` 在每次 `optimizer.step()` 后都会立即调用 `update_pose(viewpoint)`；
+- `pose_utils.py::update_pose()` 会把 `tau=[rho, theta]` 通过 `SE3_exp(tau)` 折回到当前 `R/T`，然后把 residual 清零。
 
-- `cam_rot_delta / cam_trans_delta` 确实被传进 `gaussian_renderer`；
-- `run_pseudo_refinement_v2.py` 的 optimizer 也确实在更新这两个参数；
-- 所以“参数没接上”不是主问题。
-
-### 5.2 但前向 sensitivity probe 的结果非常异常
-
-我做了一个直接 probe：
-- 固定同一张 pseudo view
-- 人工把 `cam_rot_delta / cam_trans_delta` 设到：
-  - `(0.01, 0.01)`
-  - `(0.05, 0.05)`
-  - `(0.1, 0.1)`
-  - `(0.2, 0.2)`
-- 重新 render RGB / depth
-- 比较与 base render 的差异
-
-结果是：
+所以 S3PO 的原始闭环其实是：
 
 ```text
-rgb_mean_abs_change = 0.0
-depth_mean_abs_change = 0.0
+render(using current R/T)
+  -> backward gives grad_tau
+  -> optimizer.step()
+  -> update_pose() folds tau into R/T
+  -> next iteration render uses updated R/T
 ```
 
-即使到 `0.2 / 0.2` 这种量级，前向 render 结果仍然完全不变。
+而我们之前的 Stage A 是：
+- 保留了 `cam_rot_delta / cam_trans_delta`；
+- 保留了 backward 给它们的梯度；
+- 但**没有在每步后调用 `update_pose()` 或等价逻辑**。
 
-这说明一个非常严重的问题：
+因此真正的问题是：
 
-**当前 forward 看起来对 pose delta 根本不敏感。**
+**我们把 S3PO 的 residual pose 机制用断了。**
 
-### 5.3 但 backward 却给出了非零 pose 梯度
+### 5.2 代码链路审计结果
 
-更诡异的是，autograd 诊断里：
-- `grad_rgb_only` 对 pose 的梯度非零；
-- `grad_depth_legacy_only` 对 pose 的梯度非零；
-- `grad_depth_source_aware_only` 对 pose 的梯度也非零，而且更大。
+代码审计确认了两件事：
 
-summary 大致是：
-- `mean_grad_rgb_rot ≈ 0.265`
-- `mean_grad_rgb_trans ≈ 0.0786`
-- `mean_grad_depth_legacy_rot ≈ 0.504`
-- `mean_grad_depth_legacy_trans ≈ 0.197`
-- `mean_grad_depth_src_rot ≈ 1.732`
-- `mean_grad_depth_src_trans ≈ 0.550`
+1. `gaussian_renderer/__init__.py` 的确把 `theta/rho` 传到了 `diff_gaussian_rasterization` Python wrapper；
+2. 但 `diff_gaussian_rasterization` 的 forward 路径实际只吃 `viewmatrix / projmatrix`，不把 residual 当成持久相机状态直接用于当前 render。
 
-这和前向 probe 组合起来，非常像：
+这和 S3PO 的原始设计并不矛盾，因为它本来就依赖 **step 后立刻 `update_pose()`** 来让下一轮 render 使用更新后的 base pose。
 
-**renderer 的 pose-delta forward / backward 存在不一致，或者当前 theta/rho 路径在 forward 中没有真正生效，但 backward 仍返回了梯度。**
+### 5.3 最小修复已经完成
 
-### 5.4 这解释了为什么当前现象那么怪
+当前已经在 Part3 的 pseudo viewpoint 层补了等价逻辑：
+- 新增 `pseudo_branch/pseudo_camera_state.py::apply_pose_residual_()`；
+- 在 `run_pseudo_refinement_v2.py` 的每次 `optimizer.step()` 后，对本轮参与优化的 pseudo views 调它。
 
-这可以同时解释几件之前看起来很怪的事：
+它做的事情就是：
+- 用当前 `tau=[cam_trans_delta, cam_rot_delta]` 计算新的 `w2c`；
+- 折回 `vp.R / vp.T`；
+- 刷新 `world_view_transform / full_proj_transform / camera_center`；
+- 把 residual 清零。
 
-1. **loss 基本不下降**
-   - 因为 forward render 对 pose 变化几乎没有响应
+这一步本质上就是把 S3PO 的 `update_pose()` 机制接回到 Part3 Stage A。
 
-2. **pose delta 却一直在涨**
-   - 因为 backward 仍然在给非零梯度，optimizer 照样更新
+### 5.4 最小验证结果：闭环接回后，Stage A 不再是假优化
 
-3. **初始 loss 看起来偏低**
-   - 因为当前 target 本来就建立在当前 render 基础上（尤其 depth）；
-   - 再加上 pose 变化对 forward 基本不起作用，loss 自然很难大幅变化
+#### 验证 1：手动 residual -> fold 到 R/T -> render
 
-4. **RGB loss 还有一点下降**
-   - 更像是 exposure 在起作用，而不是 pose 真正改动了 render
+修复前，哪怕把 `rot/trans` 调到 `0.2 / 0.2`，render RGB / depth 仍然 `0.0` 变化。
 
-### 5.5 regularization 当前也不能真正兜底
+修复后，手动设置 residual 再调用 `apply_pose_residual_()`，render 会立刻变化：
+- `(0.01, 0.01)`：`rgb_mean ≈ 0.0679`, `depth_mean ≈ 0.1648`
+- `(0.05, 0.05)`：`rgb_mean ≈ 0.1604`, `depth_mean ≈ 0.4364`
+- `(0.10, 0.10)`：`rgb_mean ≈ 0.2412`, `depth_mean ≈ 0.8877`
 
-另一个细节是：
-- `pose_reg_loss = ||rot|| + ||trans||`
-- 在初始化为 0 的时候，它的梯度也是 0
+这说明修复后，pose 更新终于能真实影响下一轮 render。
 
-所以在最开始：
-- regularization 不能提供任何“拉回去”的力；
-- 一旦 supervision 分支给了不可靠的 pose 梯度，pose 就会直接被带走。
+#### 验证 2：M5 source-aware 80 iter smoke
 
----
+对比：
+1. `no_apply_pose_update`（旧坏链路）
+2. `apply_pose_update`（修复后闭环）
+
+结果：
+- **旧坏链路**：
+  - `loss_depth: 0.06867 -> 0.06867`（完全平）
+  - `pose_updates_total = 0`
+  - 最终 residual 仍堆在 `rot_norm ~ 0.27~0.41`, `trans_norm ~ 0.13`
+
+- **修复后闭环**：
+  - `loss_total: 0.02701 -> 0.02570`
+  - `loss_depth: 0.06867 -> 0.06826`
+  - `loss_depth_seed: 0.05796 -> 0.05760`
+  - `loss_depth_dense: 0.03062 -> 0.03046`
+  - `pose_updates_total = 240`
+  - 最终 residual 全部回到 `0.0`
+
+这说明：
+- 修复后，Stage A 不再是之前那种“forward 不动、backward 乱推”的假优化；
+- 但也要老实说：目前 depth 只是**开始轻微下降**，还没有出现非常强的下降趋势。
+
+也就是说，这次修复证明了：
+
+**之前 loss 不动的主要根因之一确实是 pose 闭环没接回；但把闭环接回之后，depth supervision 目前仍然只是弱有效，而不是一下子变得非常强。**
+
 
 ## 6. 现在应该如何判断问题
 
@@ -270,16 +280,16 @@ summary 大致是：
 - M5 densify 也已把 non-fallback depth 区域抬到了有训练意义的量级；
 - 因此 upstream 现在**不是最先该怀疑的地方**。
 
-### 6.2 Downstream 问题：Stage A pose path 已确认需要优先修复
+### 6.2 Downstream 问题：根因已修，当前进入“修复后效果是否足够强”的判断阶段
 
 当前最优先的问题已经变成：
 
-**Stage A 中，pose delta 对 renderer 的前向影响看起来失效，但 backward 却仍返回了非零梯度。**
+**Stage A 的 pose 闭环已经接回，当前更需要判断的是：修复后这套 depth supervision 是否足够强，值得继续放大实验或推进下一阶段。**
 
 在这个问题没查清之前：
-- 不宜继续靠看 loss 曲线判断 depth target 是否有效；
-- 更不宜直接进入 Stage B；
-- 否则可能会把一个 forward/backward 不一致的 pose path 继续带入 joint refine。
+- 现在已经可以重新开始相信 Stage A 的 loss 曲线有解释价值；
+- 但当前 depth 只出现轻微下降，所以仍然不宜直接进入 Stage B；
+- 下一步更合理的是先做修复后的中等规模验证，再决定是否继续放大。
 
 ---
 
@@ -296,11 +306,11 @@ summary 大致是：
 3. **M5-2 说明仅靠 densify + source-aware loss 仍不足以让 Stage A 的 depth loss 动起来。**
    这意味着问题不再只是 fallback 稀释。
 
-4. **当前最大的异常是 Stage A pose/render 路径可能存在 forward/backward 不一致。**
-   前向 probe 下，即使较大的 pose delta 也几乎不改变 render；但 backward 仍返回非零 pose 梯度。
+4. **当前最大的实现问题已经确认并完成最小修复。**
+   Stage A 现在会在每次 step 后把 residual 折回 `R/T`，不再是之前的假闭环。
 
-5. **因此当前不适合直接进入 Stage B。**
-   在修清 Stage A pose path 之前，任何继续往 joint refine 推进的实验都会带着不可信的 pose 更新机制。
+5. **因此当前仍不适合直接进入 Stage B。**
+   根因虽然修了，但修复后 depth 只出现轻微下降，还需要先验证这是否足以支撑更大阶段。
 
 6. **当前最合理的下一步是：**
-   先把 renderer / pose-delta 的前向与反向连通性审计清楚，再决定是否继续推进第 4 阶段。
+   先做修复后的中等规模 M5 source-aware 验证与对照，再决定是否继续推进下一阶段。

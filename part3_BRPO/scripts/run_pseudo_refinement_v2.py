@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, S3PO_ROOT)
 sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
-from pseudo_branch.pseudo_camera_state import make_viewpoint_trainable, export_view_state
+from pseudo_branch.pseudo_camera_state import make_viewpoint_trainable, export_view_state, apply_pose_residual_
 from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
 from pseudo_branch.pseudo_refine_scheduler import StageAConfig, build_stageA_optimizer
 
@@ -50,6 +50,8 @@ def parse_args():
     p.add_argument('--stageA_lr_trans', type=float, default=0.001)
     p.add_argument('--stageA_lr_exp', type=float, default=0.01)
     p.add_argument('--stageA_disable_depth', action='store_true')
+    p.add_argument('--stageA_apply_pose_update', action='store_true', default=True)
+    p.add_argument('--stageA_no_apply_pose_update', dest='stageA_apply_pose_update', action='store_false')
     p.add_argument(
         '--stageA_mask_mode',
         choices=['auto', 'train_mask', 'seed_support_only', 'legacy'],
@@ -174,12 +176,7 @@ def resolve_stageA_mask(sample_dir: Path, target_side: str, requested_mode: str,
 
 def _summarize_source_map(source_map: np.ndarray | None):
     if source_map is None:
-        return {
-            'verified_ratio': None,
-            'render_fallback_ratio': None,
-            'seed_ratio': None,
-            'dense_ratio': None,
-        }
+        return {'verified_ratio': None, 'render_fallback_ratio': None, 'seed_ratio': None, 'dense_ratio': None}
     source_map = np.asarray(source_map)
     total = float(source_map.size)
     return {
@@ -192,25 +189,13 @@ def _summarize_source_map(source_map: np.ndarray | None):
 
 def load_stageA_pseudo_views(args):
     v1 = load_v1_module()
-    pseudo_views, pseudo_manifest_info = v1.load_pseudo_viewpoints(
-        args.pseudo_cache,
-        args.target_side,
-        args.confidence_mask_source,
-        args.brpo_mask_root,
-    )
+    pseudo_views, pseudo_manifest_info = v1.load_pseudo_viewpoints(args.pseudo_cache, args.target_side, args.confidence_mask_source, args.brpo_mask_root)
     for view in pseudo_views:
         sample_dir = Path(view['target_rgb_path']).parent
         source_meta_path = sample_dir / 'source_meta.json'
         source_meta = json.load(open(source_meta_path)) if source_meta_path.exists() else {}
 
-        conf_arr, conf_path, conf_kind, conf_mode = resolve_stageA_mask(
-            sample_dir=sample_dir,
-            target_side=args.target_side,
-            requested_mode=args.stageA_mask_mode,
-            default_conf=view.get('conf'),
-            default_path=view.get('confidence_path'),
-            default_kind=view.get('confidence_source_kind'),
-        )
+        conf_arr, conf_path, conf_kind, conf_mode = resolve_stageA_mask(sample_dir, args.target_side, args.stageA_mask_mode, view.get('conf'), view.get('confidence_path'), view.get('confidence_source_kind'))
         positive = conf_arr[conf_arr > 0]
         view['conf'] = conf_arr.astype(np.float32)
         view['confidence_path'] = conf_path
@@ -262,11 +247,7 @@ def main():
     from scene.gaussian_model import GaussianModel
     from gaussian_renderer import render
 
-    pipeline_params = SimpleNamespace(
-        compute_cov3D_python=False,
-        convert_SHs_python=False,
-        debug=False,
-    )
+    pipeline_params = SimpleNamespace(compute_cov3D_python=False, convert_SHs_python=False, debug=False)
     bg = torch.zeros(3, device='cuda')
 
     print(f'[Part3 StageA] Loading PLY: {args.ply_path}')
@@ -280,7 +261,7 @@ def main():
     print(f'  Loaded {len(pseudo_views)} pseudo viewpoints (target_side={args.target_side}, confidence_mask_source={args.confidence_mask_source})')
     print(
         '  StageA effective sources: '
-        f"mask_mode={args.stageA_mask_mode}, depth_mode={args.stageA_target_depth_mode}, depth_loss_mode={args.stageA_depth_loss_mode}, "
+        f"mask_mode={args.stageA_mask_mode}, depth_mode={args.stageA_target_depth_mode}, depth_loss_mode={args.stageA_depth_loss_mode}, apply_pose_update={args.stageA_apply_pose_update}, "
         f"mean_mask_cov={np.mean([v['confidence_nonzero_ratio'] for v in pseudo_views]):.4f}, "
         f"mean_depth_verified={np.mean([v.get('target_depth_verified_ratio') or 0.0 for v in pseudo_views]):.4f}, "
         f"mean_depth_dense={np.mean([v.get('target_depth_dense_ratio') or 0.0 for v in pseudo_views]):.4f}"
@@ -303,16 +284,7 @@ def main():
     optimizer = build_stageA_optimizer(pseudo_views, cfg)
 
     history = {
-        'iterations': [],
-        'loss_total': [],
-        'loss_rgb': [],
-        'loss_depth': [],
-        'loss_depth_seed': [],
-        'loss_depth_dense': [],
-        'loss_depth_fallback': [],
-        'loss_pose_reg': [],
-        'loss_exp_reg': [],
-        'sampled_sample_ids': [],
+        'iterations': [], 'loss_total': [], 'loss_rgb': [], 'loss_depth': [], 'loss_depth_seed': [], 'loss_depth_dense': [], 'loss_depth_fallback': [], 'loss_pose_reg': [], 'loss_exp_reg': [], 'sampled_sample_ids': [], 'num_pose_updates_applied': []
     }
 
     for it in tqdm(range(1, cfg.num_iterations + 1), desc='StageA pseudo pose+exposure'):
@@ -330,35 +302,11 @@ def main():
             pkg = render(view['vp'], gaussians, pipeline_params, bg)
             if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                 loss, stats = build_stageA_loss_source_aware(
-                    render_rgb=pkg['render'],
-                    render_depth=pkg['depth'],
-                    target_rgb=view['rgb'],
-                    target_depth=view['depth_for_refine'],
-                    confidence_mask=view['conf'],
-                    depth_source_map=view['target_depth_source_map'],
-                    viewpoint=view['vp'],
-                    beta_rgb=cfg.beta_rgb,
-                    lambda_pose=cfg.lambda_pose,
-                    lambda_exp=cfg.lambda_exp,
-                    trans_weight=cfg.trans_reg_weight,
-                    lambda_depth_seed=args.stageA_lambda_depth_seed,
-                    lambda_depth_dense=args.stageA_lambda_depth_dense,
-                    lambda_depth_fallback=args.stageA_lambda_depth_fallback,
-                    use_depth=not args.stageA_disable_depth,
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth,
                 )
             else:
                 loss, stats = build_stageA_loss(
-                    render_rgb=pkg['render'],
-                    render_depth=pkg['depth'],
-                    target_rgb=view['rgb'],
-                    target_depth=view['depth_for_refine'],
-                    confidence_mask=view['conf'],
-                    viewpoint=view['vp'],
-                    beta_rgb=cfg.beta_rgb,
-                    lambda_pose=cfg.lambda_pose,
-                    lambda_exp=cfg.lambda_exp,
-                    trans_weight=cfg.trans_reg_weight,
-                    use_depth=not args.stageA_disable_depth,
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, use_depth=not args.stageA_disable_depth,
                 )
             per_view_losses.append(loss)
             per_view_stats.append(stats)
@@ -367,20 +315,30 @@ def main():
         total_loss.backward()
         optimizer.step()
 
-        avg_stats = {}
-        for key in ['loss_total', 'loss_rgb', 'loss_depth', 'loss_depth_seed', 'loss_depth_dense', 'loss_depth_fallback', 'loss_pose_reg', 'loss_exp_reg']:
-            avg_stats[key] = float(np.mean([s[key] for s in per_view_stats]))
+        num_pose_updates = 0
+        if args.stageA_apply_pose_update:
+            seen = set()
+            for pidx in pseudo_indices:
+                view = pseudo_views[pidx]
+                sid = int(view['sample_id'])
+                if sid in seen:
+                    continue
+                apply_pose_residual_(view['vp'])
+                seen.add(sid)
+            num_pose_updates = len(seen)
 
+        avg_stats = {key: float(np.mean([s[key] for s in per_view_stats])) for key in ['loss_total', 'loss_rgb', 'loss_depth', 'loss_depth_seed', 'loss_depth_dense', 'loss_depth_fallback', 'loss_pose_reg', 'loss_exp_reg']}
         for key in avg_stats:
             history[key].append(avg_stats[key])
         history['iterations'].append(it)
         history['sampled_sample_ids'].append(sampled_ids)
+        history['num_pose_updates_applied'].append(int(num_pose_updates))
 
         if it == 1 or it % 20 == 0:
             print(
                 f"  iter {it}: total={avg_stats['loss_total']:.4f}, rgb={avg_stats['loss_rgb']:.4f}, depth={avg_stats['loss_depth']:.4f}, "
                 f"depth_seed={avg_stats['loss_depth_seed']:.4f}, depth_dense={avg_stats['loss_depth_dense']:.4f}, depth_fb={avg_stats['loss_depth_fallback']:.4f}, "
-                f"pose_reg={avg_stats['loss_pose_reg']:.4f}, exp_reg={avg_stats['loss_exp_reg']:.4f}"
+                f"pose_reg={avg_stats['loss_pose_reg']:.4f}, exp_reg={avg_stats['loss_exp_reg']:.4f}, pose_updates={num_pose_updates}"
             )
 
     stageA_states = [export_view_state(v) for v in pseudo_views]
@@ -388,14 +346,12 @@ def main():
     save_json(output_dir / 'pseudo_camera_states_final.json', stageA_states)
 
     stageA_history = {
-        'args': vars(args),
-        'stage_mode': args.stage_mode,
-        'pseudo_manifest_info': pseudo_manifest_info,
-        'num_pseudo_viewpoints_loaded': len(pseudo_views),
+        'args': vars(args), 'stage_mode': args.stage_mode, 'pseudo_manifest_info': pseudo_manifest_info, 'num_pseudo_viewpoints_loaded': len(pseudo_views),
         'effective_source_summary': {
             'stageA_mask_mode_requested': args.stageA_mask_mode,
             'stageA_target_depth_mode_requested': args.stageA_target_depth_mode,
             'stageA_depth_loss_mode': args.stageA_depth_loss_mode,
+            'stageA_apply_pose_update': bool(args.stageA_apply_pose_update),
             'stageA_disable_depth': bool(args.stageA_disable_depth),
             'mean_confidence_nonzero_ratio': float(np.mean([v.get('confidence_nonzero_ratio', 0.0) for v in pseudo_views])),
             'mean_target_depth_verified_ratio': float(np.mean([(v.get('target_depth_verified_ratio') or 0.0) for v in pseudo_views])),
@@ -405,45 +361,16 @@ def main():
         },
         'pseudo_sample_meta': [
             {
-                'sample_id': int(v['sample_id']),
-                'frame_id': int(v['frame_id']),
-                'target_rgb_path': v.get('target_rgb_path'),
-                'target_depth_for_refine_path': v.get('target_depth_for_refine_path'),
-                'target_depth_for_refine_kind': v.get('target_depth_for_refine_kind'),
-                'stageA_target_depth_mode_effective': v.get('stageA_target_depth_mode_effective'),
-                'target_depth_nonzero_ratio': v.get('target_depth_nonzero_ratio'),
-                'target_depth_verified_ratio': v.get('target_depth_verified_ratio'),
-                'target_depth_render_fallback_ratio': v.get('target_depth_render_fallback_ratio'),
-                'target_depth_seed_ratio': v.get('target_depth_seed_ratio'),
-                'target_depth_dense_ratio': v.get('target_depth_dense_ratio'),
-                'target_depth_for_refine_source': v.get('source_meta', {}).get('target_depth_for_refine_source'),
-                'target_depth_for_refine_source_map_path': v.get('target_depth_for_refine_source_map_path'),
-                'confidence_path': v.get('confidence_path'),
-                'confidence_source_kind': v.get('confidence_source_kind'),
-                'stageA_mask_mode_effective': v.get('stageA_mask_mode_effective'),
-                'confidence_nonzero_ratio': v.get('confidence_nonzero_ratio'),
-                'confidence_mean_positive': v.get('confidence_mean_positive'),
+                'sample_id': int(v['sample_id']), 'frame_id': int(v['frame_id']), 'target_rgb_path': v.get('target_rgb_path'),
+                'target_depth_for_refine_path': v.get('target_depth_for_refine_path'), 'target_depth_for_refine_kind': v.get('target_depth_for_refine_kind'), 'stageA_target_depth_mode_effective': v.get('stageA_target_depth_mode_effective'),
+                'target_depth_nonzero_ratio': v.get('target_depth_nonzero_ratio'), 'target_depth_verified_ratio': v.get('target_depth_verified_ratio'), 'target_depth_render_fallback_ratio': v.get('target_depth_render_fallback_ratio'), 'target_depth_seed_ratio': v.get('target_depth_seed_ratio'), 'target_depth_dense_ratio': v.get('target_depth_dense_ratio'),
+                'target_depth_for_refine_source': v.get('source_meta', {}).get('target_depth_for_refine_source'), 'target_depth_for_refine_source_map_path': v.get('target_depth_for_refine_source_map_path'), 'confidence_path': v.get('confidence_path'), 'confidence_source_kind': v.get('confidence_source_kind'), 'stageA_mask_mode_effective': v.get('stageA_mask_mode_effective'), 'confidence_nonzero_ratio': v.get('confidence_nonzero_ratio'), 'confidence_mean_positive': v.get('confidence_mean_positive'),
             }
             for v in pseudo_views
         ],
-        'history': history,
-        'stageA_disable_depth': bool(args.stageA_disable_depth),
-        'stageA_mask_mode': args.stageA_mask_mode,
-        'stageA_target_depth_mode': args.stageA_target_depth_mode,
-        'stageA_depth_loss_mode': args.stageA_depth_loss_mode,
-        'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed),
-        'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense),
-        'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback),
-        'final_states': stageA_states,
+        'history': history, 'stageA_disable_depth': bool(args.stageA_disable_depth), 'stageA_mask_mode': args.stageA_mask_mode, 'stageA_target_depth_mode': args.stageA_target_depth_mode, 'stageA_depth_loss_mode': args.stageA_depth_loss_mode, 'stageA_apply_pose_update': bool(args.stageA_apply_pose_update), 'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed), 'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense), 'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback), 'final_states': stageA_states,
         'final_delta_summary': [
-            {
-                'sample_id': int(v['sample_id']),
-                'frame_id': int(v['frame_id']),
-                'rot_norm': float(torch.norm(v['vp'].cam_rot_delta).detach().cpu().item()),
-                'trans_norm': float(torch.norm(v['vp'].cam_trans_delta).detach().cpu().item()),
-                'exposure_a': float(v['vp'].exposure_a.detach().cpu().item()),
-                'exposure_b': float(v['vp'].exposure_b.detach().cpu().item()),
-            }
+            {'sample_id': int(v['sample_id']), 'frame_id': int(v['frame_id']), 'rot_norm': float(torch.norm(v['vp'].cam_rot_delta).detach().cpu().item()), 'trans_norm': float(torch.norm(v['vp'].cam_trans_delta).detach().cpu().item()), 'exposure_a': float(v['vp'].exposure_a.detach().cpu().item()), 'exposure_b': float(v['vp'].exposure_b.detach().cpu().item())}
             for v in pseudo_views
         ],
     }
