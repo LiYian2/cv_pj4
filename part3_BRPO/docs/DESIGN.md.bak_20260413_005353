@@ -1,7 +1,7 @@
 # DESIGN.md - Part3 设计文档
 
 > 本文档记录**当前实际采用**的设计决策、接口定义与默认实验方案。
-> 最后更新：2026-04-13 13:25
+> 最后更新：2026-04-12 20:40
 
 ---
 
@@ -19,7 +19,7 @@
 
 也就是说，现在的主线已经不是继续做 pose 路径真伪排查，而是：
 
-**先基于已恢复的闭环，完成 absolute pose prior 的尺度化/权重标定，并完成 A.5(minimal micro-joint) 的可行性筛查，再决定是否推进 Stage B。**
+**先基于已恢复的闭环，完成 absolute pose prior 的尺度化/权重标定，再决定是否推进 Stage B。**
 
 ### 1.2 当前阶段定义
 
@@ -97,18 +97,6 @@ M5 的结果进一步收紧了问题范围：
 因此问题已经不再只是“fallback 稀释”或“depth target 太 sparse”。
 
 ### 2.4 当前最新判断：闭环已恢复，当前瓶颈是 absolute pose prior 的尺度标定
-### 2.5 A.5(midpoint) 最小验证结论（2026-04-13）
-- 300iter + replay(270) 结果显示 `stageA5(xyz+opacity)` 对下游指标有小但稳定的正向改善；
-- 因此当前 gate 结论更新为：**可进入 StageB，但应采用保守入口（geometry-first / low-lr / no-densify warmup），并保留 A.5 作为回退基线。**
-
-
-- 伪帧策略从 3 帧扩展为 `kf gap midpoint` 的 8 帧覆盖；
-- 在 80 iter 快速对照下：
-  - `StageA5(xyz)` 相比 `StageA` 未显示改进；
-  - `StageA5(xyz+opacity)` 的 `loss_total/loss_depth` 均优于 `StageA`；
-  - `StageA5(xyz)+abs prior(1.0/0.1)` 在该口径下未优于 baseline。
-- 当前设计决策：A.5 继续以 `xyz+opacity` 作为 next-default 候选，`xyz-only` 不作为优先推进路径。
-
 
 最新工程与实验结论是：
 
@@ -275,66 +263,52 @@ samples/<frame_id>/
 
 ## 6. 当前推荐的下一步
 
-### 6.1 已完成的 A+B（本轮）
+### 6.1 当前最优先
 
-- A：split+scaled abs prior 已落地：`lambda_abs_t/r + robust + scene_scale`；
-- B：梯度贡献诊断已落地：在线 `--stageA_log_grad_contrib` + 独立脚本 `diagnose_stageA_loss_contrib.py`；
-- 扫描已完成：`6组×80iter` 小网格 + `top3×300iter` 深跑。
+当前最优先的下一步不是：
+- 直接进入 Stage B；
+- 或只看单组 long run。
 
-### 6.2 当前结论（来自 A+B 实测）
+而是：
 
-1. `lambda_abs_t` 增大可以稳定压低 `abs_pose_rho_norm/theta_norm`（drift 抑制有效）；
-2. depth 末值在各组差异很小（当前没有“同时显著压 drift 且显著提升 depth”的组）；
-3. 因此 abs prior 当前角色更接近“稳定器”，不是“depth 改善器”。
-4. depth-heavy 复跑后仍成立：best-depth 与 best-drift 组不重合。
+```text
+M5 upstream 已证明可行
+  ↓
+M5-3 闭环已修回
+  ↓
+M5-4 absolute prior 已接入
+  ↓
+当前最优先：做 abs prior 权重/尺度标定
+  ↓
+确定“抑制 drift 且不伤 depth”的默认区间
+  ↓
+再讨论是否进入 Stage B
+```
 
-### 6.3 下一步（仍停留在 Stage A）
+### 6.2 下一阶段预计修改的代码
 
-- depth-heavy 口径复跑（同 top3 组）已完成；
-- 已固化双默认：
-  - drift-prioritized：`beta_rgb=0.7, lambda_abs_t=3.0, lambda_abs_r=0.1`
-  - depth-prioritized：`beta_rgb=0.3, lambda_abs_t=1.0, lambda_abs_r=0.1`
-- 下游价值验证结论：在 270 帧 replay 上三组指标近似重合（差异 1e-4~1e-6），当前不能宣称 Stage A 口径已带来下游提升；
-- 下一步应优先扩大受影响帧范围或进入 A.5 最小验证，再决定是否推进 Stage B。
+1. `run_pseudo_refinement_v2.py`
+   - 增加 300-iter 权重扫描与汇总输出（default/depth-heavy + abs prior）
 
-### 6.4 当前不建议做的事
+2. `pseudo_loss_v2.py`
+   - 将 absolute prior 改为尺度化形式（translation/rotation 分离权重）
 
-- 把 legacy `lambda_abs_pose` 继续当主入口；
-- 把 `lambda_abs_t=3.0` 直接视作“最终默认”（它只证明 drift 抑制有效）；
-- 在 tradeoff 未固化时推进 Stage B。
+3. `pseudo_camera_state.py`
+   - 增加 drift 统计导出（`rho/theta` 聚合）
+
+4. `absolute_pose_prior.md`
+   - 固化可执行默认方案与权重建议
+
+### 6.3 当前不建议做的事
+
+- 在 abs prior 权重区间未标定前直接进 Stage B
+- 继续把 `lambda_abs_pose=0.1` 当默认值（当前几乎无约束效果）
+- 继续把 `lambda_abs_pose=100` 当最终解（当前会压 depth）
+
+---
 
 ## 7. 当前总设计判断
 
 当前可以把设计判断固定成一句话：
 
-**M5 upstream 路线可用，Stage A pose 闭环也已修回；A+B 与 value-eval 已确认当前 abs prior 主要抑制 drift，而下游指标尚无可见收益。仅靠当前 Stage A 三帧位姿更新不足以产生 270 帧 replay 提升，下一步应转向“扩大影响范围/最小A.5验证”后再决策 Stage B。**
-
-
-## 8. Internal cache -> StageA/A.5 -> StageB 当前方法与 pipeline（2026-04-13）
-
-### 8.1 当前已落地 pipeline
-
-```text
-part2 internal cache + pseudo_cache(midpoint 8 frames)
-    -> StageA / StageA.5 refine (v2)
-    -> StageB conservative joint refine (v2, real anchor + pseudo RGBD)
-    -> refined_gaussians.ply + stageA/stageB history + replay eval
-```
-
-关键实现点：
-1. StageA.5 已支持 `xyz` / `xyz_opacity` 微调；
-2. StageB 已支持 `--stage_mode stageB` 与 real branch (`--train_manifest`, `--num_real_views`, `--lambda_real`)；
-3. StageB 当前采用 conservative 口径：`xyz_opacity`、不引入 densify/prune、以 replay gate 决策扩展。
-
-### 8.2 当前方法判断（来自最新实测）
-
-1. 短程 StageB（120iter）相对 A.5 baseline 为正向（gate PASS）；
-2. 长程 StageB（300iter）相对 A.5 baseline 退化（gate FAIL）；
-3. 说明当前 StageB 不是“不可用”，而是“后段稳定性不足”，存在长程漂移/权重失衡风险。
-
-### 8.3 设计层面的下一步优化方向
-
-1. 在方法层面引入“短程 gate + 早停窗口”作为默认执行策略；
-2. 在训练层面加入分段调度（后段降 lr / 分段冻结 pose 或 opacity）；
-3. 在损失层面扫描 `lambda_real : lambda_pseudo` 平衡，避免后段 real/pseudo 目标冲突；
-4. 在工程层面保留 A.5 作为硬回退基线，StageB 必须满足 non-regression gate 才可晋级。
+**M5 upstream 路线可用，Stage A pose 闭环也已修回；当前最大的阻塞已变成 absolute pose prior 的尺度标定——0.1 太弱、100 太强，需先找到抑制 drift 且不伤 depth 的区间，再推进 Stage B。**

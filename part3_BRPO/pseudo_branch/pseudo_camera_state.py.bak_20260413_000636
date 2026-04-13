@@ -24,9 +24,6 @@ class ExportedPseudoCameraState:
     abs_pose_rho: list | None
     abs_pose_theta: list | None
     abs_pose_norm: float | None
-    abs_pose_rho_norm: float | None
-    abs_pose_theta_norm: float | None
-    scene_scale_used: float | None
     exposure_a: float
     exposure_b: float
     target_rgb_path: str
@@ -46,9 +43,6 @@ class ExportedPseudoCameraState:
             'abs_pose_rho': self.abs_pose_rho,
             'abs_pose_theta': self.abs_pose_theta,
             'abs_pose_norm': float(self.abs_pose_norm) if self.abs_pose_norm is not None else None,
-            'abs_pose_rho_norm': float(self.abs_pose_rho_norm) if self.abs_pose_rho_norm is not None else None,
-            'abs_pose_theta_norm': float(self.abs_pose_theta_norm) if self.abs_pose_theta_norm is not None else None,
-            'scene_scale_used': float(self.scene_scale_used) if self.scene_scale_used is not None else None,
             'exposure_a': float(self.exposure_a),
             'exposure_b': float(self.exposure_b),
             'target_rgb_path': self.target_rgb_path,
@@ -134,9 +128,6 @@ def export_view_state(view: Dict[str, Any]) -> Dict[str, Any]:
     abs_pose_rho = None
     abs_pose_theta = None
     abs_pose_norm = None
-    abs_pose_rho_norm = None
-    abs_pose_theta_norm = None
-    scene_scale_used = view.get('stageA_scene_scale')
     if hasattr(vp, 'R0') and hasattr(vp, 'T0') and vp.R0 is not None and vp.T0 is not None:
         w2c0 = torch.eye(4, device=vp.R0.device, dtype=vp.R0.dtype)
         w2c0[:3, :3] = vp.R0
@@ -147,8 +138,6 @@ def export_view_state(view: Dict[str, Any]) -> Dict[str, Any]:
         tau = SE3_log(delta)
         abs_pose_rho = tau[:3].detach().cpu().tolist()
         abs_pose_theta = tau[3:].detach().cpu().tolist()
-        abs_pose_rho_norm = float(torch.norm(tau[:3]).detach().cpu().item())
-        abs_pose_theta_norm = float(torch.norm(tau[3:]).detach().cpu().item())
         abs_pose_norm = float(torch.norm(tau).detach().cpu().item())
 
     state = ExportedPseudoCameraState(
@@ -162,9 +151,6 @@ def export_view_state(view: Dict[str, Any]) -> Dict[str, Any]:
         abs_pose_rho=abs_pose_rho,
         abs_pose_theta=abs_pose_theta,
         abs_pose_norm=abs_pose_norm,
-        abs_pose_rho_norm=abs_pose_rho_norm,
-        abs_pose_theta_norm=abs_pose_theta_norm,
-        scene_scale_used=float(scene_scale_used) if scene_scale_used is not None else None,
         exposure_a=float(vp.exposure_a.detach().cpu().item()),
         exposure_b=float(vp.exposure_b.detach().cpu().item()),
         target_rgb_path=str(view.get('target_rgb_path', '')),

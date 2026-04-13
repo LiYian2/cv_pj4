@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import List, Tuple
+from typing import List
 
 import torch
 
 from pseudo_branch.pseudo_camera_state import viewpoint_optimizer_groups
-from pseudo_branch.gaussian_param_groups import build_micro_gaussian_param_groups
 
 
 @dataclass
@@ -28,21 +27,12 @@ class StageAConfig:
     num_pseudo_views: int = 4
 
 
-@dataclass
-class StageA5Config(StageAConfig):
-    trainable_params: str = "xyz"
-    lr_xyz: float = 1e-4
-    lr_opacity: float = 5e-4
-    disable_densify: bool = True
-    disable_prune: bool = True
-
-
 def build_stageA_optimizer(pseudo_views: List[dict], cfg: StageAConfig) -> torch.optim.Optimizer:
     groups = []
     for i, view in enumerate(pseudo_views):
         groups.extend(
             viewpoint_optimizer_groups(
-                view["vp"],
+                view['vp'],
                 lr_rot=cfg.lr_rot,
                 lr_trans=cfg.lr_trans,
                 lr_exp=cfg.lr_exp,
@@ -50,15 +40,3 @@ def build_stageA_optimizer(pseudo_views: List[dict], cfg: StageAConfig) -> torch
             )
         )
     return torch.optim.Adam(groups)
-
-
-def build_stageA5_optimizers(pseudo_views: List[dict], gaussians, cfg: StageA5Config) -> Tuple[torch.optim.Optimizer, torch.optim.Optimizer]:
-    pseudo_opt = build_stageA_optimizer(pseudo_views, cfg)
-    gaussian_groups = build_micro_gaussian_param_groups(
-        gaussians=gaussians,
-        mode=cfg.trainable_params,
-        lr_xyz=cfg.lr_xyz,
-        lr_opacity=cfg.lr_opacity,
-    )
-    gaussian_opt = torch.optim.Adam(gaussian_groups)
-    return pseudo_opt, gaussian_opt

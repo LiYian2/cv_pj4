@@ -21,8 +21,7 @@ sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
 from pseudo_branch.pseudo_camera_state import make_viewpoint_trainable, export_view_state, apply_pose_residual_
 from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
-from pseudo_branch.pseudo_refine_scheduler import StageAConfig, StageA5Config, build_stageA_optimizer, build_stageA5_optimizers
-from pseudo_branch.gaussian_param_groups import build_micro_gaussian_param_groups
+from pseudo_branch.pseudo_refine_scheduler import StageAConfig, build_stageA_optimizer
 
 
 def load_v1_module():
@@ -41,7 +40,7 @@ def parse_args():
     p.add_argument('--target_side', choices=['left', 'right', 'fused'], default='fused')
     p.add_argument('--confidence_mask_source', choices=['legacy', 'brpo'], default='brpo')
     p.add_argument('--brpo_mask_root', default=None)
-    p.add_argument('--stage_mode', choices=['stageA', 'stageA5', 'stageB'], default='stageA')
+    p.add_argument('--stage_mode', choices=['stageA'], default='stageA')
     p.add_argument('--stageA_iters', type=int, default=300)
     p.add_argument('--stageA_beta_rgb', type=float, default=0.7)
     p.add_argument('--stageA_lambda_pose', type=float, default=0.01)
@@ -78,17 +77,6 @@ def parse_args():
     p.add_argument('--stageA_lambda_depth_dense', type=float, default=0.35)
     p.add_argument('--stageA_lambda_depth_fallback', type=float, default=0.0)
     p.add_argument('--num_pseudo_views', type=int, default=4)
-    p.add_argument('--stageA5_trainable_params', choices=['xyz', 'xyz_opacity'], default='xyz')
-    p.add_argument('--stageA5_lr_xyz', type=float, default=1e-4)
-    p.add_argument('--stageA5_lr_opacity', type=float, default=5e-4)
-    p.add_argument('--stageA5_disable_densify', action='store_true', default=True)
-    p.add_argument('--stageA5_disable_prune', action='store_true', default=True)
-    p.add_argument('--stageB_iters', type=int, default=120)
-    p.add_argument('--train_manifest', default=None, help='split_manifest.json for sparse train views (real anchor)')
-    p.add_argument('--train_rgb_dir', default=None, help='RGB dir for sparse train views; defaults to manifest files.rgb')
-    p.add_argument('--lambda_real', type=float, default=1.0)
-    p.add_argument('--lambda_pseudo', type=float, default=1.0)
-    p.add_argument('--num_real_views', type=int, default=2)
     p.add_argument('--sh_degree', type=int, default=0)
     p.add_argument('--seed', type=int, default=0)
     return p.parse_args()
@@ -423,8 +411,7 @@ def main():
     init_states = [export_view_state(v) for v in pseudo_views]
     save_json(output_dir / 'pseudo_camera_states_init.json', init_states)
 
-    cfg_cls = StageA5Config if args.stage_mode == "stageA5" else StageAConfig
-    cfg = cfg_cls(
+    cfg = StageAConfig(
         num_iterations=args.stageA_iters,
         beta_rgb=args.stageA_beta_rgb,
         lambda_pose=args.stageA_lambda_pose,
@@ -438,19 +425,8 @@ def main():
         lr_trans=args.stageA_lr_trans,
         lr_exp=args.stageA_lr_exp,
         num_pseudo_views=args.num_pseudo_views,
-        **({
-            "trainable_params": args.stageA5_trainable_params,
-            "lr_xyz": args.stageA5_lr_xyz,
-            "lr_opacity": args.stageA5_lr_opacity,
-            "disable_densify": args.stageA5_disable_densify,
-            "disable_prune": args.stageA5_disable_prune,
-        } if args.stage_mode == "stageA5" else {}),
     )
-    if args.stage_mode == "stageA5":
-        optimizer, gaussian_optimizer = build_stageA5_optimizers(pseudo_views, gaussians, cfg)
-    else:
-        optimizer = build_stageA_optimizer(pseudo_views, cfg)
-        gaussian_optimizer = None
+    optimizer = build_stageA_optimizer(pseudo_views, cfg)
 
     history = {
         'iterations': [],
@@ -462,13 +438,10 @@ def main():
         'loss_exp_reg': [],
         'sampled_sample_ids': [], 'num_pose_updates_applied': [],
         'grad_contrib': [],
-        'grad_norm_xyz': []
     }
 
     for it in tqdm(range(1, cfg.num_iterations + 1), desc='StageA pseudo pose+exposure'):
         optimizer.zero_grad(set_to_none=True)
-        if gaussian_optimizer is not None:
-            gaussian_optimizer.zero_grad(set_to_none=True)
         pseudo_indices = sample_indices(len(pseudo_views), cfg.num_pseudo_views, rng)
         if not pseudo_indices:
             raise RuntimeError('No pseudo viewpoints sampled in Stage A')
@@ -494,8 +467,6 @@ def main():
         total_loss = torch.stack(per_view_losses).mean()
         total_loss.backward()
         optimizer.step()
-        if gaussian_optimizer is not None:
-            gaussian_optimizer.step()
 
         num_pose_updates = 0
         if args.stageA_apply_pose_update:
@@ -515,7 +486,6 @@ def main():
         history['iterations'].append(it)
         history['sampled_sample_ids'].append(sampled_ids)
         history['num_pose_updates_applied'].append(int(num_pose_updates))
-        history['grad_norm_xyz'].append(float(torch.norm(gaussians._xyz.grad).detach().cpu().item()) if gaussians._xyz.grad is not None else 0.0)
 
         if args.stageA_log_grad_contrib and (it == 1 or it % max(1, int(args.stageA_log_grad_interval)) == 0):
             sampled_views = [pseudo_views[i] for i in pseudo_indices]
@@ -536,6 +506,7 @@ def main():
 
     stageA_states = [export_view_state(v) for v in pseudo_views]
     save_json(output_dir / 'pseudo_camera_states_stageA.json', stageA_states)
+    save_json(output_dir / 'pseudo_camera_states_final.json', stageA_states)
 
     stageA_history = {
         'args': vars(args), 'stage_mode': args.stage_mode, 'pseudo_manifest_info': pseudo_manifest_info, 'num_pseudo_viewpoints_loaded': len(pseudo_views),
@@ -574,136 +545,12 @@ def main():
         ],
     }
     save_json(output_dir / 'stageA_history.json', stageA_history)
-
-    stageB_history = None
-    final_states = stageA_states
-    if args.stage_mode == 'stageB' and args.stageB_iters > 0:
-        v1 = load_v1_module()
-        real_views, resolved_train_rgb_dir = [], None
-        if args.train_manifest:
-            real_views, resolved_train_rgb_dir = v1.load_real_viewpoints(args.train_manifest, args.train_rgb_dir)
-            print(f"  [StageB] loaded real sparse-train views: {len(real_views)} from {args.train_manifest}")
-        has_real_branch = bool(real_views and args.num_real_views > 0 and args.lambda_real > 0)
-        if args.lambda_real > 0 and args.train_manifest and not real_views:
-            raise RuntimeError('--train_manifest was given but no real viewpoints were loaded')
-
-        gaussian_groups = build_micro_gaussian_param_groups(
-            gaussians=gaussians,
-            mode=args.stageA5_trainable_params,
-            lr_xyz=args.stageA5_lr_xyz,
-            lr_opacity=args.stageA5_lr_opacity,
-        )
-        stageB_gaussian_optimizer = torch.optim.Adam(gaussian_groups)
-        stageB_pseudo_optimizer = build_stageA_optimizer(pseudo_views, cfg)
-
-        stageB_history = {
-            'iters': int(args.stageB_iters),
-            'has_real_branch': bool(has_real_branch),
-            'resolved_train_rgb_dir': resolved_train_rgb_dir,
-            'iterations': [],
-            'loss_total': [],
-            'loss_real': [],
-            'loss_pseudo': [],
-            'loss_rgb': [],
-            'loss_depth': [],
-            'loss_pose_reg': [],
-            'loss_exp_reg': [],
-            'grad_norm_xyz': [],
-            'sampled_real_frame_ids': [],
-            'sampled_pseudo_sample_ids': [],
-        }
-        cfg_real = {'Training': {'lambda_pseudo': 1.0, 'rgb_boundary_threshold': 0.01, 'monocular': False}}
-
-        for it in tqdm(range(1, int(args.stageB_iters) + 1), desc='StageB conservative joint'):
-            stageB_pseudo_optimizer.zero_grad(set_to_none=True)
-            stageB_gaussian_optimizer.zero_grad(set_to_none=True)
-
-            real_loss_tensor = torch.zeros((), device='cuda')
-            sampled_real_ids = []
-            if has_real_branch:
-                real_indices = sample_indices(len(real_views), args.num_real_views, rng)
-                real_losses = []
-                for ridx in real_indices:
-                    rv = real_views[ridx]
-                    sampled_real_ids.append(int(rv.get('frame_id', ridx)))
-                    pkg = render(rv['vp'], gaussians, pipeline_params, bg)
-                    real_losses.append(v1.get_loss_mapping_rgb(cfg_real, pkg['render'], rv['vp']))
-                if real_losses:
-                    real_loss_tensor = torch.stack(real_losses).mean()
-
-            pseudo_indices = sample_indices(len(pseudo_views), cfg.num_pseudo_views, rng)
-            if not pseudo_indices:
-                raise RuntimeError('No pseudo viewpoints sampled in Stage B')
-
-            pseudo_losses = []
-            per_view_stats = []
-            sampled_pseudo_ids = []
-            for pidx in pseudo_indices:
-                view = pseudo_views[pidx]
-                sampled_pseudo_ids.append(int(view['sample_id']))
-                pkg = render(view['vp'], gaussians, pipeline_params, bg)
-                if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
-                    loss, stats = build_stageA_loss_source_aware(
-                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
-                    )
-                else:
-                    loss, stats = build_stageA_loss(
-                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
-                    )
-                pseudo_losses.append(loss)
-                per_view_stats.append(stats)
-
-            pseudo_loss_tensor = torch.stack(pseudo_losses).mean()
-            total_loss = args.lambda_real * real_loss_tensor + args.lambda_pseudo * pseudo_loss_tensor
-            total_loss.backward()
-            stageB_pseudo_optimizer.step()
-            stageB_gaussian_optimizer.step()
-
-            if args.stageA_apply_pose_update:
-                seen = set()
-                for pidx in pseudo_indices:
-                    sid = int(pseudo_views[pidx]['sample_id'])
-                    if sid in seen:
-                        continue
-                    apply_pose_residual_(pseudo_views[pidx]['vp'])
-                    seen.add(sid)
-
-            avg_stats = {key: float(np.mean([s[key] for s in per_view_stats])) for key in ['loss_rgb', 'loss_depth', 'loss_pose_reg', 'loss_exp_reg']}
-            stageB_history['iterations'].append(int(it))
-            stageB_history['loss_total'].append(float(total_loss.detach().item()))
-            stageB_history['loss_real'].append(float(real_loss_tensor.detach().item()))
-            stageB_history['loss_pseudo'].append(float(pseudo_loss_tensor.detach().item()))
-            stageB_history['loss_rgb'].append(avg_stats['loss_rgb'])
-            stageB_history['loss_depth'].append(avg_stats['loss_depth'])
-            stageB_history['loss_pose_reg'].append(avg_stats['loss_pose_reg'])
-            stageB_history['loss_exp_reg'].append(avg_stats['loss_exp_reg'])
-            stageB_history['grad_norm_xyz'].append(float(torch.norm(gaussians._xyz.grad).detach().cpu().item()) if gaussians._xyz.grad is not None else 0.0)
-            stageB_history['sampled_real_frame_ids'].append(sampled_real_ids)
-            stageB_history['sampled_pseudo_sample_ids'].append(sampled_pseudo_ids)
-
-            if it == 1 or it % 20 == 0:
-                print(f"  [StageB] iter {it}: total={stageB_history['loss_total'][-1]:.4f}, real={stageB_history['loss_real'][-1]:.4f}, pseudo={stageB_history['loss_pseudo'][-1]:.4f}, rgb={stageB_history['loss_rgb'][-1]:.4f}, depth={stageB_history['loss_depth'][-1]:.4f}")
-
-        save_json(output_dir / 'stageB_history.json', stageB_history)
-        final_states = [export_view_state(v) for v in pseudo_views]
-
-    save_json(output_dir / 'pseudo_camera_states_final.json', final_states)
-
-    if stageB_history is None:
-        save_json(output_dir / 'refinement_history.json', stageA_history)
-    else:
-        save_json(output_dir / 'refinement_history.json', {'stageA': stageA_history, 'stageB': stageB_history})
-
-    refined_ply_path = output_dir / 'refined_gaussians.ply'
-    gaussians.save_ply(str(refined_ply_path))
+    save_json(output_dir / 'refinement_history.json', stageA_history)
 
     print(f'[Part3 StageA] Saved: {output_dir}')
     print(f'  Init states: {output_dir / "pseudo_camera_states_init.json"}')
-    print(f'  StageA states: {output_dir / "pseudo_camera_states_stageA.json"}')
-    print(f'  Final states: {output_dir / "pseudo_camera_states_final.json"}')
-    print(f'  StageA history: {output_dir / "stageA_history.json"}')
-    if stageB_history is not None:
-        print(f'  StageB history: {output_dir / "stageB_history.json"}')
+    print(f'  Final states: {output_dir / "pseudo_camera_states_stageA.json"}')
+    print(f'  History: {output_dir / "stageA_history.json"}')
 
 
 if __name__ == '__main__':

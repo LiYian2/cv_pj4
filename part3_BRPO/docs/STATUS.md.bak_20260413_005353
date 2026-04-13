@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-13 13:25
+> 更新时间：2026-04-12 20:40
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -48,13 +48,13 @@
 
 ## 1. 概览
 
-当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但阶段判断继续前移：
-- 已完成 `M1 / M2 / M2.5 / M3 / M4 / M4.5`（upstream schema + Stage A consumer 接通）；
-- 已完成 `M5-0 / M5-1 / M5-2 / M5-3`（depth 结构诊断、densified target、source-aware loss、S3PO residual pose 闭环修回）；
-- 已完成 `M5-4 + A+B`：split+scaled abs prior 落地（`lambda_abs_t/r + scene_scale + robust`）与梯度贡献诊断落地；
-- 已完成 `A 小网格(6x80)`、`top3 深跑(3x300)` 与 `depth-heavy top3 深跑(3x300)`：tradeoff 结论在 depth-heavy 口径下仍成立。
+当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但阶段判断已经更新：
+- 已完成 `M1 / M2 / M2.5 / M3 / M4 / M4.5`，证明 upstream schema 和 Stage A consumer 已接通；
+- 已完成 `M5-0 / M5-1 / M5-2 / M5-3`：depth signal 结构诊断、densified depth target、source-aware depth loss、S3PO residual pose 闭环修回；
+- 已完成 `M5-4`：absolute pose prior 工程接入（`SE3_log + R0/T0 + stageA_lambda_abs_pose`）并做 smoke 对照；
+- 当前确认：**depth 在修复后是“弱有效”，而 absolute pose prior 在小权重（0.1）几乎无感；大权重（100）能压 drift，但未改善 depth，甚至略伤。**
 
-一句话说：**A.5(midpoint, 8 pseudo 帧) 已完成 300iter + replay 复验：`xyz+opacity` 相比 StageA baseline 在 270 帧 replay 上出现稳定正向增益（PSNR +0.02135 / SSIM +0.000348 / LPIPS -6.23e-05），`xyz-only` 仍不优。**
+一句话说：**当前最优先的问题已经从“链路是否断开”切换成“absolute pose prior 如何做尺度化/权重标定，才能在抑制累计 drift 的同时不压制 depth 对齐”。**
 
 ## 2. 数据结构
 
@@ -94,19 +94,11 @@
 
 ### 2.2 当前 internal prepare 正式层
 
-当前主 prototype（BRPO完整链路）：
+当前主 prototype：
 
 ```text
 <run_root>/internal_prepare/re10k1__internal_afteropt__brpo_proto_v4_stage3/
 ```
-
-A.5 midpoint 扩展实验使用：
-
-```text
-<run_root>/internal_prepare/re10k1__internal_afteropt__midpoint_proto_v1/
-```
-
-说明：该 midpoint 版采用 `kf-gap midpoint` 选帧（8帧：17/51/86/121/156/190/225/260）；由于当前环境中 `brpo_build_mask_from_internal_cache.py` 依赖的 MASt3R 加载报错（`load_model_as_safetensor`），本次 A.5 先使用 fused legacy mask 路径完成对照。
 
 核心结构：
 
@@ -202,11 +194,10 @@ samples/<frame_id>/
 | `prepare_stage1_difix_dataset_s3po_internal.py` | internal `select / difix / fusion / verify / pack` | ✅ 可用 | 当前已支持 M1/M2/M3/M5 sample 固化 |
 | `brpo_build_mask_from_internal_cache.py` | 从 internal cache 构建 verification / seed / train mask / projected depth | ✅ 可用 | 当前已支持 `branch_first|fused_first` 与 M3 depth 输出 |
 | `run_pseudo_refinement.py` | v1 standalone refine 入口 | ✅ 可用 | fixed-pose appearance tuning |
-| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 已支持 split+scaled abs prior（`lambda_abs_t/r + robust + scene_scale`）与在线 grad contrib logging |
+| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 当前已补回 `apply_pose_residual_()` 闭环，并支持 `stageA_lambda_abs_pose` 与 abs-drift 导出 |
 | `analyze_m5_depth_signal.py` | M5-0：分析当前 depth signal 在 train-mask 内的结构 | ✅ 可用 | 不改训练，仅诊断 |
 | `materialize_m5_depth_targets.py` | M5-1：写出 `target_depth_for_refine_v2` 与 densify 产物 | ✅ 可用 | 当前 selected 参数已验证 |
 | `diagnose_stageA_gradients.py` | M5 diagnosis：检查 forward sensitivity 与 grad 连通性 | ✅ 可用 | 当前已发现 Stage A pose path 异常 |
-| `diagnose_stageA_loss_contrib.py` | A+B 诊断：单步按 loss 分支统计 rot/trans/exp 梯度贡献 | ✅ 可用 | 用于筛选 abs prior 网格与解释 tradeoff |
 
 ### 3.2 pseudo_branch
 
@@ -226,10 +217,10 @@ samples/<frame_id>/
 
 | 文件 | 计划改动 |
 |------|----------|
-| `run_pseudo_refinement_v2.py` | 基于已落地的 split+scaled prior，补充 depth-heavy 分支对照与统一筛选汇总 |
-| `scripts/diagnose_stageA_loss_contrib.py` | 增加固定样本集与批量对照输出，便于横向比较不同权重组 |
-| `pseudo_loss_v2.py` | 按诊断结果微调 robust/scale 细节（必要时补 Huber δ 暴露） |
-| `docs/absolute_pose_prior.md` | 回填当前实测口径与推荐扫描策略 |
+| `run_pseudo_refinement_v2.py` | 做 300-iter abs prior 权重扫描（含 default/depth-heavy）并固化推荐口径 |
+| `pseudo_loss_v2.py` | 将 abs pose prior 从固定权重改为尺度化版本（rotation/translation 分离或按 scene scale 归一） |
+| `pseudo_camera_state.py` | 增加 drift 统计导出（分 `rho/theta` 聚合）供实验比较 |
+| `brpo_depth_target.py` / `brpo_depth_densify.py` | 当前 upstream 已够用，优先级低于 Stage A 结构标定 |
 
 ## 4. Pipeline
 
@@ -326,13 +317,9 @@ Stage B                          -> 明确不建议现在进入 ❌
 | source-aware loss | `lambda_depth_seed` | `1.0` |
 | source-aware loss | `lambda_depth_dense` | `0.35` |
 | source-aware loss | `lambda_depth_fallback` | `0.0` |
-| Stage A abs prior | `stageA_lambda_abs_t` | 当前扫描：`{0.3,1.0,3.0}` |
-| Stage A abs prior | `stageA_lambda_abs_r` | 当前扫描：`{0.03,0.1}` |
-| Stage A abs prior | `stageA_abs_pose_robust` | `charbonnier` |
-| Stage A abs prior | `stageA_abs_pose_scale_source` | `render_depth_trainmask_median` |
 | Stage A | `stageA_iters` | `300` |
 | Stage A | `num_pseudo_views` | `3` |
-| Stage A (legacy) | `stageA_lambda_abs_pose` | 仅兼容保留，不再作为主扫描维度 |
+| Stage A | `stageA_lambda_abs_pose` | 当前已接入，实验显示 `0.1` 过弱、`100` 过强 |
 
 ### 5.4 当前关键 coverage / diagnosis 口径
 
@@ -342,23 +329,11 @@ Stage B                          -> 明确不建议现在进入 ❌
 | `M3 verified depth ratio` | `~1.56%` | 原始 verified depth 覆盖 |
 | `M5 non-fallback ratio` | `~15.8%` | densify 后整图新几何区域 |
 | `M5 non-fallback within train_mask` | `~81.2%` | train-mask 内真正有新几何信息的区域 |
-| `A小网格(6x80) depth_last` | `0.06837 ~ 0.06854` | 各权重组 depth 末值差异很小 |
-| `A小网格(6x80) rho_norm_last` | `1.83e-4 ~ 7.93e-4` | `lambda_abs_t` 增大时 drift 明显收紧 |
-| `top3深跑(3x300) best_drift` | `lt3.0_lr0.1` | `rho≈2.19e-4, theta≈1.17e-4` |
-| `top3深跑(3x300) best_depth` | `lt1.0_lr0.1` | `loss_depth≈0.06837` 但 drift 更大 |
-| `depth-heavy top3(3x300) best_drift` | `lt3.0_lr0.1` | `rho≈5.19e-4, theta≈2.40e-4` |
-| `depth-heavy top3(3x300) best_depth` | `lt1.0_lr0.1` | `loss_depth≈0.06814`，但 drift 最差 |
-| `下游价值验证（3组）` | `270帧 replay 几乎不变` | 三组 `PSNR/SSIM/LPIPS` 差异仅 1e-4~1e-6 量级 |
-
-
-### 5.5 当前固化口径（A+B 后）
-
-| 口径 | 建议配置 | 目标 | 已知代价 |
-|------|----------|------|----------|
-| drift-prioritized | `beta_rgb=0.7, lambda_abs_t=3.0, lambda_abs_r=0.1` | 尽可能压低累计漂移 | depth 改善不明显 |
-| depth-prioritized | `beta_rgb=0.3, lambda_abs_t=1.0, lambda_abs_r=0.1` | 在当前扫描内尽量保留 depth 末值 | drift 明显更大 |
-
-说明：两套都属于 Stage A 临时口径，不代表已得到统一最优。
+| `M5 source-aware loss_depth (fixed path)` | `0.06867 -> 0.06816` | 修复后开始轻微下降，但仍偏弱 |
+| `default_300 mean pose change` | `trans ~0.00138`, `rot ~0.00498 rad` | 修复后真实累计位姿变化不大但存在 |
+| `pose_reg during fixed-path training` | `≈ 0` | residual 每步清零后，`stageA_lambda_pose` 不约束累计 drift |
+| `m56 default abs(0.1) vs noabs` | 几乎重合 | `loss_depth` 与 `abs_pose_norm` 变化都很小，权重过弱 |
+| `m56 default abs(100)` | drift 明显下降 | `abs_pose_norm mean 0.00154 -> 0.00034`，但 `loss_depth` 略变差 |
 
 ## 6. 状态
 
@@ -379,15 +354,7 @@ Stage B                          -> 明确不建议现在进入 ❌
 - [x] M5-0：诊断当前 depth signal 在 train-mask 内部的结构
 - [x] M5-1：完成 `target_depth_for_refine_v2` densify target 并选中一组可用参数
 - [x] M5-2：完成 M5 target + source-aware depth loss wiring 与 300-iter 对照
-- [x] M5-3：补回 S3PO residual pose 闭环并完成 80/300 iter 验证
-- [x] A：split+scaled abs prior 工程落地（`lambda_abs_t/r + robust + scene_scale`）
-- [x] B：loss 分支梯度贡献诊断落地（在线日志 + 单步诊断脚本）
-- [x] A小网格：6组×80iter 扫描完成
-- [x] top3深跑：3组×300iter 完成
-- [x] depth-heavy top3深跑：3组×300iter 完成
-- [x] grad contrib 汇总：完成 rot/trans 主导项统计
-- [x] Stage A 双口径固化：drift-prioritized / depth-prioritized
-- [x] value-eval：StageA三口径下游验证完成（270帧 replay）
+- [x] M5-3：补回  闭环并完成 80/300 iter 验证
 
 ### 6.2 当前判断 ⚠️
 
@@ -395,57 +362,21 @@ Stage B                          -> 明确不建议现在进入 ❌
 - [x] M5-3 修复后，Stage A 已从“假优化”进入“弱有效”：depth 能降，但幅度小
 - [x] 现阶段核心结构问题是：`pose_reg` 约束 residual 而非累计 drift，导致 absolute prior 成为必要项
 - [x] M5-4 已证明 absolute prior 需要重标定：`0.1` 无感，`100` 能压 drift 但会压 depth
-- [x] depth-heavy 下 tradeoff 仍未解耦：best-depth 与 best-drift 组不重合
-- [x] 下游价值当前未成立：三组口径 replay 指标与 baseline 近似重合
 
 ### 6.3 当前进行中 ⚠️
 
-- [ ] 设计“扩大受影响帧范围”的 A/A.5 方案（当前仅3帧被更新）
-- [ ] 评估是否进入 A.5（xyz-only）以观察是否能带来可见下游变化
+- [ ] 做 300-iter `lambda_abs_pose` 扫描（建议 `10/30/100`，含 default 与 depth-heavy）
+- [ ] 设计尺度化 absolute prior（rotation/translation 分离权重，或按场景尺度归一）
+- [ ] 固化“抑制 drift 且不伤 depth”的 Stage A 默认参数
 
 ### 6.4 下一阶段待办 ⏳
 
-- [ ] 产出 AB 阶段正式结论文档（含 6x80 + 3x300 表格与推荐参数）
-- [ ] 把 split+scaled abs prior 的默认执行口径写回 `absolute_pose_prior.md`
-- [ ] 在 Stage A 结论稳定前，不进入 Stage A.5 / Stage B 实现
+- [ ] 产出 m56 扩展对照汇总（含 drift-depth tradeoff 图表）
+- [ ] 将 absolute prior 方案写入 `absolute_pose_prior.md` 的默认执行口径
+- [ ] 在 Stage A 达到“非弱下降”前，不进入 Stage B
 
 ### 6.5 当前明确不建议做的事 🚫
 
 - [ ] 现在直接进入 Stage B
-- [ ] 把 `lambda_abs_pose`（legacy 单标量）当默认值
-- [ ] 把 `lambda_abs_t=3.0` 视为“能自动改善 depth”的最终解
-
-
-## 7. StageB 保守入口推进（2026-04-13）
-
-- [x] 已新增执行计划文档：`docs/STAGEB_CONSERVATIVE_ENTRY_PLAN.md`
-- [x] Phase0/1/2 已完成，执行简报：`docs/STAGEB_PHASE0_2_EXEC_REPORT_20260413.md`
-- [x] Phase2 gate 结论：`PASS`（相对 A.5 baseline，PSNR/SSIM 提升且 LPIPS 下降）
-- [ ] 下一步：Phase3 长程 StageB（300iter 级别）
-
-
-## 8. StageB Phase3（300iter long run）
-
-- [x] 已完成 StageB 300iter conservative long run：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260413_stageB_phase3_longrun/stageB300_conservative_xyz_opacity`
-- [x] replay 对照 A.5 结果已产出：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260413_stageB_phase3_longrun/stageB300_conservative_xyz_opacity/replay/stageB300_conservative_xyz_opacity/replay_eval.json`
-- [x] 阶段报告：`/home/bzhang512/CV_Project/part3_BRPO/docs/STAGEB_PHASE3_EXEC_REPORT_20260413.md`
-
-
-## 9. StageB 120iter vs 300iter 对比记录（2026-04-13）
-
-对比基线：A.5 xyz+opacity (300iter)
-
-- StageB 120iter（Phase2 gate）：PASS
-  - delta(vs A.5): PSNR +0.293830, SSIM +0.004369, LPIPS -0.000215
-- StageB 300iter（Phase3 long run）：FAIL
-  - delta(vs A.5): PSNR -0.179275, SSIM -0.004948, LPIPS +0.002430
-
-结论：
-- StageB 短程有效，长程退化；
-- 当前主问题是 StageB 后段稳定性，而不是 StageB 链路不可用。
-
-
-## 10. StageB 网格扫描（计划）
-
-- [x] 规划文档：`docs/STAGEB_GRID_SCAN_PLAN_20260413.md`
-- [ ] 待执行：第一轮6组（权重×后段降lr）
+- [ ] 把  当成“已接入就够用”的默认值
+- [ ] 把  当成最终解（当前会压 depth）
