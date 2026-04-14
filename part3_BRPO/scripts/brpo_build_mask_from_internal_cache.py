@@ -50,6 +50,9 @@ def parse_args():
     p.add_argument("--prop-radius-px", type=int, default=2)
     p.add_argument("--prop-tau-rel-depth", type=float, default=0.01)
     p.add_argument("--prop-tau-rgb-l1", type=float, default=0.05)
+    p.add_argument("--cont-tau-reproj", type=float, default=4.0)
+    p.add_argument("--cont-tau-depth", type=float, default=0.15)
+    p.add_argument("--cont-tau-agree", type=float, default=0.10)
     return p.parse_args()
 
 
@@ -195,6 +198,11 @@ def main():
             value_both=args.mask_value_both,
             value_single=args.mask_value_single,
             value_none=args.mask_value_none,
+            left_result=left_result,
+            right_result=right_result,
+            tau_reproj=args.cont_tau_reproj,
+            tau_depth=args.cont_tau_depth,
+            tau_agree=args.cont_tau_agree,
         )
 
         frame_meta = summarize_brpo_mask(
@@ -231,6 +239,9 @@ def main():
                 "prop_radius_px": int(args.prop_radius_px),
                 "prop_tau_rel_depth": float(args.prop_tau_rel_depth),
                 "prop_tau_rgb_l1": float(args.prop_tau_rgb_l1),
+                "cont_tau_reproj": float(args.cont_tau_reproj),
+                "cont_tau_depth": float(args.cont_tau_depth),
+                "cont_tau_agree": float(args.cont_tau_agree),
             },
             "matcher": {
                 "type": "FlowMatcher",
@@ -330,6 +341,9 @@ def main():
             "prop_radius_px": int(args.prop_radius_px),
             "prop_tau_rel_depth": float(args.prop_tau_rel_depth),
             "prop_tau_rgb_l1": float(args.prop_tau_rgb_l1),
+            "cont_tau_reproj": float(args.cont_tau_reproj),
+            "cont_tau_depth": float(args.cont_tau_depth),
+            "cont_tau_agree": float(args.cont_tau_agree),
             "exports": {
                 "projected_depth": True,
                 "projected_depth_valid_mask": True,
@@ -345,3 +359,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

@@ -964,3 +964,275 @@ consumer smoke：
 - replay: `/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260413_stageB_phase3_longrun/stageB300_conservative_xyz_opacity/replay/stageB300_conservative_xyz_opacity/replay_eval.json`
 - delta(vs A.5): PSNR -0.179275, SSIM -0.004948, LPIPS +0.002430
 - gate: FAIL
+
+
+### Strict midpoint8 + M5 + source-aware full pipeline execution（2026-04-13 夜）
+
+新建完整执行与分析报告：
+- `docs/MIDPOINT8_M5_STAGEA_A5_B_EXEC_REPORT_20260413.md`
+
+本轮严格协议：
+- midpoint 8 帧：`17/51/86/121/156/190/225/260`
+- 先对 midpoint pseudo cache 补 `target_depth_for_refine_v2.npy`（M5）
+- 然后运行：
+  - `StageA(source_aware)`
+  - `StageA.5(source_aware + xyz_opacity)`
+  - `StageB120(conservative source-aware)`
+- 每阶段都做 270-frame replay
+
+结果（vs part2 after_opt baseline）：
+- StageA：几乎完全不变（噪声级）
+- StageA.5：`PSNR -0.11066 / SSIM -0.00794 / LPIPS +0.00878`
+- StageB120：`PSNR -0.78787 / SSIM -0.02304 / LPIPS +0.01903`
+
+关键分析结论：
+1. `final_delta_summary` 会误导地显示 pose residual 为零；但真实 `pose_w2c` 仍有小幅变化；
+2. StageA replay 不变的真正原因不是“pose 绝对没动”，而是 **StageA 不更新 Gaussian，导出的 PLY 与输入 hash 完全一致**；
+3. 当前 `StageA -> A.5 -> B` 不是严格顺序相机 handoff，A.5 / B 都不会读取前一阶段的 `pseudo_camera_states_final.json`；
+4. 当前 midpoint8 M5 的有效 non-fallback 几何监督偏弱（train-mask 内约 `18.65%`），不足以支撑强 pose 提升；
+5. 现在更需要修 pipeline 结构，而不是继续把问题当成纯参数扫描。
+
+
+### P0 repair: stage handoff + StageA reporting fix + repaired sequential rerun（2026-04-13 夜）
+
+代码修复：
+- `pseudo_branch/pseudo_camera_state.py`
+  - 新增：
+    - `load_exported_view_states(...)`
+    - `apply_loaded_view_state_(...)`
+    - `summarize_true_pose_deltas(...)`
+- `scripts/run_pseudo_refinement_v2.py`
+  - 新增 CLI：
+    - `--init_pseudo_camera_states_json`
+    - `--init_pseudo_reference_mode {keep,reset_to_loaded}`
+  - 新增 handoff summary 记录
+  - 新增 true pose delta summary / aggregate
+  - 原 `final_delta_summary` 改为更准确的 `residual_delta_summary_post_foldback`
+
+验证：
+- `repair_seq_check/` short smoke 已确认：
+  - `StageA final -> StageA.5 init` 完全对齐
+  - `StageA.5 final -> StageB init` 完全对齐
+- `repair_seq_rerun/` 已完成：
+  - `StageA80`
+  - `StageA.5(80, from StageA)`
+  - `StageB120(from StageA.5)`
+
+结果变化：
+- handoff 修复后，A.5 / StageB 相对修复前 strict run 有小幅改善；
+- 但整体仍然未超过 baseline，说明 handoff bug 只是其中一个结构问题，不是唯一瓶颈。
+
+过程复盘沉淀：
+- 以后 staged pipeline 设计必须先验证：
+  1. handoff continuity
+  2. evaluation-artifact continuity
+  3. true-state summary correctness
+  4. short smoke before long run
+
+### P1 bottleneck review: signal / method mismatch for midpoint8 M5（2026-04-13 夜）
+
+代码与数据链路复查：
+- 复查 `brpo_train_mask.py` / `brpo_depth_densify.py` / `brpo_depth_target.py` / `pseudo_loss_v2.py` / `pseudo_refine_scheduler.py` / `gaussian_param_groups.py` / `run_pseudo_refinement_v2.py`
+- 复查 midpoint8 M5 pseudo cache 与 `repair_seq_rerun/` 实验产物
+
+新增确认的关键事实：
+- pseudo RGB 与 pseudo depth 都只在 `train_confidence_mask_brpo_fused.npy` 非零区域生效；
+- 在 `lambda_depth_fallback=0` 下，fallback depth 区域不提供 depth 梯度；
+- midpoint8 M5 的平均有效几何支持仅约 `3.49%`，平均 fallback 约 `96.51%`；
+- support 区域内 `target_depth_for_refine_v2` 相对 `render_depth` 的平均修正仅约 `1.53%`；
+- A.5 / StageB 却直接打开全局 Gaussian `xyz/opacity`，导致 supervision scope 与 optimization scope 明显不匹配。
+
+新增量化结论：
+- StageA80 的平均 pose 平移改变量仅约 scene scale 的 `0.118%`；
+- A.5 相对 baseline PLY：`74.1%` Gaussians 的 xyz 改动 `>1e-3`；
+- StageB120 相对 baseline PLY：`86.2%` Gaussians 的 xyz 改动 `>1e-3`。
+
+工程判断更新：
+- 当前主瓶颈更接近 `signal weak + underconstrained global refinement`；
+- 后续优先事项应从“继续扫同一组 refine 超参”转向：
+  1. pseudo 选点 / signal 质量复查；
+  2. A.5 / B 的可训练 Gaussian 作用域收缩；
+  3. 将 support/correction 量化检查加入长跑前固定 gate。
+
+### 2026-04-14：新增下一阶段执行计划（signal semantics + stable refinement）
+
+新增文档：
+- `docs/SIGNAL_SEMANTICS_AND_STABLE_REFINEMENT_PLAN_20260414.md`
+- 同步更新：`docs/hermes.md`
+
+本轮不是代码实现，而是基于更新后的 `DEBUG_CONVERSATION.md`、BRPO 差异分析和真实代码链路，形成下一阶段的工程方案。核心收敛：
+1. 先做 `continuous confidence + agreement-aware support`；
+2. 把 RGB/raw confidence 与 depth/train-mask 语义分离；
+3. densify 改成 confidence-aware；
+4. StageB 改成两段式 curriculum，并在 pseudo 分支补 local Gaussian gating；
+5. full SPGM 暂不作为第一优先级，而是后续 stabilizer 候选。
+### 2026-04-14：S1.1 完成（continuous confidence + agreement-aware support）
+
+代码更新：
+- `pseudo_branch/brpo_confidence_mask.py`
+- `scripts/brpo_build_mask_from_internal_cache.py`
+- `scripts/prepare_stage1_difix_dataset_s3po_internal.py`
+
+本轮落地内容：
+1. 在离散 `1.0 / 0.5 / 0.0` 之外，新增 raw continuous confidence 输出；
+2. both-support 新增基于双侧 projected-depth 的 agreement-aware 连续权重；
+3. verification 产物新增：
+   - `raw_confidence_mask_brpo_{left,right,fused}.*`
+   - `raw_confidence_mask_brpo_cont_{left,right,fused}.*`
+   - `confidence_mask_brpo_agreement.*`
+4. sample pack / link 阶段已可带上这些新 artifact。
+### 2026-04-14：S1.2 完成（RGB/depth mask semantics split）
+
+代码更新：
+- `scripts/run_pseudo_refinement_v2.py`
+- `pseudo_branch/pseudo_loss_v2.py`
+
+本轮落地内容：
+1. refine CLI 新增：`--stageA_rgb_mask_mode`、`--stageA_depth_mask_mode`、`--stageA_confidence_variant`；
+2. `load_stageA_pseudo_views(...)` 现已分别解析 `conf_rgb` 与 `conf_depth`；
+3. `build_stageA_loss*` 现已支持 RGB / depth 分别使用不同 mask；
+4. history / per-view stats 已新增 RGB / depth mask 与 coverage 记录。
+### 2026-04-14：S1.3 完成 + 2-frame smoke/ablation
+
+代码更新：
+- `pseudo_branch/brpo_depth_densify.py`
+- `pseudo_branch/brpo_depth_target.py`
+- `scripts/materialize_m5_depth_targets.py`
+
+本轮落地内容：
+1. densify 新增 confidence-aware patch acceptance；
+2. 支持 both-rich patch 放宽 seed-count、single-dominant patch 收紧 delta-std；
+3. M5 materialize 新增 `--use-continuous-confidence`、`--min-patch-confidence`、`--both-seed-count-relax`、`--single-std-tighten`。
+
+2-frame smoke：
+- 目录：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260414_signal_semantics_smoke`
+- 已确认 verify/pack 可真实产出 `raw_confidence_mask_brpo_cont_*` 与 `confidence_mask_brpo_agreement.*`，并成功进入 pseudo_cache sample。
+
+2-frame compare：
+- 目录：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260414_signal_semantics_compare`
+- baseline densify：`mean_dense_valid_ratio≈0.02505`
+- conf-aware densify：`mean_dense_valid_ratio≈0.00129`
+- 说明首轮 confidence-aware 阈值过于保守，densify coverage 被压得过小。
+
+2-frame StageA-10iter ablation：
+- baseline(shared train-mask/discrete) 与 conf-aware(split raw/train + continuous) 均已跑通；
+- conf-aware 组的 RGB/depth 作用域显著收缩，pose drift 更小，但 loss 更高；
+- 当前结论是：语义分离与 confidence-aware wiring 已打通，但 S1.3 需要先回调阈值，再进入更正式的 8-frame 短跑对照。
+### 2026-04-14 晚：8-frame retuned compare
+
+执行目录：
+- `.../20260414_signal_semantics_mid8`
+- `.../20260414_signal_semantics_mid8_compare`
+
+本轮完成：
+1. 8-frame verify/pack 联调；
+2. retuned confidence-aware densify（`min_patch_confidence=0.12, both_relax=2, single_std_tighten=0.9`）；
+3. 8-frame StageA-20iter baseline vs conf-aware 小对照。
+
+关键量化：
+- baseline densify：`mean_dense_valid_ratio≈0.02269`
+- retuned conf-aware：`mean_dense_valid_ratio≈0.01634`
+- baseline StageA20：`loss_total≈0.03673`, `pose_mean_trans≈0.00116`
+- conf-aware StageA20：`loss_total≈0.04392`, `pose_mean_trans≈0.00128`
+
+结论：
+- 相比首轮过严版本，retuned conf-aware densify 已回到可用 coverage；
+- 但当前 8-frame 短跑下，conf-aware 组还没有稳定优于 baseline；
+- 因此下一步仍应先做 E1 小网格回调，而不是直接进入 StageB 两段式 curriculum。
+
+
+### 2026-04-14 夜：E1 support-aware pseudo selection 第一轮完成
+
+代码新增：
+- `scripts/select_signal_aware_pseudos.py`
+
+运行产物：
+- `.../20260414_signal_enhancement_e1/reports/signal_aware_selection_report.json`
+- `.../20260414_signal_enhancement_e1/manifests/signal_aware_selection_manifest.json`
+- `docs/SIGNAL_AWARE_SELECTION_E1_REPORT_20260414.md`
+
+本轮完成内容：
+1. 对 8 个 KF gap 枚举 `{1/3, 1/2, 2/3}` 候选；
+2. 基于 internal cache 的 render_rgb/render_depth 做 lightweight verify；
+3. 用 `both_ratio + verified_ratio + correction_magnitude + balance` 做候选打分；
+4. 生成一组 `signal-aware-8` 选中的 pseudo ids。
+
+关键结果：
+- midpoint8：`[17, 51, 86, 121, 156, 190, 225, 260]`
+- signal-aware-8：`[23, 57, 92, 127, 162, 196, 225, 260]`
+- `6/8` 个 gap 发生变化，前 6 个 gap 全部偏向 `2/3`
+- aggregate 上，`verified_ratio / continuous confidence / balance / score` 均高于 midpoint8；`support_ratio_both` 略低。
+
+结论更新：
+- `midpoint` 不是当前 case 的稳定最优 pseudo 位置；
+- E1 方向成立，但当前仍属于 lightweight render-based verify；
+- 在进入 E2 之前，应先用 `signal-aware-8` 补一轮 apples-to-apples verify/pack + 8-frame StageA short compare。
+
+### 2026-04-14 深夜：E1.5 完成（support-aware pseudo selection 正式短对照）
+
+新增产物：
+- `.../20260414_signal_enhancement_e15_compare/`
+- `.../20260414_signal_enhancement_e15_compare/e15_compare_summary.json`
+- `docs/SIGNAL_AWARE_SELECTION_E15_COMPARE_20260414.md`
+
+本轮完成内容：
+1. 用 `signal-aware-8 = [23, 57, 92, 127, 162, 196, 225, 260]` 重跑正式 `fusion -> verify -> pack`；
+2. 复用 midpoint8_compare 的同一组 baseline / conf-aware M5 densify 参数；
+3. 复用同一组 StageA-20iter baseline / conf-aware 参数，做 apples-to-apples 短对照。
+
+关键结论：
+- raw signal：`verified_ratio` 与 `continuous confidence` 有小幅提升，`support_ratio_both` 略降；
+- baseline densify：`mean_dense_valid_ratio 0.02269 -> 0.02961`
+- conf-aware densify：`mean_dense_valid_ratio 0.01634 -> 0.01831`
+- baseline StageA20：`loss_total 0.03673 -> 0.03659`
+- conf-aware StageA20：`loss_total 0.04392 -> 0.04340`
+
+结论更新：
+- support-aware pseudo selection 已通过正式短对照，不再只是 lightweight proposal；
+- 它的收益主要先体现在 `verified signal -> dense coverage` 的传导；
+- E1 可以收口，下一步可进入 E2（dual-pseudo allocation）。
+
+
+### 2026-04-14 深夜：E2 完成（dual-pseudo allocation 正式对照）
+
+代码更新：
+- `scripts/select_signal_aware_pseudos.py`
+- `scripts/prepare_stage1_difix_dataset_s3po_internal.py`
+
+本轮落地内容：
+1. `select_signal_aware_pseudos.py` 新增 `--topk-per-gap` 与 `--allocation-policy`，支持每 gap 输出多 pseudo；
+2. selection manifest 现会写入 `gap_index / allocation_rank / allocation_policy / candidate_fraction / selection_score / selection_label`；
+3. `prepare_stage1_difix_dataset_s3po_internal.py` 新增 `--selection-manifest`，可直接消费 selection manifest；
+4. pseudo-cache schema 升级到 `pseudo-cache-internal-v1.5`，sample/meta/manifest 均保留 allocation 元信息；
+5. 已完成 E2 正式链路：`select -> fusion -> verify -> pack -> baseline/conf-aware densify -> StageA-20`。
+
+运行产物：
+- `.../20260414_signal_enhancement_e2_compare/`
+- `.../20260414_signal_enhancement_e2_compare/e2_compare_summary.json`
+- `docs/SIGNAL_DUAL_PSEUDO_E2_COMPARE_20260414.md`
+
+关键结论：
+- E2 的 top2 实际稳定落成 `1/2 + 2/3`，而不是固定 `1/3 + 2/3`；
+- raw signal 相比 midpoint8 仍有轻微正向，但幅度有限；
+- densify 层相对 midpoint8 为正，但弱于 E1 `signal-aware-8`；
+- short StageA-20 baseline / conf-aware 两条线都明显差于 E1；
+- 当前 default winner 仍应保持 E1 `signal-aware-8`；若进入 E3，应优先基于 E1 winner 做 multi-anchor verify，而不是直接沿用 E2 16-pseudo set。
+
+
+### 2026-04-14 更深夜：补充 pipeline judgement + 归档部分已完成计划文档
+
+新增文档：
+- `docs/MASK_DEPTH_CONFIDENCE_PIPELINE_JUDGEMENT_20260414.md`
+
+本轮新增结论：
+1. `mask / depth / confidence` pipeline 不是伪方向，但其作为主增益来源的边际收益已接近见顶；
+2. E1 已吃到这条线上最有价值的上游收益；
+3. E2 说明“多 pseudo”在当前 consumer 机制下会稀释 winner，不应再默认沿这一路线继续扩张；
+4. 若继续推进，这条线更适合作为 E3 final probe，而不是继续高强度主线投入。
+
+文档归档：
+- `docs/M5_STAGEA-A.5-B_RUNBOOK.md -> docs/archived/2026-04-superseded-plans/`
+- `docs/part3_BRPO_M5_depth_densify_and_loss_plan.md -> docs/archived/2026-04-superseded-plans/`
+- `docs/part3_stageA_pre_stageB_engineering_plan.md -> docs/archived/2026-04-superseded-plans/`
+
+原因：以上文档对应的执行阶段/计划已完成或已被当前 `SIGNAL_ENHANCEMENT.md` 与最新 STATUS/DESIGN 判断取代。

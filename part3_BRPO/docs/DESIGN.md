@@ -97,9 +97,10 @@ M5 的结果进一步收紧了问题范围：
 因此问题已经不再只是“fallback 稀释”或“depth target 太 sparse”。
 
 ### 2.4 当前最新判断：闭环已恢复，当前瓶颈是 absolute pose prior 的尺度标定
-### 2.5 A.5(midpoint) 最小验证结论（2026-04-13）
-- 300iter + replay(270) 结果显示 `stageA5(xyz+opacity)` 对下游指标有小但稳定的正向改善；
-- 因此当前 gate 结论更新为：**可进入 StageB，但应采用保守入口（geometry-first / low-lr / no-densify warmup），并保留 A.5 作为回退基线。**
+### 2.5 A.5(midpoint) 最小验证结论（分口径修正）
+- 旧记录中的 midpoint A.5 正向结果只对应旧口径/非严格顺序实验；
+- 严格 `midpoint8 + M5 + source-aware + StageA/A.5/B` 新执行表明：StageA replay 基本不变，A.5(`xyz+opacity`) replay 退化，StageB120 进一步退化；
+- 因此当前不能再把 `A.5(midpoint)` 视为可靠 StageB 回退基线，必须先修正 pipeline handoff 与评估逻辑。
 
 
 - 伪帧策略从 3 帧扩展为 `kf gap midpoint` 的 8 帧覆盖；
@@ -338,3 +339,245 @@ part2 internal cache + pseudo_cache(midpoint 8 frames)
 2. 在训练层面加入分段调度（后段降 lr / 分段冻结 pose 或 opacity）；
 3. 在损失层面扫描 `lambda_real : lambda_pseudo` 平衡，避免后段 real/pseudo 目标冲突；
 4. 在工程层面保留 A.5 作为硬回退基线，StageB 必须满足 non-regression gate 才可晋级。
+
+
+## 9. Strict midpoint8 M5 pipeline 复盘后，当前设计层面的新判断（2026-04-13 夜）
+
+### 9.1 StageA 当前在设计上是“诊断分支”，不是“能被 replay 直接验证的有效阶段”
+
+严格 M5 跑完之后，一个关键事实被确认：
+- StageA 只优化 pseudo pose + exposure；
+- Gaussian 完全冻结；
+- 导出的 `refined_gaussians.ply` 与输入 PLY byte-identical；
+- `replay_internal_eval.py` 只消费 PLY，不消费 StageA 导出的 pseudo camera states。
+
+因此，**当前设计下用 270 replay 去判断 StageA 是否有效，在结构上就是失真的**。即使 StageA 真让 pseudo pose 稍微变好，只要 Gaussian 没更新、相机状态又没传入下游，replay 就不会反映出来。
+
+### 9.2 当前真正的 stage handoff 缺了一段：pseudo camera states 没有跨阶段继承
+
+`run_pseudo_refinement_v2.py` 当前流程是每次重新从 pseudo cache 载入 viewpoint，然后调用 `make_viewpoint_trainable(...)`。A.5 / StageB 没有读取前一阶段导出的 `pseudo_camera_states_final.json`。
+
+这意味着：
+1. StageA 不能真正初始化 A.5；
+2. A.5 也不能真正初始化 StageB 的相机侧；
+3. 当前所谓 `A -> A.5 -> B`，本质上更像：
+   - Gaussian 侧部分 warm start；
+   - 相机侧每阶段重新开局。
+
+这与论文中“先稳 pose，再进 joint stage”的顺序语义存在实质差异。
+
+### 9.3 当前 midpoint8 M5 的几何监督强度，不足以支持“靠 StageA 单独把 pose 拉起来”
+
+本轮 midpoint8 M5 实测：
+- 平均 `train_mask ≈ 18.7%`
+- 平均 `seed + dense ≈ 3.49%`
+- 即 train-mask 内只有约 `18.65%` 是 non-fallback 几何监督
+
+所以当前 source-aware depth loss 在这组 midpoint pseudo 上并不是“train-mask 内大部分区域都有可用几何”，而是“RGB mask 覆盖 > depth 真监督覆盖”。这会导致：
+- pose 梯度连通，但 leverage 不够大；
+- StageA 相机更新量很小；
+- A.5 / B 更容易走向 pseudo-side 局部拟合，而不是全局几何改善。
+
+### 9.4 A.5 / StageB 当前更像“局部补偿器”，而不是 paper-style joint optimizer
+
+在严格跑法里：
+- A.5(`xyz_opacity`) 明显降低 pseudo-side loss；
+- 但 replay 退化；
+- StageB120 再进一步退化。
+
+这说明当前 joint 部分虽然在优化，但优化方向不对。核心原因更接近：
+1. joint 自由度太窄（只开 `xyz/opacity`，没开 scaling/rotation/SH 等更完整的 joint parameter space）；
+2. 缺少论文里的 `scene perception Gaussian management`；
+3. StageB real branch 只是 sparse real RGB anchor，没有足够强的几何纠偏能力。
+
+### 9.5 现在更像“结构模块问题优先于参数问题”
+
+目前不是说参数完全不重要，但优先级已经变了：
+- `beta_rgb`、lr、`lambda_real/pseudo` 这些都可以再调；
+- 但如果不先修正 `StageA评估口径 + 相机状态handoff + StageB几何锚点不足 + 缺失paper关键joint机制`，继续扫参数大概率只是在错误结构上做局部最优。
+
+
+## 10. 修复 handoff 之后的设计更新（2026-04-13 夜）
+
+### 10.1 之前的结构诊断被验证为真问题，而不是误判
+
+通过 sequential smoke 与 short rerun 已明确：
+- 旧版 `run_pseudo_refinement_v2.py` 的确没有把前一阶段的 pseudo camera states 传给下一阶段；
+- 修复后，`StageA final == StageA.5 init`、`StageA.5 final == StageB init` 已被逐项验证；
+- 因此前面的“pipeline 不是严格顺序 handoff”判断是正确的。
+
+### 10.2 handoff 修复后，pipeline 设计更接近原始意图，但仍未达到 paper-style强joint
+
+修复后，当前设计至少满足：
+1. StageA 的 pseudo pose 状态可以真实初始化 A.5；
+2. A.5 的 pseudo pose 状态可以真实初始化 B；
+3. 因此 `A -> A.5 -> B` 终于具备了相机状态层面的顺序语义。
+
+但修复后 rerun 仍然为负，说明剩下的设计问题不只是 handoff：
+- 几何信号强度仍不足；
+- current joint space 仍太窄（`xyz/opacity only`）；
+- real-anchor StageB 仍缺强几何约束；
+- paper中的 `scene perception Gaussian management` 仍未进入 refine loop。
+
+### 10.3 未来 staged pipeline 的默认设计规范应该升级
+
+这次事件说明，以后设计 staged experiment 时，必须把下面四项当成前置验证，而不是事后排查：
+1. `stageN final -> stageN+1 init` 是否逐项对齐；
+2. 评估指标是否真的消费了本阶段会变的 artifact；
+3. 状态汇总是否记录“真实变化”而不是仅记录 post-update residual buffer；
+4. 在长跑之前必须做 0-iter / short smoke continuity check。
+
+这不只是工程习惯，而应视为 pipeline design 的一部分。
+
+## 11. P1 bottleneck review：当前 refine 设计的主矛盾（2026-04-13 夜）
+
+### 11.1 当前 source-aware refine 的真实监督作用域非常窄
+从代码上看，`pseudo_loss_v2.py` 中的 RGB 和 depth 都通过同一个 `confidence_mask` 做 masked supervision，因此：
+- pseudo RGB 只在 train-mask 内生效；
+- pseudo depth 还要再受 `depth_source_map` 与 `lambda_depth_*` 约束；
+- 在当前设置 `lambda_depth_fallback=0` 下，fallback depth 区域完全不提供 depth 梯度。
+
+因此，这条链路不是“整张 pseudo 图都在监督”，而是只在一个较小候选区域内做 supervision，而其中大部分区域还是 RGB-only / depth-fallback。
+
+### 11.2 当前 midpoint8 M5 在这个 case 上更像弱修正，而不是强几何驱动
+量化结果表明：
+- train-mask 平均覆盖约 `18.7%`；
+- 真正 non-fallback depth 平均仅约 `3.49%`；
+- support 区域内 `target_depth_for_refine_v2` 相对 `render_depth` 的平均修正仅约 `1.53%`。
+
+这意味着当前 M5 target 更多是在已有 render depth 周围做微弱 nudging，而不是提供大范围、强幅度的几何校正信号。
+
+### 11.3 当前 A.5 / B 的优化对象却是全局 Gaussian 参数
+`scheduler + gaussian_param_groups` 当前直接打开全局：
+- `gaussians._xyz`
+- `gaussians._opacity`
+
+即使真实梯度仍受 visibility 影响，优化语义上依然是“全局点云参数可训练”。当 supervision 只有 8 个 pseudo views 且 depth 有效区域仅 3.49% 时，这种设计天然容易出现 underconstrained global refinement：
+- pseudo-side loss 降；
+- held-out replay 退化。
+
+### 11.4 设计层面的核心矛盾
+所以目前真正的设计矛盾不是单一 bug，而是：
+`弱而局部的 pseudo signal` 作用在 `全局 Gaussian refine` 上。
+
+这比“某个 lr 没调对”更根本，也解释了为什么：
+1. 修复 handoff 后结果虽略好，但仍然整体为负；
+2. A.5 / B 在优化日志上可以看起来正常，但 replay 仍掉。
+
+### 11.5 后续设计应优先遵守的原则
+1. 先验证 pseudo signal 是否足够强，再决定是否打开全局 Gaussian；
+2. 如果 signal 只在局部可靠，则优化对象也应局部化 / gated；
+3. 新 pseudo cache 必须在长跑前过 `support ratio + correction magnitude` 的 signal gate；
+4. replay 指标必须被视为独立 gate，不能再由 pseudo-side loss 代理。
+
+## 12. 下一阶段设计更新：signal semantics first, stable consumer second（2026-04-14）
+
+基于更新后的 BRPO 差异分析，当前设计层面新增三点判断：
+
+1. 你们和 BRPO 的核心差异，不在“有没有双向 fusion”，而在“confidence / train-mask / depth target / refine consumer”这套语义是否闭合；
+2. A 层应先于 B 层推进：先做 `continuous confidence + agreement-aware support + confidence-aware densify`，再考虑更密 pseudo；
+3. C 层当前最合理的形态不是 full SPGM，而是：
+   - loss side：active-support-aware depth reweight；
+   - optimizer side：pseudo 分支 local Gaussian gating；
+   - curriculum side：StageB 从单段式改为前强后稳的两段式。
+
+对应的执行化方案已单独写入：
+- `docs/SIGNAL_SEMANTICS_AND_STABLE_REFINEMENT_PLAN_20260414.md`
+## 13. S1.2 设计落地补充（2026-04-14）
+
+当前 consumer 侧已完成第一版语义分离：
+1. RGB 分支可显式选择 `raw_confidence`；
+2. depth 分支可显式选择 `train_mask` 或 `seed_support_only`；
+3. loss 侧不再强制 RGB 与 depth 共用一张 confidence mask。
+
+这一步的意义是先把 BRPO 风格的 raw confidence semantics 和你们后续为 coverage 扩大的 depth train region 解耦，避免 propagation 后的大 mask 继续无差别地喂给 RGB supervision。
+## 14. S1.3 smoke 后的设计判断（2026-04-14）
+
+2-frame smoke 说明三件事：
+1. semantic wiring 已经打通：continuous confidence、RGB/depth mask 分离、confidence-aware densify 都能真实产出并被 consumer 读取；
+2. 但 S1.3 首轮参数过于保守，densified coverage 从约 `2.20%` 被压到约 `0.07%` 量级，明显过头；
+3. 在这种过窄 supervision 下，StageA 短跑出现更小 pose drift 但更高 loss，这更像“约束过严”而不是“更优信号”。
+
+因此下一步不是直接扩到长跑，而是先把 confidence-aware densify 阈值调回到“能抑制低质 patch、但不把 dense support 压没”的区间，再做 8-frame 短跑语义对照。
+## 15. 8-frame retuned compare 后的设计判断（2026-04-14 晚）
+
+和 2-frame 首轮 smoke 相比，retuned confidence-aware densify 已明显回调到更合理区间：
+- dense_valid_ratio 不再塌到 `0.1%` 量级；
+- 但它仍比 baseline 更保守，且 StageA-20iter 上 conf-aware 组 loss 仍偏高。
+
+这说明当前最合理的解释不是“语义方案错了”，而是：
+1. raw-confidence + train-mask split 已经打通；
+2. confidence-aware densify 方向是对的；
+3. 但当前阈值/权重仍未调到能稳定胜过 baseline 的区间。
+
+因此现在进入 StageB curriculum 仍然偏早。更合理的顺序是：先把 E1（8-frame 短跑 semantics compare）收口，再决定是否进入第4步。
+
+
+## 16. E1 之后的设计判断：midpoint 只是先验，不是最优性保证（2026-04-14 夜）
+
+E1 的 lightweight selection run 给出一个新的设计事实：在当前 re10k case 的 8 个 gap 中，前 6 个 gap 的最优候选都从 `midpoint` 偏向了 `2/3`。
+
+这说明：
+1. pseudo 位置本身就是 signal quality 的一阶变量，而不是固定后可忽略的采样细节；
+2. `midpoint` 更像一个方便的默认先验，而不是受当前 geometry / overlap / visibility 自动保证的最优点；
+3. 当前 signal 改善不一定表现为 `both_ratio` 单独上升，更可能体现为 `verified_ratio`、`continuous confidence`、左右平衡项与 correction magnitude 的联合改善。
+
+因此，后续设计上应把 pseudo selection 单独视为一个可学习/可搜索层，而不是默认内嵌在 pipeline 常量里的固定规则。
+
+同时，这轮结果也提示一个方法学边界：
+- 当前 E1 仍是 render-based lightweight verify；
+- 它证明了“选点值得改”，但还没有证明“改完选点后，完整 pseudo pipeline + short refine 一定更优”；
+- 所以下一步应先做 `signal-aware-8` 的 apples-to-apples verify/pack + short StageA compare，再决定是否直接推进 E2。
+
+## 17. E1.5 之后的设计判断：selection 的收益先体现在 verified-to-dense 传导（2026-04-14 深夜）
+
+E1.5 的正式短对照说明，support-aware pseudo selection 的收益模式不是“raw both-support 全面暴涨”，而是更细一点：
+1. `support_ratio_both` 可以不升反降；
+2. 但 `verified_ratio / continuous confidence / agreement` 仍可同步上升；
+3. 更关键的是，这种提升会继续传导到 densify，使 `dense_valid_ratio` 和 `densified_only_ratio` 上升、fallback 下降；
+4. 到 short StageA-20 这一层时，收益已经变小，但仍保持同方向的轻微改善。
+
+这说明 selection 的真正作用不是粗暴扩大 support 面积，而是把“更可消费的 verified geometry”前置到 pseudo set 中。
+
+因此，后续设计上应把 E1 看成 signal pipeline 的上游结构改动，而不是单纯的数据采样细节。E2 / E3 也应继续沿这个思路推进：先增强 raw signal 形成，再谈更复杂的 consumer 稳定化。
+
+
+## 18. E2 之后的设计判断：数量扩张不能替代高质量 pseudo（2026-04-14 深夜）
+
+E2 的正式对照把 multi-pseudo 这条路工程上打通了，但也给出一个很明确的设计事实：当前 case 下，把每个 gap 从 1 个 pseudo 扩到 2 个 pseudo，并没有继续优于 E1 的单 pseudo 最优选点。
+
+更具体地说：
+1. `top2 per gap` 最终稳定落成 `1/2 + 2/3`，说明第二名候选确实几乎总是 midpoint，而不是 `1/3`；
+2. raw signal 层相对 midpoint8 仍有轻微正向，但 `both-support` 并未变强；
+3. densify 层相对 midpoint8 仍提升，但已经弱于 E1 的 `signal-aware-8`；
+4. short StageA-20 则出现明显回落，说明“多一个中等质量 pseudo”并没有带来更优的可消费监督，反而在 consumer 侧稀释了整体 signal 质量。
+
+这轮结果的重要含义是：
+- 当前主矛盾不是“pseudo 还不够多”；
+- 而是“高质量 pseudo 太少，低于 winner 质量的补充样本会把 supervision 拉回到中等水平”；
+- 因此，后续更值得推进的不是继续无差别加 pseudo 数量，而是增强 winner pseudo 的 verified robustness。
+
+据此，E3 的合理启动方式也更清楚了：
+- 若继续做 multi-anchor verify，应优先作用在 E1 通过正式对照的 `signal-aware-8` 上；
+- 不应把当前 E2 16-pseudo set 直接当作新的默认基底；
+- 如果未来还要继续做 E2 分支，更合理的方向应是 conditional / gated allocation，而不是所有 gap 统一 top2。
+
+
+## 19. 对 mask/depth/confidence pipeline 的设计判断：它更像 signal gate，而不是持续增益引擎（2026-04-14 更深夜）
+
+E1/E1.5/E2 连起来之后，当前设计层面的最重要新判断是：
+
+这条 `mask / depth / confidence` pipeline 的真实角色，更像一个上游 signal gate / ranking / verification pipeline，而不是一个还能持续制造大量新增监督的主引擎。
+
+原因有三点：
+1. E1 证明“选点”能带来真实提升，说明这条线不是伪方向；
+2. E2 证明“加数量”不能替代“保 winner”，说明其主增益不是来自 pseudo 数量扩张；
+3. 当前 consumer 采用固定 `num_pseudo_views=4` 的随机采样机制，意味着当 pseudo 池变大但质量分层明显时，次优样本会稀释 strong winner 的训练曝光。
+
+这带来一个关键设计结论：
+- 对这条 pipeline，继续加 pseudo、加 mask 规则、加 confidence 细节，并不必然等于更强 supervision；
+- 当 raw verified signal 仍然只在低百分比量级时，这条线更擅长做的是“筛出更可消费的少量 winner”，而不是把弱信号自动放大成强监督。
+
+因此后续设计优先级应调整为：
+- 把 E3 当作这条线的 final probe；
+- 如果 E3 也只带来很小收益，则应明确把主矛盾转回 `weak local supervision -> global refinement` 的结构失配，而不是继续在 mask/depth/confidence 支线内部做高强度增量优化。

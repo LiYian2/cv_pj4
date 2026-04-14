@@ -18,6 +18,10 @@ def parse_args():
     p.add_argument('--stride', type=int, default=5)
     p.add_argument('--min-seed-count', type=int, default=6)
     p.add_argument('--max-seed-delta-std', type=float, default=0.08)
+    p.add_argument('--use-continuous-confidence', action='store_true')
+    p.add_argument('--min-patch-confidence', type=float, default=0.0)
+    p.add_argument('--both-seed-count-relax', type=int, default=0)
+    p.add_argument('--single-std-tighten', type=float, default=1.0)
     return p.parse_args()
 
 
@@ -47,6 +51,10 @@ def main():
             'stride': int(args.stride),
             'min_seed_count': int(args.min_seed_count),
             'max_seed_delta_std': float(args.max_seed_delta_std),
+            'use_continuous_confidence': bool(args.use_continuous_confidence),
+            'min_patch_confidence': float(args.min_patch_confidence),
+            'both_seed_count_relax': int(args.both_seed_count_relax),
+            'single_std_tighten': float(args.single_std_tighten),
         },
         'samples': [],
     }
@@ -59,6 +67,12 @@ def main():
         valid_left = np.load(sdir / 'projected_depth_valid_left.npy').astype(np.float32)
         valid_right = np.load(sdir / 'projected_depth_valid_right.npy').astype(np.float32)
         train_mask = np.load(sdir / 'train_confidence_mask_brpo_fused.npy').astype(np.float32)
+        continuous_confidence = None
+        cont_path = sdir / 'raw_confidence_mask_brpo_cont_fused.npy'
+        if args.use_continuous_confidence and cont_path.exists():
+            continuous_confidence = np.load(cont_path).astype(np.float32)
+        support_both = np.load(sdir / 'seed_support_both.npy').astype(np.float32) if (sdir / 'seed_support_both.npy').exists() else None
+        support_single = np.load(sdir / 'seed_support_single.npy').astype(np.float32) if (sdir / 'seed_support_single.npy').exists() else None
 
         result = build_blended_target_depth_v2(
             render_depth=render_depth,
@@ -71,6 +85,12 @@ def main():
             stride=args.stride,
             min_seed_count=args.min_seed_count,
             max_seed_delta_std=args.max_seed_delta_std,
+            continuous_confidence=continuous_confidence,
+            support_both_mask=support_both,
+            support_single_mask=support_single,
+            min_patch_confidence=args.min_patch_confidence,
+            both_seed_count_relax=args.both_seed_count_relax,
+            single_std_tighten=args.single_std_tighten,
         )
 
         np.save(sdir / 'target_depth_for_refine_v2.npy', result['target_depth_for_refine_v2'])
@@ -106,3 +126,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+

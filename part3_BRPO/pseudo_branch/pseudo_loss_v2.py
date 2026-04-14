@@ -169,8 +169,8 @@ def absolute_pose_prior_loss_scaled(
     return l_abs_t + l_abs_r, l_abs_t, l_abs_r, comps
 
 
-def _build_stats_dict(l_rgb, l_depth, l_depth_seed, l_depth_dense, l_depth_fallback, l_pose, l_abs_pose, l_abs_t, l_abs_r, l_exp, total, comps):
-    return {
+def _build_stats_dict(l_rgb, l_depth, l_depth_seed, l_depth_dense, l_depth_fallback, l_pose, l_abs_pose, l_abs_t, l_abs_r, l_exp, total, comps, extra_stats=None):
+    out = {
         'loss_rgb': float(l_rgb.detach().item()),
         'loss_depth': float(l_depth.detach().item()),
         'loss_depth_seed': float(l_depth_seed.detach().item()),
@@ -186,6 +186,32 @@ def _build_stats_dict(l_rgb, l_depth, l_depth_seed, l_depth_dense, l_depth_fallb
         'loss_exp_reg': float(l_exp.detach().item()),
         'loss_total': float(total.detach().item()),
     }
+    if extra_stats:
+        out.update(extra_stats)
+    return out
+
+
+def _mask_extra_stats(rgb_confidence_mask, depth_confidence_mask, depth_source_map=None, device='cuda'):
+    rgb_mask = to_torch(rgb_confidence_mask, device=device)
+    depth_mask = to_torch(depth_confidence_mask, device=device)
+    extras = {
+        'rgb_conf_nonzero_ratio': float((rgb_mask > 0).float().mean().item()),
+        'rgb_conf_mean': float(rgb_mask.mean().item()),
+        'depth_conf_nonzero_ratio': float((depth_mask > 0).float().mean().item()),
+        'depth_conf_mean': float(depth_mask.mean().item()),
+    }
+    if depth_source_map is not None:
+        source_map = to_torch(depth_source_map, device=device, dtype=torch.int64)
+        verified = (source_map != FALLBACK_SOURCE_ID).float()
+        seed = torch.isin(source_map, torch.tensor(SEED_SOURCE_IDS, device=source_map.device, dtype=source_map.dtype)).float()
+        dense = (source_map == int(DENSE_SOURCE_ID)).float()
+        extras.update({
+            'depth_verified_ratio': float(verified.mean().item()),
+            'depth_seed_ratio': float(seed.mean().item()),
+            'depth_dense_ratio': float(dense.mean().item()),
+            'depth_effective_mass': float((depth_mask * verified).mean().item()),
+        })
+    return extras
 
 
 def _build_terms_dict(l_rgb, l_depth, l_depth_seed, l_depth_dense, l_depth_fallback, l_pose, l_abs_t, l_abs_r, l_exp):
@@ -224,12 +250,16 @@ def build_stageA_loss_source_aware(
     abs_pose_robust: str = 'charbonnier',
     scene_scale: float = 1.0,
     return_terms: bool = False,
+    rgb_confidence_mask=None,
+    depth_confidence_mask=None,
 ):
-    l_rgb = masked_rgb_loss(render_rgb, target_rgb, confidence_mask, viewpoint)
+    rgb_mask = confidence_mask if rgb_confidence_mask is None else rgb_confidence_mask
+    depth_mask = rgb_mask if depth_confidence_mask is None else depth_confidence_mask
+    l_rgb = masked_rgb_loss(render_rgb, target_rgb, rgb_mask, viewpoint)
     if use_depth:
-        l_depth_seed = masked_depth_loss_by_source(render_depth, target_depth, confidence_mask, depth_source_map, SEED_SOURCE_IDS)
-        l_depth_dense = masked_depth_loss_by_source(render_depth, target_depth, confidence_mask, depth_source_map, [DENSE_SOURCE_ID])
-        l_depth_fallback = masked_depth_loss_by_source(render_depth, target_depth, confidence_mask, depth_source_map, [FALLBACK_SOURCE_ID])
+        l_depth_seed = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, SEED_SOURCE_IDS)
+        l_depth_dense = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, [DENSE_SOURCE_ID])
+        l_depth_fallback = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, [FALLBACK_SOURCE_ID])
         l_depth = (
             float(lambda_depth_seed) * l_depth_seed
             + float(lambda_depth_dense) * l_depth_dense
@@ -268,7 +298,8 @@ def build_stageA_loss_source_aware(
         + float(lambda_exp) * l_exp
     )
 
-    stats = _build_stats_dict(l_rgb, l_depth, l_depth_seed, l_depth_dense, l_depth_fallback, l_pose, l_abs_pose, l_abs_t, l_abs_r, l_exp, total, comps)
+    extra_stats = _mask_extra_stats(rgb_mask, depth_mask, depth_source_map=depth_source_map, device=render_rgb.device)
+    stats = _build_stats_dict(l_rgb, l_depth, l_depth_seed, l_depth_dense, l_depth_fallback, l_pose, l_abs_pose, l_abs_t, l_abs_r, l_exp, total, comps, extra_stats=extra_stats)
     if return_terms:
         terms = _build_terms_dict(l_rgb, l_depth, l_depth_seed, l_depth_dense, l_depth_fallback, l_pose, l_abs_t, l_abs_r, l_exp)
         return total, stats, terms
@@ -293,8 +324,12 @@ def build_stageA_loss(
     abs_pose_robust: str = 'charbonnier',
     scene_scale: float = 1.0,
     return_terms: bool = False,
+    rgb_confidence_mask=None,
+    depth_confidence_mask=None,
 ):
-    l_rgb = masked_rgb_loss(render_rgb, target_rgb, confidence_mask, viewpoint)
+    rgb_mask = confidence_mask if rgb_confidence_mask is None else rgb_confidence_mask
+    depth_mask = rgb_mask if depth_confidence_mask is None else depth_confidence_mask
+    l_rgb = masked_rgb_loss(render_rgb, target_rgb, rgb_mask, viewpoint)
     l_depth = masked_depth_loss(render_depth, target_depth, confidence_mask) if use_depth else torch.zeros((), device=render_rgb.device)
     l_pose = pose_reg_loss(viewpoint, trans_weight)
 
@@ -322,9 +357,11 @@ def build_stageA_loss(
         + float(lambda_exp) * l_exp
     )
     z = torch.zeros_like(l_depth)
-    stats = _build_stats_dict(l_rgb, l_depth, z, z, z, l_pose, l_abs_pose, l_abs_t, l_abs_r, l_exp, total, comps)
+    extra_stats = _mask_extra_stats(rgb_mask, depth_mask, depth_source_map=None, device=render_rgb.device)
+    stats = _build_stats_dict(l_rgb, l_depth, z, z, z, l_pose, l_abs_pose, l_abs_t, l_abs_r, l_exp, total, comps, extra_stats=extra_stats)
 
     if return_terms:
         terms = _build_terms_dict(l_rgb, l_depth, z, z, z, l_pose, l_abs_t, l_abs_r, l_exp)
         return total, stats, terms
     return total, stats
+

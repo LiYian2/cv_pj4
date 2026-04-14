@@ -128,6 +128,12 @@ def build_blended_target_depth_v2(
     stride: int = 5,
     min_seed_count: int = 6,
     max_seed_delta_std: float = 0.08,
+    continuous_confidence: np.ndarray | None = None,
+    support_both_mask: np.ndarray | None = None,
+    support_single_mask: np.ndarray | None = None,
+    min_patch_confidence: float = 0.0,
+    both_seed_count_relax: int = 0,
+    single_std_tighten: float = 1.0,
 ) -> Dict[str, np.ndarray | Dict]:
     render_depth = _as_depth(render_depth)
     projected_depth_left = _as_depth(projected_depth_left)
@@ -152,6 +158,12 @@ def build_blended_target_depth_v2(
         stride=stride,
         min_seed_count=min_seed_count,
         max_seed_delta_std=max_seed_delta_std,
+        continuous_confidence=continuous_confidence,
+        support_both_mask=support_both_mask,
+        support_single_mask=support_single_mask,
+        min_patch_confidence=min_patch_confidence,
+        both_seed_count_relax=both_seed_count_relax,
+        single_std_tighten=single_std_tighten,
     )
     recon = reconstruct_dense_depth_from_correction(
         render_depth=render_depth,
@@ -176,6 +188,7 @@ def build_blended_target_depth_v2(
         "stride": int(stride),
         "min_seed_count": int(min_seed_count),
         "max_seed_delta_std": float(max_seed_delta_std),
+        "confidence_aware_densify": bool(continuous_confidence is not None or min_patch_confidence > 0 or both_seed_count_relax > 0 or single_std_tighten != 1.0),
         **sparse["summary"],
         **dense["summary"],
         **src["summary"],
@@ -190,3 +203,4 @@ def build_blended_target_depth_v2(
         "depth_dense_valid_mask": dense["depth_dense_valid_mask"].astype(np.float32),
         "summary": summary,
     }
+

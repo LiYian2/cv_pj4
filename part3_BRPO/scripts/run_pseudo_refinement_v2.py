@@ -19,7 +19,14 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, S3PO_ROOT)
 sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
-from pseudo_branch.pseudo_camera_state import make_viewpoint_trainable, export_view_state, apply_pose_residual_
+from pseudo_branch.pseudo_camera_state import (
+    make_viewpoint_trainable,
+    export_view_state,
+    apply_pose_residual_,
+    load_exported_view_states,
+    apply_loaded_view_state_,
+    summarize_true_pose_deltas,
+)
 from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
 from pseudo_branch.pseudo_refine_scheduler import StageAConfig, StageA5Config, build_stageA_optimizer, build_stageA5_optimizers
 from pseudo_branch.gaussian_param_groups import build_micro_gaussian_param_groups
@@ -65,8 +72,11 @@ def parse_args():
         '--stageA_mask_mode',
         choices=['auto', 'train_mask', 'seed_support_only', 'legacy'],
         default='train_mask',
-        help='Which upstream mask layer Stage A should actually consume.',
+        help='Legacy shared mask selector; kept for backward compatibility when rgb/depth mask modes stay auto.',
     )
+    p.add_argument('--stageA_rgb_mask_mode', choices=['auto', 'raw_confidence', 'seed_support_only', 'train_mask', 'legacy'], default='auto')
+    p.add_argument('--stageA_depth_mask_mode', choices=['auto', 'seed_support_only', 'train_mask', 'legacy'], default='auto')
+    p.add_argument('--stageA_confidence_variant', choices=['discrete', 'continuous'], default='discrete')
     p.add_argument(
         '--stageA_target_depth_mode',
         choices=['auto', 'blended_depth', 'blended_depth_m5', 'render_depth_only', 'target_depth_for_refine', 'target_depth_for_refine_v2', 'target_depth', 'render_depth'],
@@ -84,6 +94,8 @@ def parse_args():
     p.add_argument('--stageA5_disable_densify', action='store_true', default=True)
     p.add_argument('--stageA5_disable_prune', action='store_true', default=True)
     p.add_argument('--stageB_iters', type=int, default=120)
+    p.add_argument('--init_pseudo_camera_states_json', default=None, help='Optional pseudo_camera_states_*.json from a previous stage for sequential handoff')
+    p.add_argument('--init_pseudo_reference_mode', choices=['keep', 'reset_to_loaded'], default='keep', help='Whether to keep original R0/T0 anchors or reset them to the loaded handoff state')
     p.add_argument('--train_manifest', default=None, help='split_manifest.json for sparse train views (real anchor)')
     p.add_argument('--train_rgb_dir', default=None, help='RGB dir for sparse train views; defaults to manifest files.rgb')
     p.add_argument('--lambda_real', type=float, default=1.0)
@@ -169,29 +181,56 @@ def _compose_seed_support_mask(sample_dir: Path, target_side: str):
     return conf, 'generated::seed_support_left'
 
 
-def resolve_stageA_mask(sample_dir: Path, target_side: str, requested_mode: str, default_conf: np.ndarray, default_path: str | None, default_kind: str | None):
-    if requested_mode == 'auto':
-        if default_conf is not None:
-            return default_conf.astype(np.float32), default_path, default_kind, 'auto'
-        requested_mode = 'train_mask'
+def _mask_raw_candidates(target_side: str, confidence_variant: str):
+    if confidence_variant == 'continuous':
+        if target_side == 'fused':
+            return ['raw_confidence_mask_brpo_cont_fused.npy']
+        if target_side == 'right':
+            return ['raw_confidence_mask_brpo_cont_right.npy']
+        return ['raw_confidence_mask_brpo_cont_left.npy']
+    if target_side == 'fused':
+        return ['raw_confidence_mask_brpo_fused.npy', 'confidence_mask_brpo_fused.npy', 'confidence_mask_brpo.npy']
+    if target_side == 'right':
+        return ['raw_confidence_mask_brpo_right.npy', 'confidence_mask_brpo_right.npy', 'confidence_mask_brpo.npy']
+    return ['raw_confidence_mask_brpo_left.npy', 'confidence_mask_brpo_left.npy', 'confidence_mask_brpo.npy']
+
+
+def _resolve_effective_mask_mode(requested_mode: str, legacy_mode: str):
+    if requested_mode != 'auto':
+        return requested_mode
+    if legacy_mode and legacy_mode != 'auto':
+        return legacy_mode
+    return 'train_mask'
+
+
+def resolve_stageA_mask(sample_dir: Path, target_side: str, requested_mode: str, confidence_variant: str, default_conf: np.ndarray, default_path: str | None, default_kind: str | None, legacy_mode: str = 'train_mask'):
+    requested_mode = _resolve_effective_mask_mode(requested_mode, legacy_mode)
 
     if requested_mode == 'legacy':
         if default_conf is None:
             raise FileNotFoundError(f'No legacy/default confidence mask available under {sample_dir}')
-        return default_conf.astype(np.float32), default_path, default_kind or 'legacy_default', 'legacy'
+        return default_conf.astype(np.float32), default_path, default_kind or 'legacy_default', 'legacy', 'legacy'
 
     if requested_mode == 'train_mask':
         for name in _mask_train_candidates(target_side):
             path = sample_dir / name
             if path.exists():
-                return np.load(path).astype(np.float32), str(path), f'sample_explicit_{name}', 'train_mask'
+                return np.load(path).astype(np.float32), str(path), f'sample_explicit_{name}', 'train_mask', 'discrete'
         raise FileNotFoundError(f'No train-mask candidate found under {sample_dir} for target_side={target_side}')
+
+    if requested_mode == 'raw_confidence':
+        for variant in ([confidence_variant, 'discrete'] if confidence_variant == 'continuous' else ['discrete']):
+            for name in _mask_raw_candidates(target_side, variant):
+                path = sample_dir / name
+                if path.exists():
+                    return np.load(path).astype(np.float32), str(path), f'sample_explicit_{name}', 'raw_confidence', variant
+        raise FileNotFoundError(f'No raw-confidence candidate found under {sample_dir} for target_side={target_side}, variant={confidence_variant}')
 
     if requested_mode == 'seed_support_only':
         conf, kind = _compose_seed_support_mask(sample_dir, target_side)
-        return conf, kind, kind, 'seed_support_only'
+        return conf, kind, kind, 'seed_support_only', 'discrete'
 
-    raise ValueError(f'Unsupported stageA_mask_mode={requested_mode}')
+    raise ValueError(f'Unsupported stageA mask mode={requested_mode}')
 
 
 def _summarize_source_map(source_map: np.ndarray | None):
@@ -340,14 +379,36 @@ def load_stageA_pseudo_views(args):
         source_meta_path = sample_dir / 'source_meta.json'
         source_meta = json.load(open(source_meta_path)) if source_meta_path.exists() else {}
 
-        conf_arr, conf_path, conf_kind, conf_mode = resolve_stageA_mask(sample_dir, args.target_side, args.stageA_mask_mode, view.get('conf'), view.get('confidence_path'), view.get('confidence_source_kind'))
-        positive = conf_arr[conf_arr > 0]
-        view['conf'] = conf_arr.astype(np.float32)
-        view['confidence_path'] = conf_path
-        view['confidence_source_kind'] = conf_kind
-        view['stageA_mask_mode_effective'] = conf_mode
-        view['confidence_nonzero_ratio'] = float((conf_arr > 0).sum() / conf_arr.size)
-        view['confidence_mean_positive'] = float(positive.mean()) if positive.size > 0 else 0.0
+        rgb_conf, rgb_conf_path, rgb_conf_kind, rgb_conf_mode, rgb_conf_variant = resolve_stageA_mask(
+            sample_dir, args.target_side, args.stageA_rgb_mask_mode, args.stageA_confidence_variant,
+            view.get('conf'), view.get('confidence_path'), view.get('confidence_source_kind'), legacy_mode=args.stageA_mask_mode,
+        )
+        depth_conf, depth_conf_path, depth_conf_kind, depth_conf_mode, depth_conf_variant = resolve_stageA_mask(
+            sample_dir, args.target_side, args.stageA_depth_mask_mode, 'discrete',
+            view.get('conf'), view.get('confidence_path'), view.get('confidence_source_kind'), legacy_mode=args.stageA_mask_mode,
+        )
+        rgb_positive = rgb_conf[rgb_conf > 0]
+        depth_positive = depth_conf[depth_conf > 0]
+        view['conf'] = rgb_conf.astype(np.float32)
+        view['conf_rgb'] = rgb_conf.astype(np.float32)
+        view['conf_depth'] = depth_conf.astype(np.float32)
+        view['confidence_path'] = rgb_conf_path
+        view['confidence_source_kind'] = rgb_conf_kind
+        view['stageA_mask_mode_effective'] = rgb_conf_mode
+        view['stageA_rgb_mask_mode_effective'] = rgb_conf_mode
+        view['stageA_depth_mask_mode_effective'] = depth_conf_mode
+        view['stageA_rgb_confidence_variant_effective'] = rgb_conf_variant
+        view['stageA_depth_confidence_variant_effective'] = depth_conf_variant
+        view['rgb_confidence_path'] = rgb_conf_path
+        view['depth_confidence_path'] = depth_conf_path
+        view['rgb_confidence_source_kind'] = rgb_conf_kind
+        view['depth_confidence_source_kind'] = depth_conf_kind
+        view['confidence_nonzero_ratio'] = float((rgb_conf > 0).sum() / rgb_conf.size)
+        view['confidence_mean_positive'] = float(rgb_positive.mean()) if rgb_positive.size > 0 else 0.0
+        view['rgb_confidence_nonzero_ratio'] = float((rgb_conf > 0).sum() / rgb_conf.size)
+        view['rgb_confidence_mean_positive'] = float(rgb_positive.mean()) if rgb_positive.size > 0 else 0.0
+        view['depth_confidence_nonzero_ratio'] = float((depth_conf > 0).sum() / depth_conf.size)
+        view['depth_confidence_mean_positive'] = float(depth_positive.mean()) if depth_positive.size > 0 else 0.0
 
         depth_kind, depth_for_refine, source_map_path = resolve_depth_target_path(sample_dir, args.stageA_target_depth_mode)
         depth_arr = np.load(depth_for_refine).astype(np.float32)
@@ -366,7 +427,7 @@ def load_stageA_pseudo_views(args):
         view['depth_for_refine'] = depth_arr
         scene_scale, scene_scale_src = compute_stageA_scene_scale(
             sample_dir=sample_dir,
-            conf_arr=conf_arr,
+            conf_arr=depth_conf,
             scale_source=args.stageA_abs_pose_scale_source,
             fixed_scale=args.stageA_abs_pose_fixed_scale,
         )
@@ -379,6 +440,35 @@ def load_stageA_pseudo_views(args):
         view['target_depth_dense_ratio'] = source_summary['dense_ratio']
         make_viewpoint_trainable(view['vp'])
     return pseudo_views, pseudo_manifest_info
+
+
+def initialize_pseudo_views_from_saved_states(pseudo_views, init_states_json: str | None, reference_mode: str):
+    summary = {
+        'requested': bool(init_states_json),
+        'source_json': init_states_json,
+        'reference_mode': reference_mode,
+        'loaded_count': 0,
+        'missing_sample_ids': [],
+        'frame_id_mismatches': [],
+    }
+    if not init_states_json:
+        return summary
+    loaded = load_exported_view_states(init_states_json)
+    for view in pseudo_views:
+        sid = int(view['sample_id'])
+        if sid not in loaded:
+            summary['missing_sample_ids'].append(sid)
+            continue
+        state = loaded[sid]
+        if int(state.get('frame_id', sid)) != int(view.get('frame_id', sid)):
+            summary['frame_id_mismatches'].append({
+                'sample_id': sid,
+                'loaded_frame_id': int(state.get('frame_id', sid)),
+                'current_frame_id': int(view.get('frame_id', sid)),
+            })
+        apply_loaded_view_state_(view['vp'], state, reference_mode=reference_mode)
+        summary['loaded_count'] += 1
+    return summary
 
 
 def save_json(path: Path, obj):
@@ -409,12 +499,23 @@ def main():
     print(f'  Loaded {len(gaussians.get_xyz)} Gaussians (sh_degree={args.sh_degree})')
 
     pseudo_views, pseudo_manifest_info = load_stageA_pseudo_views(args)
+    init_handoff_summary = initialize_pseudo_views_from_saved_states(
+        pseudo_views,
+        init_states_json=args.init_pseudo_camera_states_json,
+        reference_mode=args.init_pseudo_reference_mode,
+    )
     if not pseudo_views:
         raise RuntimeError(f'No pseudo viewpoints found under {args.pseudo_cache}')
+    if init_handoff_summary['requested']:
+        print(f"  Loaded prior pseudo states: {init_handoff_summary['loaded_count']}/{len(pseudo_views)} from {args.init_pseudo_camera_states_json} (reference_mode={args.init_pseudo_reference_mode})")
+        if init_handoff_summary['missing_sample_ids']:
+            print(f"  Missing prior states for sample_ids: {init_handoff_summary['missing_sample_ids']}")
+        if init_handoff_summary['frame_id_mismatches']:
+            print(f"  Frame-id mismatches in prior states: {init_handoff_summary['frame_id_mismatches']}")
     print(f'  Loaded {len(pseudo_views)} pseudo viewpoints (target_side={args.target_side}, confidence_mask_source={args.confidence_mask_source})')
     print(
         '  StageA effective sources: '
-        f"mask_mode={args.stageA_mask_mode}, depth_mode={args.stageA_target_depth_mode}, depth_loss_mode={args.stageA_depth_loss_mode}, apply_pose_update={args.stageA_apply_pose_update}, lambda_abs_pose(legacy)={args.stageA_lambda_abs_pose}, lambda_abs_t={args.stageA_lambda_abs_t}, lambda_abs_r={args.stageA_lambda_abs_r}, abs_robust={args.stageA_abs_pose_robust}, "
+        f"mask_mode(legacy)={args.stageA_mask_mode}, rgb_mask_mode={args.stageA_rgb_mask_mode}, depth_mask_mode={args.stageA_depth_mask_mode}, conf_variant={args.stageA_confidence_variant}, depth_mode={args.stageA_target_depth_mode}, depth_loss_mode={args.stageA_depth_loss_mode}, apply_pose_update={args.stageA_apply_pose_update}, lambda_abs_pose(legacy)={args.stageA_lambda_abs_pose}, lambda_abs_t={args.stageA_lambda_abs_t}, lambda_abs_r={args.stageA_lambda_abs_r}, abs_robust={args.stageA_abs_pose_robust}, "
         f"mean_mask_cov={np.mean([v['confidence_nonzero_ratio'] for v in pseudo_views]):.4f}, "
         f"mean_depth_verified={np.mean([v.get('target_depth_verified_ratio') or 0.0 for v in pseudo_views]):.4f}, "
         f"mean_depth_dense={np.mean([v.get('target_depth_dense_ratio') or 0.0 for v in pseudo_views]):.4f}"
@@ -482,11 +583,11 @@ def main():
             pkg = render(view['vp'], gaussians, pipeline_params, bg)
             if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                 loss, stats = build_stageA_loss_source_aware(
-                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], rgb_confidence_mask=view.get('conf_rgb'), depth_confidence_mask=view.get('conf_depth'), beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
                 )
             else:
                 loss, stats = build_stageA_loss(
-                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], rgb_confidence_mask=view.get('conf_rgb'), depth_confidence_mask=view.get('conf_depth'), beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
                 )
             per_view_losses.append(loss)
             per_view_stats.append(stats)
@@ -537,10 +638,15 @@ def main():
     stageA_states = [export_view_state(v) for v in pseudo_views]
     save_json(output_dir / 'pseudo_camera_states_stageA.json', stageA_states)
 
+    true_pose_delta_summary = summarize_true_pose_deltas(init_states, stageA_states)
+
     stageA_history = {
-        'args': vars(args), 'stage_mode': args.stage_mode, 'pseudo_manifest_info': pseudo_manifest_info, 'num_pseudo_viewpoints_loaded': len(pseudo_views),
+        'args': vars(args), 'stage_mode': args.stage_mode, 'pseudo_manifest_info': pseudo_manifest_info, 'num_pseudo_viewpoints_loaded': len(pseudo_views), 'init_handoff_summary': init_handoff_summary,
         'effective_source_summary': {
             'stageA_mask_mode_requested': args.stageA_mask_mode,
+            'stageA_rgb_mask_mode_requested': args.stageA_rgb_mask_mode,
+            'stageA_depth_mask_mode_requested': args.stageA_depth_mask_mode,
+            'stageA_confidence_variant_requested': args.stageA_confidence_variant,
             'stageA_target_depth_mode_requested': args.stageA_target_depth_mode,
             'stageA_depth_loss_mode': args.stageA_depth_loss_mode,
             'stageA_apply_pose_update': bool(args.stageA_apply_pose_update),
@@ -563,15 +669,17 @@ def main():
                 'sample_id': int(v['sample_id']), 'frame_id': int(v['frame_id']), 'target_rgb_path': v.get('target_rgb_path'),
                 'target_depth_for_refine_path': v.get('target_depth_for_refine_path'), 'target_depth_for_refine_kind': v.get('target_depth_for_refine_kind'), 'stageA_target_depth_mode_effective': v.get('stageA_target_depth_mode_effective'),
                 'target_depth_nonzero_ratio': v.get('target_depth_nonzero_ratio'), 'target_depth_verified_ratio': v.get('target_depth_verified_ratio'), 'target_depth_render_fallback_ratio': v.get('target_depth_render_fallback_ratio'), 'target_depth_seed_ratio': v.get('target_depth_seed_ratio'), 'target_depth_dense_ratio': v.get('target_depth_dense_ratio'),
-                'target_depth_for_refine_source': v.get('source_meta', {}).get('target_depth_for_refine_source'), 'target_depth_for_refine_source_map_path': v.get('target_depth_for_refine_source_map_path'), 'confidence_path': v.get('confidence_path'), 'confidence_source_kind': v.get('confidence_source_kind'), 'stageA_mask_mode_effective': v.get('stageA_mask_mode_effective'), 'confidence_nonzero_ratio': v.get('confidence_nonzero_ratio'), 'confidence_mean_positive': v.get('confidence_mean_positive'), 'stageA_scene_scale': v.get('stageA_scene_scale'), 'stageA_scene_scale_source_effective': v.get('stageA_scene_scale_source_effective'),
+                'target_depth_for_refine_source': v.get('source_meta', {}).get('target_depth_for_refine_source'), 'target_depth_for_refine_source_map_path': v.get('target_depth_for_refine_source_map_path'), 'confidence_path': v.get('confidence_path'), 'confidence_source_kind': v.get('confidence_source_kind'), 'stageA_mask_mode_effective': v.get('stageA_mask_mode_effective'), 'stageA_rgb_mask_mode_effective': v.get('stageA_rgb_mask_mode_effective'), 'stageA_depth_mask_mode_effective': v.get('stageA_depth_mask_mode_effective'), 'stageA_rgb_confidence_variant_effective': v.get('stageA_rgb_confidence_variant_effective'), 'stageA_depth_confidence_variant_effective': v.get('stageA_depth_confidence_variant_effective'), 'rgb_confidence_path': v.get('rgb_confidence_path'), 'depth_confidence_path': v.get('depth_confidence_path'), 'rgb_confidence_nonzero_ratio': v.get('rgb_confidence_nonzero_ratio'), 'depth_confidence_nonzero_ratio': v.get('depth_confidence_nonzero_ratio'), 'confidence_nonzero_ratio': v.get('confidence_nonzero_ratio'), 'confidence_mean_positive': v.get('confidence_mean_positive'), 'stageA_scene_scale': v.get('stageA_scene_scale'), 'stageA_scene_scale_source_effective': v.get('stageA_scene_scale_source_effective'),
             }
             for v in pseudo_views
         ],
-        'history': history, 'stageA_disable_depth': bool(args.stageA_disable_depth), 'stageA_mask_mode': args.stageA_mask_mode, 'stageA_target_depth_mode': args.stageA_target_depth_mode, 'stageA_depth_loss_mode': args.stageA_depth_loss_mode, 'stageA_apply_pose_update': bool(args.stageA_apply_pose_update), 'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed), 'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense), 'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback), 'stageA_lambda_abs_pose': float(args.stageA_lambda_abs_pose), 'stageA_lambda_abs_t': float(args.stageA_lambda_abs_t), 'stageA_lambda_abs_r': float(args.stageA_lambda_abs_r), 'stageA_abs_pose_robust': args.stageA_abs_pose_robust, 'stageA_abs_pose_scale_source': args.stageA_abs_pose_scale_source, 'stageA_abs_pose_fixed_scale': float(args.stageA_abs_pose_fixed_scale), 'stageA_log_grad_contrib': bool(args.stageA_log_grad_contrib), 'stageA_log_grad_interval': int(args.stageA_log_grad_interval), 'final_states': stageA_states,
-        'final_delta_summary': [
+        'history': history, 'stageA_disable_depth': bool(args.stageA_disable_depth), 'stageA_mask_mode': args.stageA_mask_mode, 'stageA_rgb_mask_mode': args.stageA_rgb_mask_mode, 'stageA_depth_mask_mode': args.stageA_depth_mask_mode, 'stageA_confidence_variant': args.stageA_confidence_variant, 'stageA_target_depth_mode': args.stageA_target_depth_mode, 'stageA_depth_loss_mode': args.stageA_depth_loss_mode, 'stageA_apply_pose_update': bool(args.stageA_apply_pose_update), 'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed), 'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense), 'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback), 'stageA_lambda_abs_pose': float(args.stageA_lambda_abs_pose), 'stageA_lambda_abs_t': float(args.stageA_lambda_abs_t), 'stageA_lambda_abs_r': float(args.stageA_lambda_abs_r), 'stageA_abs_pose_robust': args.stageA_abs_pose_robust, 'stageA_abs_pose_scale_source': args.stageA_abs_pose_scale_source, 'stageA_abs_pose_fixed_scale': float(args.stageA_abs_pose_fixed_scale), 'stageA_log_grad_contrib': bool(args.stageA_log_grad_contrib), 'stageA_log_grad_interval': int(args.stageA_log_grad_interval), 'final_states': stageA_states,
+        'residual_delta_summary_post_foldback': [
             {'sample_id': int(v['sample_id']), 'frame_id': int(v['frame_id']), 'rot_norm': float(torch.norm(v['vp'].cam_rot_delta).detach().cpu().item()), 'trans_norm': float(torch.norm(v['vp'].cam_trans_delta).detach().cpu().item()), 'exposure_a': float(v['vp'].exposure_a.detach().cpu().item()), 'exposure_b': float(v['vp'].exposure_b.detach().cpu().item())}
             for v in pseudo_views
         ],
+        'true_pose_delta_summary': true_pose_delta_summary['per_view'],
+        'true_pose_delta_aggregate': true_pose_delta_summary['aggregate'],
     }
     save_json(output_dir / 'stageA_history.json', stageA_history)
 
@@ -644,11 +752,11 @@ def main():
                 pkg = render(view['vp'], gaussians, pipeline_params, bg)
                 if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                     loss, stats = build_stageA_loss_source_aware(
-                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
+                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], rgb_confidence_mask=view.get('conf_rgb'), depth_confidence_mask=view.get('conf_depth'), beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
                     )
                 else:
                     loss, stats = build_stageA_loss(
-                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
+                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], rgb_confidence_mask=view.get('conf_rgb'), depth_confidence_mask=view.get('conf_depth'), beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
                     )
                 pseudo_losses.append(loss)
                 per_view_stats.append(stats)
@@ -688,6 +796,15 @@ def main():
         final_states = [export_view_state(v) for v in pseudo_views]
 
     save_json(output_dir / 'pseudo_camera_states_final.json', final_states)
+    final_true_pose_delta_summary = summarize_true_pose_deltas(init_states, final_states)
+    if stageB_history is None:
+        stageA_history['final_true_pose_delta_summary'] = final_true_pose_delta_summary['per_view']
+        stageA_history['final_true_pose_delta_aggregate'] = final_true_pose_delta_summary['aggregate']
+        save_json(output_dir / 'stageA_history.json', stageA_history)
+    else:
+        stageB_history['final_true_pose_delta_summary'] = final_true_pose_delta_summary['per_view']
+        stageB_history['final_true_pose_delta_aggregate'] = final_true_pose_delta_summary['aggregate']
+        save_json(output_dir / 'stageB_history.json', stageB_history)
 
     if stageB_history is None:
         save_json(output_dir / 'refinement_history.json', stageA_history)
@@ -701,6 +818,8 @@ def main():
     print(f'  Init states: {output_dir / "pseudo_camera_states_init.json"}')
     print(f'  StageA states: {output_dir / "pseudo_camera_states_stageA.json"}')
     print(f'  Final states: {output_dir / "pseudo_camera_states_final.json"}')
+    agg = final_true_pose_delta_summary['aggregate']
+    print(f"  True pose delta summary: mean_trans={agg['mean_trans_norm']:.6f}, max_trans={agg['max_trans_norm']:.6f}, mean_rotF={agg['mean_rot_fro_norm']:.6f}, max_rotF={agg['max_rot_fro_norm']:.6f}")
     print(f'  StageA history: {output_dir / "stageA_history.json"}')
     if stageB_history is not None:
         print(f'  StageB history: {output_dir / "stageB_history.json"}')
@@ -708,3 +827,4 @@ def main():
 
 if __name__ == '__main__':
     main()
+
