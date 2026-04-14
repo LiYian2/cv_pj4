@@ -1,88 +1,237 @@
 # -*- coding: utf-8 -*-
-"""Pseudo RGB fusion: combine left/right conditioned restorations."""
+"""Pseudo RGB fusion utilities.
+
+Primary path: BRPO-style fusion where left/right branch weights are defined by
+pseudo(target) -> reference overlap confidence, not by left-right agreement.
+
+Backward compatibility: if geometry inputs are missing, falls back to a simple
+legacy RGB-only residual fusion path so older callers do not crash.
+"""
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from typing import Dict, Optional, Tuple
+
 import numpy as np
 from PIL import Image
-from pathlib import Path
-import json
-from typing import Dict, Tuple, Optional
+
+from pseudo_branch.brpo_reprojection_verify import (
+    get_intrinsic_matrix_from_state,
+    pose_c2w_from_state,
+)
 
 
-def compute_branch_score(
-    confidence: np.ndarray,
-    depth_gate: np.ndarray,
-    view_weight: float
-) -> np.ndarray:
-    """Compute per-pixel branch score S = C * G * V."""
-    return confidence * depth_gate * view_weight
+def _load_rgb(path: str) -> np.ndarray:
+    return np.asarray(Image.open(path).convert("RGB"), dtype=np.uint8)
 
 
-def compute_depth_gate(
-    render_depth: np.ndarray,
-    branch_depth: np.ndarray,
-    tau_d: float = 0.1
-) -> np.ndarray:
-    """Compute depth consistency gate G = exp(-|D_r - D_branch| / (tau_d * D_r))."""
-    valid = branch_depth > 0.001
-    gate = np.zeros_like(render_depth)
-    if valid.any():
-        rel_diff = np.abs(render_depth[valid] - branch_depth[valid]) / (render_depth[valid] * tau_d + 1e-8)
-        gate[valid] = np.exp(-rel_diff)
-    return gate
+def _to_float_depth(depth: np.ndarray | None) -> Optional[np.ndarray]:
+    if depth is None:
+        return None
+    return np.asarray(depth, dtype=np.float32)
 
 
-def compute_view_weight(
-    mean_confidence: float,
-    valid_ratio: float,
-    alpha1: float = 0.7,
-    alpha2: float = 0.3
+def _save_mask_png(mask: np.ndarray, path: Path):
+    Image.fromarray((np.clip(mask, 0.0, 1.0) * 255).astype(np.uint8)).save(path)
+
+
+def _save_float_png(arr: np.ndarray, path: Path, vmax: Optional[float] = None):
+    arr = np.asarray(arr, dtype=np.float32)
+    if vmax is None:
+        positive = arr[np.isfinite(arr) & (arr > 0)]
+        vmax = float(np.quantile(positive, 0.98)) if positive.size else 1.0
+    vmax = max(float(vmax), 1e-8)
+    img = np.clip(arr / vmax, 0.0, 1.0)
+    Image.fromarray((img * 255).astype(np.uint8)).save(path)
+
+
+def _translation_consistency_scalar(
+    pseudo_state: Dict,
+    ref_state: Dict,
+    translation_scale_tau: float = 1.0,
 ) -> float:
-    """Compute view-level weight V = alpha1 * mean_conf + alpha2 * valid_ratio."""
-    return alpha1 * mean_confidence + alpha2 * valid_ratio
+    pose_p = pose_c2w_from_state(pseudo_state)
+    pose_r = pose_c2w_from_state(ref_state)
+    tp = pose_p[:3, 3]
+    tr = pose_r[:3, 3]
+    dist = float(np.linalg.norm(tp - tr))
+    tau = max(float(translation_scale_tau), 1e-8)
+    return float(np.exp(-dist / tau))
 
 
-def compute_agreement_map_rgb(
-    I_L: np.ndarray,
-    I_R: np.ndarray,
-    tau_rgb: float = 10.0
-) -> np.ndarray:
-    """Compute RGB agreement A_rgb = exp(-||I_L - I_R||_1 / tau_rgb)."""
-    diff = np.abs(I_L - I_R).astype(np.float32)
-    l1_per_pixel = np.sum(diff, axis=2)
-    agreement = np.exp(-l1_per_pixel / tau_rgb)
-    return agreement
+def _backproject_pseudo_depth_to_world(
+    pseudo_depth: np.ndarray,
+    pseudo_state: Dict,
+    valid_eps: float = 1e-4,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    h, w = pseudo_depth.shape
+    yy, xx = np.meshgrid(np.arange(h, dtype=np.float32), np.arange(w, dtype=np.float32), indexing="ij")
+    valid = np.isfinite(pseudo_depth) & (pseudo_depth > float(valid_eps))
+    if not valid.any():
+        empty = np.zeros((0, 3), dtype=np.float32)
+        return empty, valid, np.zeros(0, dtype=np.float32), np.zeros(0, dtype=np.float32), np.zeros((0, 2), dtype=np.float32)
+
+    K = get_intrinsic_matrix_from_state(pseudo_state)
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+
+    d = pseudo_depth[valid].astype(np.float32)
+    u = xx[valid]
+    v = yy[valid]
+
+    x = (u - cx) / fx * d
+    y = (v - cy) / fy * d
+    pts_cam = np.stack([x, y, d], axis=1)
+
+    pose = pose_c2w_from_state(pseudo_state)
+    R = pose[:3, :3].astype(np.float32)
+    t = pose[:3, 3].astype(np.float32)
+    pts_world = (pts_cam @ R.T) + t[None, :]
+    pts_uv = np.stack([u, v], axis=1).astype(np.float32)
+    return pts_world.astype(np.float32), valid, u.astype(np.float32), v.astype(np.float32), pts_uv
 
 
-def compute_agreement_map_depth(
-    D_L: np.ndarray,
-    D_R: np.ndarray,
-    render_depth: np.ndarray,
-    tau_ld: float = 0.05
-) -> np.ndarray:
-    """Compute depth agreement A_depth = exp(-|D_L - D_R| / (tau_ld * D_r))."""
-    valid = (D_L > 0.001) & (D_R > 0.001)
-    agreement = np.zeros_like(render_depth)
-    if valid.any():
-        rel_diff = np.abs(D_L[valid] - D_R[valid]) / (render_depth[valid] * tau_ld + 1e-8)
-        agreement[valid] = np.exp(-rel_diff)
-    return agreement
+def _project_world_to_ref(
+    pts_world: np.ndarray,
+    ref_state: Dict,
+) -> Tuple[np.ndarray, np.ndarray]:
+    if pts_world.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros(0, dtype=np.float32)
+    pose = pose_c2w_from_state(ref_state)
+    R = pose[:3, :3].astype(np.float32)
+    t = pose[:3, 3].astype(np.float32)
+    pts_ref = (pts_world - t[None, :]) @ R
+    z = pts_ref[:, 2]
+
+    K = get_intrinsic_matrix_from_state(ref_state)
+    fx, fy = float(K[0, 0]), float(K[1, 1])
+    cx, cy = float(K[0, 2]), float(K[1, 2])
+
+    uv = np.zeros((pts_world.shape[0], 2), dtype=np.float32)
+    valid_z = z > 1e-6
+    uv[valid_z, 0] = fx * (pts_ref[valid_z, 0] / z[valid_z]) + cx
+    uv[valid_z, 1] = fy * (pts_ref[valid_z, 1] / z[valid_z]) + cy
+    return uv, z.astype(np.float32)
 
 
-def compute_agreement_map(
-    I_L: np.ndarray,
-    I_R: np.ndarray,
-    D_L: Optional[np.ndarray],
-    D_R: Optional[np.ndarray],
-    render_depth: Optional[np.ndarray],
-    use_depth_agreement: bool = False,
-    tau_rgb: float = 10.0,
-    tau_ld: float = 0.05
-) -> np.ndarray:
-    """Compute full agreement map A = A_rgb * A_depth (or just A_rgb)."""
-    A_rgb = compute_agreement_map_rgb(I_L, I_R, tau_rgb)
-    if use_depth_agreement and D_L is not None and D_R is not None and render_depth is not None:
-        A_depth = compute_agreement_map_depth(D_L, D_R, render_depth, tau_ld)
-        return A_rgb * A_depth
-    return A_rgb
+def _sample_depth_nearest(depth: np.ndarray, uv: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    h, w = depth.shape
+    if uv.shape[0] == 0:
+        return np.zeros(0, dtype=np.float32), np.zeros(0, dtype=bool)
+    x = np.rint(uv[:, 0]).astype(np.int32)
+    y = np.rint(uv[:, 1]).astype(np.int32)
+    in_bounds = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+    sampled = np.zeros(uv.shape[0], dtype=np.float32)
+    valid = np.zeros(uv.shape[0], dtype=bool)
+    if in_bounds.any():
+        vals = depth[y[in_bounds], x[in_bounds]].astype(np.float32)
+        sampled[in_bounds] = vals
+        valid[in_bounds] = np.isfinite(vals) & (vals > 1e-4)
+    return sampled, valid
+
+
+def compute_overlap_confidence_map(
+    pseudo_state: Dict,
+    ref_state: Dict,
+    pseudo_depth: np.ndarray,
+    ref_depth: np.ndarray,
+    depth_consistency_tau: float = 0.15,
+    translation_scale_tau: float = 1.0,
+    overlap_valid_eps: float = 1e-4,
+) -> Dict[str, np.ndarray | float | dict]:
+    pseudo_depth = np.asarray(pseudo_depth, dtype=np.float32)
+    ref_depth = np.asarray(ref_depth, dtype=np.float32)
+    h, w = pseudo_depth.shape
+
+    pts_world, valid_mask, _, _, pts_uv = _backproject_pseudo_depth_to_world(
+        pseudo_depth, pseudo_state, valid_eps=overlap_valid_eps
+    )
+    uv_ref, z_ref = _project_world_to_ref(pts_world, ref_state)
+    ref_depth_sampled, ref_depth_valid = _sample_depth_nearest(ref_depth, uv_ref)
+
+    in_bounds = np.zeros(pts_world.shape[0], dtype=bool)
+    if uv_ref.shape[0] > 0:
+        in_bounds = (
+            (uv_ref[:, 0] >= 0)
+            & (uv_ref[:, 0] < w)
+            & (uv_ref[:, 1] >= 0)
+            & (uv_ref[:, 1] < h)
+            & (z_ref > overlap_valid_eps)
+        )
+
+    overlap = in_bounds & ref_depth_valid
+    rel_depth_err = np.full(pts_world.shape[0], np.inf, dtype=np.float32)
+    if overlap.any():
+        denom = ((np.abs(z_ref[overlap]) + np.abs(ref_depth_sampled[overlap])) * 0.5) + 1e-6
+        rel_depth_err[overlap] = np.abs(z_ref[overlap] - ref_depth_sampled[overlap]) / denom
+
+    tau = max(float(depth_consistency_tau), 1e-8)
+    depth_consistency = np.zeros(pts_world.shape[0], dtype=np.float32)
+    if overlap.any():
+        depth_consistency[overlap] = np.exp(-rel_depth_err[overlap] / tau).astype(np.float32)
+
+    translation_consistency = _translation_consistency_scalar(
+        pseudo_state,
+        ref_state,
+        translation_scale_tau=translation_scale_tau,
+    )
+
+    overlap_mask = np.zeros((h, w), dtype=np.float32)
+    projected_depth_map = np.zeros((h, w), dtype=np.float32)
+    sampled_ref_depth_map = np.zeros((h, w), dtype=np.float32)
+    rel_depth_error_map = np.zeros((h, w), dtype=np.float32)
+    depth_consistency_map = np.zeros((h, w), dtype=np.float32)
+    overlap_confidence = np.zeros((h, w), dtype=np.float32)
+
+    yy, xx = np.where(valid_mask)
+    if yy.size > 0:
+        overlap_mask[yy[overlap], xx[overlap]] = 1.0
+        projected_depth_map[yy[overlap], xx[overlap]] = z_ref[overlap]
+        sampled_ref_depth_map[yy[overlap], xx[overlap]] = ref_depth_sampled[overlap]
+        rel_depth_error_map[yy[overlap], xx[overlap]] = rel_depth_err[overlap]
+        depth_consistency_map[yy[overlap], xx[overlap]] = depth_consistency[overlap]
+        overlap_confidence[yy[overlap], xx[overlap]] = depth_consistency[overlap] * float(translation_consistency)
+
+    support_ratio = float((overlap_mask > 0.5).sum() / float(h * w))
+    conf_positive = overlap_confidence[overlap_confidence > 0]
+    mean_conf = float(conf_positive.mean()) if conf_positive.size else 0.0
+    mean_rel_err = float(rel_depth_err[overlap].mean()) if overlap.any() else None
+
+    return {
+        "overlap_mask": overlap_mask,
+        "projected_depth_map": projected_depth_map,
+        "sampled_ref_depth_map": sampled_ref_depth_map,
+        "rel_depth_error_map": rel_depth_error_map,
+        "depth_consistency_map": depth_consistency_map,
+        "overlap_confidence": overlap_confidence,
+        "translation_consistency": float(translation_consistency),
+        "stats": {
+            "support_ratio": support_ratio,
+            "support_pixels": int((overlap_mask > 0.5).sum()),
+            "mean_overlap_confidence": mean_conf,
+            "mean_rel_depth_error": mean_rel_err,
+            "translation_consistency": float(translation_consistency),
+            "depth_consistency_tau": float(depth_consistency_tau),
+            "translation_scale_tau": float(translation_scale_tau),
+        },
+    }
+
+
+def normalize_branch_weights(
+    overlap_conf_left: np.ndarray,
+    overlap_conf_right: np.ndarray,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    left = np.asarray(overlap_conf_left, dtype=np.float32)
+    right = np.asarray(overlap_conf_right, dtype=np.float32)
+    denom = left + right
+    w_left = np.zeros_like(left, dtype=np.float32)
+    w_right = np.zeros_like(right, dtype=np.float32)
+    valid = denom > 1e-8
+    w_left[valid] = left[valid] / denom[valid]
+    w_right[valid] = right[valid] / denom[valid]
+    fused_conf = np.clip(left + right, 0.0, 1.0).astype(np.float32)
+    return w_left, w_right, fused_conf
 
 
 def fuse_residual_targets(
@@ -90,27 +239,48 @@ def fuse_residual_targets(
     I_L: np.ndarray,
     I_R: np.ndarray,
     W_L: np.ndarray,
-    W_R: np.ndarray
-) -> np.ndarray:
-    """Fuse residuals: I_F = I_r + W_L * (I_L - I_r) + W_R * (I_R - I_r)."""
-    R_L = I_L.astype(np.float32) - I_render.astype(np.float32)
-    R_R = I_R.astype(np.float32) - I_render.astype(np.float32)
-    W_L_3 = W_L[:, :, None]
-    W_R_3 = W_R[:, :, None]
-    I_fused = I_render.astype(np.float32) + W_L_3 * R_L + W_R_3 * R_R
-    return np.clip(I_fused, 0, 255).astype(np.uint8)
-
-
-def build_fused_confidence(
-    W_L: np.ndarray,
     W_R: np.ndarray,
-    A: np.ndarray,
-    tau_c: float = 1.0
 ) -> np.ndarray:
-    """Compute fused confidence C_F = min(1, (W_L + W_R) / tau_c) * A."""
-    raw_weight = W_L + W_R
-    normalized = np.minimum(raw_weight / tau_c, 1.0)
-    return normalized * A
+    r_l = I_L.astype(np.float32) - I_render.astype(np.float32)
+    r_r = I_R.astype(np.float32) - I_render.astype(np.float32)
+    fused = I_render.astype(np.float32) + W_L[:, :, None] * r_l + W_R[:, :, None] * r_r
+    return np.clip(fused, 0.0, 255.0).astype(np.uint8)
+
+
+def _legacy_rgb_only_fusion(
+    render_rgb_path: str,
+    target_rgb_left_path: str,
+    target_rgb_right_path: str,
+    conf_left: Optional[np.ndarray],
+    conf_right: Optional[np.ndarray],
+    output_dir: Path,
+) -> Tuple[Dict, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    i_render = _load_rgb(render_rgb_path)
+    i_left = _load_rgb(target_rgb_left_path)
+    i_right = _load_rgb(target_rgb_right_path)
+    h, w = i_render.shape[:2]
+    conf_left = np.ones((h, w), dtype=np.float32) if conf_left is None else np.asarray(conf_left, dtype=np.float32)
+    conf_right = np.ones((h, w), dtype=np.float32) if conf_right is None else np.asarray(conf_right, dtype=np.float32)
+
+    weight_sum = conf_left + conf_right + 1e-8
+    w_left = conf_left / weight_sum
+    w_right = conf_right / weight_sum
+    fused = fuse_residual_targets(i_render, i_left, i_right, w_left, w_right)
+    c_fused = np.clip(conf_left + conf_right, 0.0, 1.0).astype(np.float32)
+
+    Image.fromarray(fused).save(output_dir / "target_rgb_fused.png")
+    np.save(output_dir / "confidence_mask_fused.npy", c_fused)
+    _save_mask_png(c_fused, output_dir / "confidence_mask_fused.png")
+
+    stats = {
+        "fusion_mode": "legacy_rgb_only_weighted_average",
+        "support_ratio_fused": float((c_fused > 0.01).sum()) / float(h * w),
+        "support_pixels_fused": int((c_fused > 0.01).sum()),
+        "mean_conf_fused": float(c_fused[c_fused > 0].mean()) if (c_fused > 0).any() else 0.0,
+    }
+    with open(output_dir / "fusion_meta.json", "w", encoding="utf-8") as f:
+        json.dump(stats, f, indent=2)
+    return stats, i_render, i_left, i_right, w_left, w_right, c_fused, c_fused
 
 
 def run_fusion_for_sample(
@@ -129,98 +299,154 @@ def run_fusion_for_sample(
     tau_ld: float = 0.05,
     tau_c: float = 1.0,
     alpha1: float = 0.7,
-    alpha2: float = 0.3
-) -> Dict:
-    """Run full fusion pipeline for a single pseudo sample."""
+    alpha2: float = 0.3,
+    *,
+    pseudo_state: Optional[Dict] = None,
+    left_ref_state: Optional[Dict] = None,
+    right_ref_state: Optional[Dict] = None,
+    left_ref_depth: Optional[np.ndarray] = None,
+    right_ref_depth: Optional[np.ndarray] = None,
+    depth_consistency_tau: float = 0.15,
+    translation_scale_tau: float = 1.0,
+    overlap_valid_eps: float = 1e-4,
+) -> Tuple[Dict, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    """Run fusion for one sample.
+
+    Preferred path uses BRPO-style target->reference overlap confidence when
+    pseudo/ref states and depths are provided. If they are missing, falls back
+    to a simple legacy RGB-only fusion to preserve compatibility.
+    """
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
-    
-    I_render = np.array(Image.open(render_rgb_path).convert('RGB'))
-    I_L = np.array(Image.open(target_rgb_left_path).convert('RGB'))
-    I_R = np.array(Image.open(target_rgb_right_path).convert('RGB'))
-    H, W = I_render.shape[:2]
-    
-    # View weights
-    if conf_left is not None:
-        mean_conf_L = float(conf_left[conf_left > 0].mean()) if (conf_left > 0).any() else 0.0
-        valid_ratio_L = float((conf_left > 0).sum()) / (H * W)
-    else:
-        mean_conf_L, valid_ratio_L = 0.0, 0.0
-    
-    if conf_right is not None:
-        mean_conf_R = float(conf_right[conf_right > 0].mean()) if (conf_right > 0).any() else 0.0
-        valid_ratio_R = float((conf_right > 0).sum()) / (H * W)
-    else:
-        mean_conf_R, valid_ratio_R = 0.0, 0.0
-    
-    V_L = compute_view_weight(mean_conf_L, valid_ratio_L, alpha1, alpha2)
-    V_R = compute_view_weight(mean_conf_R, valid_ratio_R, alpha1, alpha2)
-    
-    # Depth gates
-    if depth_left is not None and render_depth is not None:
-        G_L = compute_depth_gate(render_depth, depth_left, tau_d)
-    else:
-        G_L = np.ones((H, W), dtype=np.float32)
-    if depth_right is not None and render_depth is not None:
-        G_R = compute_depth_gate(render_depth, depth_right, tau_d)
-    else:
-        G_R = np.ones((H, W), dtype=np.float32)
-    
-    # Branch scores
-    S_L = compute_branch_score(conf_left if conf_left is not None else np.zeros((H,W)), G_L, V_L)
-    S_R = compute_branch_score(conf_right if conf_right is not None else np.zeros((H,W)), G_R, V_R)
-    
-    # Agreement
-    A = compute_agreement_map(I_L, I_R, depth_left, depth_right, render_depth,
-                              use_depth_agreement=use_depth_agreement,
-                              tau_rgb=tau_rgb, tau_ld=tau_ld)
-    
-    # Weights
-    W_L = A * S_L
-    W_R = A * S_R
-    W_sum = W_L + W_R + 1e-8
-    W_L_norm = W_L / W_sum
-    W_R_norm = W_R / W_sum
-    
-    # Fuse
-    I_fused = fuse_residual_targets(I_render, I_L, I_R, W_L_norm, W_R_norm)
-    C_fused = build_fused_confidence(W_L, W_R, A, tau_c)
-    
-    # Save
-    Image.fromarray(I_fused).save(output_dir / 'target_rgb_fused.png')
-    np.save(output_dir / 'confidence_mask_fused.npy', C_fused)
-    conf_img = (np.clip(C_fused, 0, 1) * 255).astype(np.uint8)
-    Image.fromarray(conf_img).save(output_dir / 'confidence_mask_fused.png')
-    
+    diag_dir = output_dir / "diag"
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    geometry_ready = (
+        pseudo_state is not None
+        and left_ref_state is not None
+        and right_ref_state is not None
+        and render_depth is not None
+        and left_ref_depth is not None
+        and right_ref_depth is not None
+    )
+    if not geometry_ready:
+        return _legacy_rgb_only_fusion(
+            render_rgb_path=render_rgb_path,
+            target_rgb_left_path=target_rgb_left_path,
+            target_rgb_right_path=target_rgb_right_path,
+            conf_left=conf_left,
+            conf_right=conf_right,
+            output_dir=output_dir,
+        )
+
+    i_render = _load_rgb(render_rgb_path)
+    i_left = _load_rgb(target_rgb_left_path)
+    i_right = _load_rgb(target_rgb_right_path)
+    render_depth = _to_float_depth(render_depth)
+    left_ref_depth = _to_float_depth(left_ref_depth)
+    right_ref_depth = _to_float_depth(right_ref_depth)
+
+    left_geom = compute_overlap_confidence_map(
+        pseudo_state=pseudo_state,
+        ref_state=left_ref_state,
+        pseudo_depth=render_depth,
+        ref_depth=left_ref_depth,
+        depth_consistency_tau=depth_consistency_tau,
+        translation_scale_tau=translation_scale_tau,
+        overlap_valid_eps=overlap_valid_eps,
+    )
+    right_geom = compute_overlap_confidence_map(
+        pseudo_state=pseudo_state,
+        ref_state=right_ref_state,
+        pseudo_depth=render_depth,
+        ref_depth=right_ref_depth,
+        depth_consistency_tau=depth_consistency_tau,
+        translation_scale_tau=translation_scale_tau,
+        overlap_valid_eps=overlap_valid_eps,
+    )
+
+    w_left, w_right, c_fused = normalize_branch_weights(
+        left_geom["overlap_confidence"],
+        right_geom["overlap_confidence"],
+    )
+    fused = fuse_residual_targets(i_render, i_left, i_right, w_left, w_right)
+
+    Image.fromarray(fused).save(output_dir / "target_rgb_fused.png")
+    np.save(output_dir / "confidence_mask_fused.npy", c_fused)
+    _save_mask_png(c_fused, output_dir / "confidence_mask_fused.png")
+
+    np.save(output_dir / "fusion_weight_left.npy", w_left)
+    np.save(output_dir / "fusion_weight_right.npy", w_right)
+    np.save(output_dir / "overlap_conf_left.npy", left_geom["overlap_confidence"])
+    np.save(output_dir / "overlap_conf_right.npy", right_geom["overlap_confidence"])
+    np.save(output_dir / "overlap_mask_left.npy", left_geom["overlap_mask"])
+    np.save(output_dir / "overlap_mask_right.npy", right_geom["overlap_mask"])
+    np.save(output_dir / "projected_depth_left.npy", left_geom["projected_depth_map"])
+    np.save(output_dir / "projected_depth_right.npy", right_geom["projected_depth_map"])
+    np.save(output_dir / "sampled_ref_depth_left.npy", left_geom["sampled_ref_depth_map"])
+    np.save(output_dir / "sampled_ref_depth_right.npy", right_geom["sampled_ref_depth_map"])
+    np.save(output_dir / "ref_depth_left_render.npy", left_ref_depth)
+    np.save(output_dir / "ref_depth_right_render.npy", right_ref_depth)
+
+    _save_float_png(w_left, diag_dir / "fusion_weight_left.png", vmax=1.0)
+    _save_float_png(w_right, diag_dir / "fusion_weight_right.png", vmax=1.0)
+    _save_float_png(left_geom["overlap_confidence"], diag_dir / "overlap_conf_left.png", vmax=1.0)
+    _save_float_png(right_geom["overlap_confidence"], diag_dir / "overlap_conf_right.png", vmax=1.0)
+    _save_mask_png(left_geom["overlap_mask"], diag_dir / "overlap_mask_left.png")
+    _save_mask_png(right_geom["overlap_mask"], diag_dir / "overlap_mask_right.png")
+    _save_float_png(left_geom["projected_depth_map"], diag_dir / "projected_depth_left.png")
+    _save_float_png(right_geom["projected_depth_map"], diag_dir / "projected_depth_right.png")
+    _save_float_png(left_geom["rel_depth_error_map"], diag_dir / "rel_depth_error_left.png")
+    _save_float_png(right_geom["rel_depth_error_map"], diag_dir / "rel_depth_error_right.png")
+
+    support_ratio = float((c_fused > 0.01).sum() / float(c_fused.size))
+    mean_conf = float(c_fused[c_fused > 0].mean()) if (c_fused > 0).any() else 0.0
     stats = {
-        'use_depth_agreement': use_depth_agreement,
-        'tau_rgb': tau_rgb, 'tau_d': tau_d, 'tau_ld': tau_ld, 'tau_c': tau_c,
-        'alpha1': alpha1, 'alpha2': alpha2,
-        'V_L': V_L, 'V_R': V_R,
-        'mean_agreement': float(A[A > 0].mean()) if (A > 0).any() else 0.0,
-        'mean_conf_fused': float(C_fused[C_fused > 0].mean()) if (C_fused > 0).any() else 0.0,
-        'support_ratio_fused': float((C_fused > 0.01).sum()) / (H * W),
-        'support_pixels_fused': int((C_fused > 0.01).sum()),
+        "fusion_mode": "brpo_overlap_confidence_v1",
+        "support_ratio_fused": support_ratio,
+        "support_pixels_fused": int((c_fused > 0.01).sum()),
+        "mean_conf_fused": mean_conf,
+        "left": left_geom["stats"],
+        "right": right_geom["stats"],
+        "depth_consistency_tau": float(depth_consistency_tau),
+        "translation_scale_tau": float(translation_scale_tau),
+        "overlap_valid_eps": float(overlap_valid_eps),
+        "legacy_args_ignored": {
+            "use_depth_agreement": bool(use_depth_agreement),
+            "tau_rgb": float(tau_rgb),
+            "tau_d": float(tau_d),
+            "tau_ld": float(tau_ld),
+            "tau_c": float(tau_c),
+            "alpha1": float(alpha1),
+            "alpha2": float(alpha2),
+        },
     }
-    
-    with open(output_dir / 'fusion_meta.json', 'w') as f:
+    with open(output_dir / "fusion_meta.json", "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2)
-    
-    return stats, I_render, I_L, I_R, W_L, W_R, A, C_fused
+    return stats, i_render, i_left, i_right, w_left, w_right, left_geom["overlap_confidence"], c_fused
 
 
-def get_fusion_diag_images(I_L, I_R, W_L, W_R, A, C_fused, conf_left, conf_right):
-    """Generate diagnostic images for fusion."""
+def get_fusion_diag_images(
+    I_L: np.ndarray,
+    I_R: np.ndarray,
+    W_L: np.ndarray,
+    W_R: np.ndarray,
+    A: np.ndarray,
+    C_fused: np.ndarray,
+    conf_left: Optional[np.ndarray],
+    conf_right: Optional[np.ndarray],
+):
+    """Keep a compatibility helper for external diagnostic callers."""
     diag = {}
-    diff = np.abs(I_L - I_R).astype(np.float32)
-    diag['rgb_disagreement'] = np.clip(np.sum(diff, axis=2), 0, 255).astype(np.uint8)
-    diag['weight_left'] = (np.clip(W_L, 0, 1) * 255).astype(np.uint8)
-    diag['weight_right'] = (np.clip(W_R, 0, 1) * 255).astype(np.uint8)
-    diag['agreement'] = (np.clip(A, 0, 1) * 255).astype(np.uint8)
-    diag['confidence_fused'] = (np.clip(C_fused, 0, 1) * 255).astype(np.uint8)
+    diff = np.abs(I_L.astype(np.float32) - I_R.astype(np.float32))
+    diag["rgb_disagreement"] = np.clip(np.sum(diff, axis=2), 0, 255).astype(np.uint8)
+    diag["weight_left"] = (np.clip(W_L, 0, 1) * 255).astype(np.uint8)
+    diag["weight_right"] = (np.clip(W_R, 0, 1) * 255).astype(np.uint8)
+    diag["agreement"] = (np.clip(A, 0, 1) * 255).astype(np.uint8)
+    diag["confidence_fused"] = (np.clip(C_fused, 0, 1) * 255).astype(np.uint8)
     if conf_left is not None:
-        diag['support_left'] = ((conf_left > 0.01).astype(np.float32) * 255).astype(np.uint8)
+        diag["support_left"] = ((np.asarray(conf_left) > 0.01).astype(np.uint8) * 255)
     if conf_right is not None:
-        diag['support_right'] = ((conf_right > 0.01).astype(np.float32) * 255).astype(np.uint8)
-    diag['support_fused'] = ((C_fused > 0.01).astype(np.float32) * 255).astype(np.uint8)
+        diag["support_right"] = ((np.asarray(conf_right) > 0.01).astype(np.uint8) * 255)
+    diag["support_fused"] = ((np.asarray(C_fused) > 0.01).astype(np.uint8) * 255)
     return diag

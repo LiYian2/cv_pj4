@@ -5,6 +5,162 @@
 
 ---
 
+## 2026-04-15
+
+### Fusion：BRPO-style `target ↔ reference overlap confidence` 第一版落地
+
+代码变更：
+- `pseudo_branch/pseudo_fusion.py`
+- `scripts/prepare_stage1_difix_dataset_s3po_internal.py`
+
+本轮实现：
+1. `pseudo_fusion.py` 不再以旧的 `branch confidence × render-depth gate × global view scalar` 为主语义；
+2. 新版 fusion 会基于：
+   - pseudo render depth
+   - pseudo / left-ref / right-ref camera states
+   - left / right reference rendered depth
+   计算每一侧的 `target ↔ reference overlap confidence`；
+3. 左右分支权重现在由 `overlap_conf_left/right` 直接归一化得到，再对 DiFix 候选图做 residual fusion；
+4. `stage_fusion()` 现已真正喂入几何输入，而不是旧的 RGB-only / uniform-confidence placeholder 调用。
+
+新增导出：
+- `fusion_weight_left.npy`
+- `fusion_weight_right.npy`
+- `overlap_conf_left.npy`
+- `overlap_conf_right.npy`
+- `overlap_mask_left.npy`
+- `overlap_mask_right.npy`
+- `projected_depth_left.npy`
+- `projected_depth_right.npy`
+- `ref_depth_left_render.npy`
+- `ref_depth_right_render.npy`
+- 对应 `diag/` 可视化图
+
+兼容性处理：
+- 若调用方没有提供 pseudo/ref states 或 reference depth，新版 `pseudo_fusion.py` 仍保留一个 legacy fallback，避免旧脚本直接崩掉；
+- 但 `prepare_stage1_difix_dataset_s3po_internal.py::stage_fusion()` 主路径已切到新的几何版 fusion。
+
+验证：
+- 已通过远端 `py_compile`：
+  - `pseudo_branch/pseudo_fusion.py`
+  - `scripts/prepare_stage1_difix_dataset_s3po_internal.py`
+- 已完成 `stage_fusion()` 直连 smoke：
+  - 输出目录：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_stage_fusion_direct_smoke/`
+- 已完成一次带真实 DiFix 左右图的 direct fusion smoke：
+  - 输出目录：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_fusion_direct_difix_50/`
+
+当前判断：
+- 这一步已经和 `docs/BRPO_fusion_mask_spgm_subset_refine.md` 中关于 fusion 的主判断对齐：
+  - fused image 的权重定义已从“left ↔ right agreement 的辅助语义”切回“target ↔ reference overlap confidence”主语义；
+- 但当前只完成了 BRPO 口径中的 fusion 部分；
+- 最终训练 mask 仍不是 `post-fusion RGB / correspondence` 的独立推理结果；
+- 因此接下来的主工作不应回到旧 `seed_support -> train_mask -> target_depth` 路径补丁，而应继续完成：
+  1. fused RGB mask v2
+  2. depth supervision v2
+  3. local Gaussian gating / subset refine
+
+### Signal v2：fused RGB mask + isolated depth supervision 第一版落地
+
+代码变更：
+- `pseudo_branch/brpo_v2_signal/__init__.py`
+- `pseudo_branch/brpo_v2_signal/rgb_mask_inference.py`
+- `pseudo_branch/brpo_v2_signal/depth_supervision_v2.py`
+- `scripts/build_brpo_v2_signal_from_internal_cache.py`
+
+本轮实现：
+1. 新增 `signal_v2` 独立路径，不覆盖旧 `brpo_confidence_mask.py / brpo_train_mask.py / brpo_depth_target.py` 主线；
+2. `rgb_mask_inference.py` 现在会直接在 fused RGB 上，与 left/right reference RGB 做 reciprocal correspondence 匹配；
+3. 新版 `raw_rgb_confidence_v2` / `raw_rgb_confidence_cont_v2` 来自 fused RGB ↔ reference RGB correspondence，本轮不依赖旧 depth seed / train-mask；
+4. `depth_supervision_v2.py` 会基于：
+   - `projected_depth_left/right`
+   - `fusion_weight_left/right`
+   - `raw_rgb_confidence_v2`
+   单独生成：
+   - `target_depth_for_refine_v2_brpo.npy`
+   - `target_depth_source_map_v2_brpo.npy`
+   - `depth_supervision_mask_v2_brpo.npy`
+5. 以上新产物全部写到 `signal_v2/` 下，不改写 legacy `pseudo_cache/` 样本中的旧文件名。
+
+新增导出：
+- `signal_v2/frame_<id>/raw_rgb_confidence_v2.npy`
+- `signal_v2/frame_<id>/raw_rgb_confidence_cont_v2.npy`
+- `signal_v2/frame_<id>/rgb_support_{left,right,both,single}_v2.npy`
+- `signal_v2/frame_<id>/target_depth_for_refine_v2_brpo.npy`
+- `signal_v2/frame_<id>/target_depth_source_map_v2_brpo.npy`
+- `signal_v2/frame_<id>/depth_supervision_mask_v2_brpo.npy`
+- `signal_v2/frame_<id>/rgb_mask_meta_v2.json`
+- `signal_v2/frame_<id>/depth_meta_v2_brpo.json`
+- 对应 `diag/` 可视化图与 `summary.json`
+
+验证：
+- 已通过远端 `py_compile`：
+  - `pseudo_branch/brpo_v2_signal/__init__.py`
+  - `pseudo_branch/brpo_v2_signal/rgb_mask_inference.py`
+  - `pseudo_branch/brpo_v2_signal/depth_supervision_v2.py`
+  - `scripts/build_brpo_v2_signal_from_internal_cache.py`
+- 已完成 1-frame smoke：
+  - prepare root：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_stage_fusion_direct_smoke/`
+  - 输出目录：`.../signal_v2/`
+- frame 50 的 smoke 结果：
+  - `raw_rgb_confidence_nonzero_ratio ≈ 0.01865`
+  - `support_ratio_both ≈ 0.00904`
+  - `depth verified_ratio ≈ 0.01865`
+  - `mean_abs_rel_correction_verified ≈ 0.03556`
+
+当前判断：
+- 这一步和分析文档的 `mask` / `depth` 语义分工是一致的：
+  - mask 主语义已回到 fused RGB / correspondence；
+  - depth supervision 已独立成服务 refine 的另一条线；
+- 当时这个版本还没有接入 `run_pseudo_refinement_v2.py`；
+- 同日后续更新见下一小节：refine consumer 已在 `signal_pipeline=brpo_v2` 路径下完成最小接入并跑通 3-frame smoke。
+
+### Signal v2：3-frame coverage eval + refine consumer smoke 接通
+
+代码变更：
+- `scripts/run_pseudo_refinement_v2.py`
+
+本轮接入：
+1. 新增 `--signal_pipeline {legacy, brpo_v2}`
+2. 新增 `--signal_v2_root`
+3. RGB mask 已支持 `brpo_v2_raw / brpo_v2_cont`
+4. depth mask 已支持 `brpo_v2_depth`
+5. depth target 已支持 `brpo_v2 / target_depth_for_refine_v2_brpo`
+
+3-frame coverage eval：
+- 目录：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_signal_v2_coverage_tmp/signal_v2/`
+- frame `10 / 50 / 120` 平均：
+  - `rgb support left ≈ 1.56%`
+  - `rgb support right ≈ 1.20%`
+  - `rgb support both ≈ 0.93%`
+  - `raw_rgb_confidence_nonzero_ratio ≈ 1.82%`
+  - `depth verified_ratio ≈ 1.82%`
+  - `both_weighted_ratio ≈ 1.40%`
+  - `left_only_ratio ≈ 0.42%`
+  - `render_fallback_ratio = 0`
+  - `mean_abs_rel_correction_verified ≈ 3.15%`
+- 解释：
+  1. v2 mask 现在确实是一个更“窄但干净”的 fused-RGB correspondence mask；
+  2. depth supervision 已不再靠旧 `train_mask` 扩覆盖，而是严格跟着新的 RGB 可信区域和 projected depth 走。
+
+StageA refine smoke：
+- 输出目录：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_signal_v2_refine_smoke`
+- 关键结果：
+  - `signal_pipeline = brpo_v2`
+  - first sample RGB mask mode = `brpo_v2_raw`
+  - first sample depth mask mode = `brpo_v2_depth`
+  - first sample depth kind = `target_depth_for_refine_v2_brpo`
+  - `mean_confidence_nonzero_ratio ≈ 1.82%`
+  - `mean_target_depth_verified_ratio ≈ 1.82%`
+  - StageA `3 iter` 成功跑完，并产出：
+    - `stageA_history.json / refinement_history.json`
+    - `pseudo_camera_states_{stageA,final}.json`
+    - `refined_gaussians.ply`
+
+当前判断：
+- 当前状态已经不是“文件存在但没接上”，而是 `fusion + mask v2 + depth supervision v2 + refine consumer` 四段都已打通；
+- 但这还只是 wiring / smoke 成功，不等于已经证明这版窄 coverage 优于 legacy；
+- 下一步应该直接做一轮 apples-to-apples short compare：`legacy vs signal_v2`，使用同一组 pseudo、同一组 iter、同一组 refine 超参；
+- local Gaussian gating 仍是后续必须补的结构项，不应因为 smoke 通过就后移得过远。
 
 ## 2026-04-13
 

@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-13 13:25
+> 更新时间：2026-04-15 04:50 CST
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -48,13 +48,15 @@
 
 ## 1. 概览
 
-当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但阶段判断继续前移：
-- 已完成 `M1 / M2 / M2.5 / M3 / M4 / M4.5`（upstream schema + Stage A consumer 接通）；
-- 已完成 `M5-0 / M5-1 / M5-2 / M5-3`（depth 结构诊断、densified target、source-aware loss、S3PO residual pose 闭环修回）；
-- 已完成 `M5-4 + A+B`：split+scaled abs prior 落地（`lambda_abs_t/r + scene_scale + robust`）与梯度贡献诊断落地；
-- 已完成 `A 小网格(6x80)`、`top3 深跑(3x300)` 与 `depth-heavy top3 深跑(3x300)`：tradeoff 结论在 depth-heavy 口径下仍成立。
+当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但当前工程重点已经切到两条新改造线：
+- 已完成 `E1 / E1.5 / E2`：确认 `signal-aware-8` 是当前 pseudo selection default winner；
+- 已完成新版方案文档：`BRPO_fusion_rgb_mask_depth_v2_engineering_plan_20260415.md` 与 `BRPO_local_gaussian_gating_engineering_plan_20260415.md`；
+- 已完成 fusion 第一步代码落地：`pseudo_fusion.py` 与 `prepare_stage1_difix_dataset_s3po_internal.py::stage_fusion()` 已改成 **target ↔ reference overlap confidence** 口径；
+- 已完成隔离的 `signal_v2` 第一步实现：fused RGB mask v2 与 depth supervision v2 已可独立生成，不再写回旧 `seed_support -> train_mask -> target_depth` 链路；
+- 已完成 `run_pseudo_refinement_v2.py` 最小接入：`signal_pipeline=brpo_v2` 与 `brpo_v2_raw / brpo_v2_cont / brpo_v2_depth / target_depth_for_refine_v2_brpo` 已能真实读取 `signal_v2` 产物；
+- 已完成 3-frame coverage eval + 3-frame StageA smoke：当前状态已经从“能独立产出 signal_v2”推进到“能接进 refinement 跑通 smoke”。
 
-一句话说：**先前 midpoint A.5 正向结论只对应旧口径/非严格顺序实验；严格 `midpoint8 + M5 + source-aware + StageA/A.5/B` 新执行已完成，结果为负：StageA replay 基本不变，A.5 明确退化，StageB120 进一步退化。**
+一句话说：**现在已经到“fusion / mask v2 / depth supervision v2 / refine consumer”四段都打通的状态；下一步不是再证明能不能接上，而是做一轮 legacy vs `signal_v2` 的 apples-to-apples short compare，并开始 local Gaussian gating。**
 
 ## 2. 数据结构
 
@@ -106,7 +108,7 @@ A.5 midpoint 扩展实验使用：
 <run_root>/internal_prepare/re10k1__internal_afteropt__midpoint_proto_v1/
 ```
 
-说明：该 midpoint 版采用 `kf-gap midpoint` 选帧（8帧：17/51/86/121/156/190/225/260）；由于当前环境中 `brpo_build_mask_from_internal_cache.py` 依赖的 MASt3R 加载报错（`load_model_as_safetensor`），本次 A.5 先使用 fused legacy mask 路径完成对照。
+说明：该 midpoint 版采用 `kf-gap midpoint` 选帧（8帧：17/51/86/121/156/190/225/260）；由于当前环境中 `brpo_build_mask_from_internal_cache.py` 依赖的 MASt3R 加载报错（`load_model_as_safetensor`），此前 A.5 先使用 fused legacy mask 路径完成对照。当前代码状态已前移三步：1. `prepare_stage1_difix_dataset_s3po_internal.py::stage_fusion()` 已输出 BRPO-style `target ↔ reference overlap confidence` 融合结果；2. 新增 `signal_v2/` 路径可独立产出 fused RGB mask v2 与 depth supervision v2，且不与 legacy `verify / pack` 混写；3. `run_pseudo_refinement_v2.py` 已新增 `signal_pipeline=brpo_v2` 读取路径，并已在 3-frame StageA smoke 中真实读取 `signal_v2` 产物。
 
 核心结构：
 
@@ -165,11 +167,24 @@ samples/<frame_id>/
 └── source_meta / fusion_meta / verification_meta / depth_densify_meta
 ```
 
+同时，当前已新增一个**与旧链路隔离**的输出分支：
+
+```text
+signal_v2/frame_<frame_id>/
+├── raw_rgb_confidence_v2.npy
+├── raw_rgb_confidence_cont_v2.npy
+├── rgb_support_{left,right,both,single}_v2.npy
+├── target_depth_for_refine_v2_brpo.npy
+├── target_depth_source_map_v2_brpo.npy
+├── depth_supervision_mask_v2_brpo.npy
+├── rgb_mask_meta_v2.json
+└── depth_meta_v2_brpo.json
+```
+
 当前状态：
-- `train_mask` 与 `verified depth` 已明确拆层；
-- `target_depth_for_refine.npy` 表示 M3 blended depth target；
-- `target_depth_for_refine_v2.npy` 表示 M5 densified depth target；
-- `target_depth_dense_source_map.npy` 当前可区分：`seed / densified / render_fallback`。
+- 旧 `train_mask` 与 `verified depth` 仍保留，用于 legacy 路径；
+- 新 `raw_rgb_confidence_v2` 来自 fused RGB ↔ reference RGB correspondence，不依赖旧 depth seed；
+- 新 `target_depth_for_refine_v2_brpo` 只写入 `signal_v2/`，没有覆盖旧 `target_depth_for_refine{,_v2}`。
 
 ### 2.4 当前实验输出层
 
@@ -199,14 +214,15 @@ samples/<frame_id>/
 | 文件 | 职责 | 状态 | 备注 |
 |------|------|------|------|
 | `replay_internal_eval.py` | 基于 saved internal camera states 做 replay eval | ✅ 可用 | same-ply consistency 已验证通过 |
-| `prepare_stage1_difix_dataset_s3po_internal.py` | internal `select / difix / fusion / verify / pack` | ✅ 可用 | 当前已支持 M1/M2/M3/M5 sample 固化 |
-| `brpo_build_mask_from_internal_cache.py` | 从 internal cache 构建 verification / seed / train mask / projected depth | ✅ 可用 | 当前已支持 `branch_first|fused_first` 与 M3 depth 输出 |
+| `prepare_stage1_difix_dataset_s3po_internal.py` | internal `select / difix / fusion / verify / pack` | ✅ 可用 | `stage_fusion()` 已切到 BRPO-style overlap-confidence 口径；`verify / pack` 仍是旧 mask/depth 路径 |
+| `brpo_build_mask_from_internal_cache.py` | 从 internal cache 构建 verification / seed / train mask / projected depth | ✅ 可用 | 当前仍是旧 mask/depth 主线；尚未切到 fused-RGB-first 的 v2 mask 语义 |
 | `run_pseudo_refinement.py` | v1 standalone refine 入口 | ✅ 可用 | fixed-pose appearance tuning |
-| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 已支持 split+scaled abs prior（`lambda_abs_t/r + robust + scene_scale`）与在线 grad contrib logging |
+| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 已支持 split+scaled abs prior（`lambda_abs_t/r + robust + scene_scale`）；现已新增 `signal_pipeline=brpo_v2` 与 `brpo_v2_raw / brpo_v2_cont / brpo_v2_depth / target_depth_for_refine_v2_brpo` 读取 |
 | `analyze_m5_depth_signal.py` | M5-0：分析当前 depth signal 在 train-mask 内的结构 | ✅ 可用 | 不改训练，仅诊断 |
 | `materialize_m5_depth_targets.py` | M5-1：写出 `target_depth_for_refine_v2` 与 densify 产物 | ✅ 可用 | 当前 selected 参数已验证 |
 | `diagnose_stageA_gradients.py` | M5 diagnosis：检查 forward sensitivity 与 grad 连通性 | ✅ 可用 | 当前已发现 Stage A pose path 异常 |
 | `diagnose_stageA_loss_contrib.py` | A+B 诊断：单步按 loss 分支统计 rot/trans/exp 梯度贡献 | ✅ 可用 | 用于筛选 abs prior 网格与解释 tradeoff |
+| `build_brpo_v2_signal_from_internal_cache.py` | 从 fused RGB 生成隔离的 mask v2 + depth supervision v2 | ✅ 可用 | 输出到 `signal_v2/`，不改写 legacy `verify / pack` 产物 |
 
 ### 3.2 pseudo_branch
 
@@ -220,16 +236,17 @@ samples/<frame_id>/
 | `brpo_depth_target.py` | 组装 M3/M5 depth target | ✅ 可用 | 当前已支持 `v1 + v2` 双版本 |
 | `brpo_depth_densify.py` | M5：densify log-depth correction field | ✅ 可用 | 当前首版 patch-wise densify 已跑通 |
 | `pseudo_camera_state.py` / `pseudo_loss_v2.py` / `pseudo_refine_scheduler.py` | Stage A pseudo camera + loss + optimizer | ✅ 可用 | 已补 `apply_pose_residual_()`；已接入 absolute pose prior（`R0/T0`, `SE3_log`, `lambda_abs_pose`） |
-| `pseudo_fusion.py` | left/right repaired RGB 融合 | ✅ 已接入 | 当前已作为 fused-first pseudo source |
+| `pseudo_fusion.py` | left/right repaired RGB 融合 | ✅ 已接入 | 当前已改为 `target ↔ reference overlap confidence` 权重，并导出 `fusion_weight_* / overlap_conf_* / overlap_mask_*` |
+| `pseudo_branch/brpo_v2_signal/` | 隔离的 fused-RGB mask v2 + depth supervision v2 | ✅ 可用 | `rgb_mask_inference.py` 不依赖旧 depth seed；`depth_supervision_v2.py` 只写 `signal_v2/` |
 
 ### 3.3 下一阶段预计触达的代码
 
 | 文件 | 计划改动 |
 |------|----------|
-| `run_pseudo_refinement_v2.py` | 基于已落地的 split+scaled prior，补充 depth-heavy 分支对照与统一筛选汇总 |
-| `scripts/diagnose_stageA_loss_contrib.py` | 增加固定样本集与批量对照输出，便于横向比较不同权重组 |
-| `pseudo_loss_v2.py` | 按诊断结果微调 robust/scale 细节（必要时补 Huber δ 暴露） |
-| `docs/absolute_pose_prior.md` | 回填当前实测口径与推荐扫描策略 |
+| `run_pseudo_refinement_v2.py` | 已完成 `signal_pipeline=brpo_v2` 最小接入；下一步转为做 `legacy vs brpo_v2` apples-to-apples short compare |
+| `pseudo_cache / signal_v2` 桥接层 | 决定新 signal_v2 产物是单独读取还是链接进新的 pseudo_cache_v2 schema |
+| `pseudo_refine_scheduler.py` / local gating 路径 | 落地 pseudo-side local Gaussian gating / subset refine |
+| `docs/*` | 根据 signal_v2 实测更新 gate、默认阈值和接入边界 |
 
 ## 4. Pipeline
 
@@ -246,7 +263,7 @@ internal prepare: select
   ↓
 Difix (left/right)
   ↓
-fusion (target_rgb_fused)
+BRPO-style fusion v1
   ↓
 verification (branch_first | fused_first)
   ↓
@@ -260,6 +277,8 @@ seed_support
             ↓
 run_pseudo_refinement_v2.py Stage A consumer
 ```
+
+说明：当前主线已拆成新旧两条并行语义：1. `fusion` 已切到基于 pseudo render depth + ref rendered depth + camera states 的 `target ↔ reference overlap confidence`；2. `signal_v2` 已新增 fused RGB-first 的 mask/depth 分支，其中 mask 来自 fused RGB ↔ reference RGB correspondence，depth supervision 单独从 projected depth + fusion weight 生成；legacy `verification / train_mask / target_depth` 仍保留但不与其混写。
 
 ### 4.2 当前最关键实验闭环
 
@@ -350,6 +369,8 @@ Stage B                          -> 明确不建议现在进入 ❌
 | `depth-heavy top3(3x300) best_depth` | `lt1.0_lr0.1` | `loss_depth≈0.06814`，但 drift 最差 |
 | `下游价值验证（3组）` | `270帧 replay 几乎不变` | 三组 `PSNR/SSIM/LPIPS` 差异仅 1e-4~1e-6 量级 |
 
+补充：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_signal_v2_coverage_tmp/signal_v2/` 上 3 个有真实 DiFix 的 frame（10/50/120）平均为：`rgb support left≈1.56%`、`right≈1.20%`、`both≈0.93%`、`raw_rgb_confidence_nonzero≈1.82%`、`depth verified≈1.82%`、`both_weighted≈1.40%`、`left_only≈0.42%`、`render_fallback=0`、`mean_abs_rel_correction_verified≈3.15%`。这说明当前 v2 是一个更窄但更干净的 fused-RGB correspondence mask，depth supervision 也已严格跟着新 RGB 可信区和 projected depth 走。
+
 
 ### 5.5 当前固化口径（A+B 后）
 
@@ -388,26 +409,30 @@ Stage B                          -> 明确不建议现在进入 ❌
 - [x] grad contrib 汇总：完成 rot/trans 主导项统计
 - [x] Stage A 双口径固化：drift-prioritized / depth-prioritized
 - [x] value-eval：StageA三口径下游验证完成（270帧 replay）
+- [x] BRPO-style fusion v1：`pseudo_fusion.py` 与 `stage_fusion()` 已按 `target ↔ reference overlap confidence` 口径落地并完成 smoke
+- [x] BRPO-style signal v2 第一步：已新增 `build_brpo_v2_signal_from_internal_cache.py` 与 `pseudo_branch/brpo_v2_signal/`，可独立产出 fused RGB mask v2 + depth supervision v2
+- [x] `signal_v2` 3-frame coverage eval：frame `10 / 50 / 120` 平均 `raw/depth verified≈1.82%`，当前确认是“窄但干净”的 fused-RGB-first supervision
+- [x] refine consumer 最小接入完成：`run_pseudo_refinement_v2.py` 已支持 `signal_pipeline=brpo_v2`，并在 3-frame StageA 3-iter smoke 中产出 `history / states / refined_gaussians`
 
 ### 6.2 当前判断 ⚠️
 
-- [x] upstream depth coverage 已不再是唯一主矛盾：M5 已把 train-mask 内非 fallback 区域抬到约 `81%`
-- [x] M5-3 修复后，Stage A 已从“假优化”进入“弱有效”：depth 能降，但幅度小
-- [x] 现阶段核心结构问题是：`pose_reg` 约束 residual 而非累计 drift，导致 absolute prior 成为必要项
-- [x] M5-4 已证明 absolute prior 需要重标定：`0.1` 无感，`100` 能压 drift 但会压 depth
-- [x] depth-heavy 下 tradeoff 仍未解耦：best-depth 与 best-drift 组不重合
-- [x] 下游价值当前未成立：三组口径 replay 指标与 baseline 近似重合
+- [x] 当前已确认：新 `signal_v2` 中的 RGB mask 已不再依赖旧 depth seed / train_mask，而是来自 fused RGB ↔ reference RGB correspondence
+- [x] 新 `depth supervision v2` 已与旧 `target_depth_for_refine{,_v2}` 链路隔离，只写 `signal_v2/` 并通过 `fusion_weight + projected_depth + raw_rgb_confidence_v2` 生成
+- [x] 3-frame coverage eval 结果表明：当前 v2 mask 是一个更窄但更干净的 fused-RGB correspondence mask；`raw/depth verified` 平均约 `1.82%`，而不是再靠旧 `train_mask` 扩覆盖
+- [x] `run_pseudo_refinement_v2.py` 已真实读取 `signal_v2`：`signal_pipeline=brpo_v2`、`brpo_v2_raw`、`brpo_v2_depth` 与 `target_depth_for_refine_v2_brpo` 已在 3-frame StageA smoke 中跑通
+- [x] 因此当前状态已经不是“文件存在但没接上”，而是“fusion + mask v2 + depth supervision v2 + refine consumer”四段都已打通；下一步关键问题变成：这版窄覆盖到底值不值得，以及 local Gaussian gating 是否还需要补进来
 
 ### 6.3 当前进行中 ⚠️
 
-- [ ] 设计“扩大受影响帧范围”的 A/A.5 方案（当前仅3帧被更新）
-- [ ] 评估是否进入 A.5（xyz-only）以观察是否能带来可见下游变化
+- [ ] 做一轮 apples-to-apples short compare：`legacy` vs `signal_v2`，保持同一组 pseudo / 同一组 iter / 同一组 refine 超参
+- [ ] 设计 `signal_v2 -> pseudo_cache_v2 / sample loader` 的桥接方式，避免新旧 artifact 名字混用
+- [ ] 开始 local Gaussian gating / subset refine 的第一版实现与 smoke
 
 ### 6.4 下一阶段待办 ⏳
 
-- [ ] 产出 AB 阶段正式结论文档（含 6x80 + 3x300 表格与推荐参数）
-- [ ] 把 split+scaled abs prior 的默认执行口径写回 `absolute_pose_prior.md`
-- [ ] 在 Stage A 结论稳定前，不进入 Stage A.5 / Stage B 实现
+- [ ] 把 short compare 的结论固化成默认建议，回答 `brpo_v2_raw / brpo_v2_depth / target_depth_for_refine_v2_brpo` 相对 legacy 是否更稳
+- [ ] 根据 short compare 结果决定 depth supervision v2 是否需要再加 expand / fallback reweight
+- [ ] 在 local Gaussian gating 到位前，不直接把当前窄监督长跑扩展到 A.5 / StageB
 
 ### 6.5 当前明确不建议做的事 🚫
 

@@ -386,21 +386,9 @@ def fusion_frame_root(run_root: Path, frame_id: int) -> Path:
 
 
 def stage_fusion(args, run_root: Path):
-    import torch
-    from munch import munchify
-    from utils.config_utils import load_config
-    from utils.external_eval_utils import load_gaussians_from_ply
-    from pseudo_branch.brpo_reprojection_verify import render_depth_from_state
+    import numpy as np
+    from PIL import Image
     from pseudo_branch.pseudo_fusion import run_fusion_for_sample
-
-    internal_cache_root = Path(args.internal_cache_root)
-    manifest, states_by_id, _, _ = load_internal_context(internal_cache_root, args.stage_tag)
-
-    config = load_config(str(internal_cache_root.parent / 'config.yml'))
-    pipe = munchify(config['pipeline_params'])
-    stage_ply = internal_cache_root / args.stage_tag / 'point_cloud' / 'point_cloud.ply'
-    gaussians = load_gaussians_from_ply(config, str(stage_ply))
-    background = torch.tensor(manifest['background'], dtype=torch.float32, device='cuda')
 
     records = load_internal_records(run_root)
     fusion_root = default_fusion_root(run_root)
@@ -412,11 +400,8 @@ def stage_fusion(args, run_root: Path):
         ensure_dir(frame_root)
 
         render_rgb = Path(rec.render_rgb_path)
-        render_depth_path = Path(rec.render_depth_path)
         if not render_rgb.exists():
             raise FileNotFoundError(f"Missing render RGB for fusion: {render_rgb}")
-        if not render_depth_path.exists():
-            raise FileNotFoundError(f"Missing render depth for fusion: {render_depth_path}")
 
         left_fixed = resolve_fixed_path(args.left_fixed_root, rec.image_name)
         right_fixed = resolve_fixed_path(args.right_fixed_root, rec.image_name)
@@ -434,48 +419,31 @@ def stage_fusion(args, run_root: Path):
             target_right = render_rgb
             fusion_input_mode = "render_placeholder"
 
-        pseudo_state = states_by_id[int(rec.frame_id)]
-        left_ref_state = states_by_id[int(rec.left_ref_frame_id)]
-        right_ref_state = states_by_id[int(rec.right_ref_frame_id)]
-        render_depth = np.load(render_depth_path).astype(np.float32)
-        left_ref_depth = render_depth_from_state(gaussians, left_ref_state, pipe, background)
-        right_ref_depth = render_depth_from_state(gaussians, right_ref_state, pipe, background)
-
+        H, W = np.array(Image.open(render_rgb).convert('RGB')).shape[:2]
+        uniform_conf = np.ones((H, W), dtype=np.float32)
         stats, *_ = run_fusion_for_sample(
             render_rgb_path=str(render_rgb),
             target_rgb_left_path=str(target_left),
             target_rgb_right_path=str(target_right),
             depth_left=None,
-            conf_left=None,
+            conf_left=uniform_conf,
             depth_right=None,
-            conf_right=None,
-            render_depth=render_depth,
+            conf_right=uniform_conf,
+            render_depth=None,
             output_dir=str(frame_root),
-            pseudo_state=pseudo_state,
-            left_ref_state=left_ref_state,
-            right_ref_state=right_ref_state,
-            left_ref_depth=left_ref_depth,
-            right_ref_depth=right_ref_depth,
-            depth_consistency_tau=0.15,
-            translation_scale_tau=1.0,
-            overlap_valid_eps=1e-4,
+            use_depth_agreement=False,
         )
         meta_path = frame_root / 'fusion_meta.json'
         meta = load_json(meta_path) if meta_path.exists() else {}
         meta.update({
             'frame_id': int(rec.frame_id),
             'image_name': rec.image_name,
-            'fusion_mode': 'brpo_overlap_confidence_v1',
+            'fusion_mode': 'rgb_only_uniform_branch_confidence',
             'fusion_input_mode': fusion_input_mode,
             'render_rgb_path': str(render_rgb.resolve()),
-            'render_depth_path': str(render_depth_path.resolve()),
             'target_rgb_left_path': str(target_left.resolve()),
             'target_rgb_right_path': str(target_right.resolve()),
-            'left_ref_frame_id': int(rec.left_ref_frame_id),
-            'right_ref_frame_id': int(rec.right_ref_frame_id),
-            'left_ref_rgb_path': str(Path(left_ref_state['image_path']).resolve()),
-            'right_ref_rgb_path': str(Path(right_ref_state['image_path']).resolve()),
-            'stage_ply_path': str(stage_ply.resolve()),
+            'use_depth_agreement': False,
         })
         write_json(meta_path, meta)
         fusion_samples.append({
@@ -489,9 +457,9 @@ def stage_fusion(args, run_root: Path):
 
     write_json(run_root / 'manifests' / 'fusion_manifest.json', {
         'fusion_root': str(fusion_root.resolve()),
-        'fusion_mode': 'brpo_overlap_confidence_v1',
+        'fusion_mode': 'rgb_only_uniform_branch_confidence',
+        'use_depth_agreement': False,
         'target_rgb_source': args.target_rgb_source,
-        'stage_ply_path': str(stage_ply.resolve()),
         'num_records': len(records),
         'frame_ids': [r.frame_id for r in records],
         'samples': fusion_samples,
