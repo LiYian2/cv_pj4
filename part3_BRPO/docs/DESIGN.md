@@ -1,7 +1,7 @@
 # DESIGN.md - Part3 设计文档
 
 > 本文档记录**当前实际采用**的设计决策、接口定义与默认实验方案。
-> 最后更新：2026-04-16 01:49 CST
+> 最后更新：2026-04-16 13:56 CST
 
 ---
 
@@ -327,13 +327,15 @@ signal_v2/frame_<frame_id>/
 15. 这同时也说明：raw RGB support 图虽然看起来像点状/seed-like，但这并不自动意味着“必须先做 RGB densify”；至少在当前 `RGB-only v2 + legacy depth target` 路径上，这种稀疏高精度语义已经能够带来明显优于 legacy 的 replay。
 16. 因而如果后续真的要做“扩张”，更合理的对象应是受几何约束的 support/depth expansion，而不是对 `raw_rgb_confidence_v2` 直接做形态学式铺开。
 17. `P2-G` 已进一步把这条判断推到了 joint refine：固定 `signal-aware-8` 的 `StageB` real-branch short compare 中，`RGB-only v2 + gated_rgb0192` 依然优于本支路 ungated，并明显优于 legacy StageB；同时 `loss_real_last` 几乎不变，说明 real branch 没被 pseudo-side gating 明显伤到。
-18. 这意味着：当前主线已经不再是“要不要从 legacy 切到 v2”，而是“把 `RGB-only v2 + gated_rgb0192` 当作当前最优候选后，下一步是做更长验证，还是已经足以进入受控扩张阶段”。当前更稳妥的答案是：先做更长验证。
+18. `P2-H` 的 `StageB-120iter` verify 又把问题进一步收紧了：当前主候选虽然仍略优于同支路 ungated，但两条臂都已退回到低于 `after_opt` baseline、也低于各自 `StageA.5` handoff 起点的区间。
+19. 更关键的是：这次 regression 并不是因为 gating 失效；相反，`gated_rgb0192` 在 `120iter` 中依然有 `96/120` 的 rejection、持续拒掉 `225/260`，`grad_keep_ratio_xyz_mean≈0.729`，而 `loss_real_last` 与 pose aggregate 又与 ungated 基本同量级。
+20. 因而当前更合理的设计判断是：主要瓶颈已经从“signal gate 阈值是否合适”转到“StageB 后段训练动力学是否稳定”；也就是说，现在该优先修的是 `StageB schedule / objective balance`，而不是继续把问题往 raw RGB 稀疏或 support 扩张上解释。
 
 ### 6.3 下一步（当前真正优先级）
 
 - legacy `StageA.5` 的 threshold calibration 已完成，当前 legacy 侧只保留 `min_verified_ratio=0.02` 作为参考臂即可；
-- 当前更值得的主线是把 `RGB-only v2 + gated_rgb0192` 作为主候选，继续做更长一点的 `StageB` / 完整 schedule verify；
-- 在这条主线还没证明存在 coverage 瓶颈之前，仍不急着对 raw RGB mask 直接做 densify，也不急着上 `xyz+opacity`、soft gating 或 full SPGM。
+- `P2-H` 已经回答了“更长一点的 StageB verify 会发生什么”这个问题：当前主候选在 `20iter` 好、到 `120iter` 会 regression；因此下一步不再是笼统地继续加长 budget，而是转入 `StageB stabilization`；
+- 第一批最值得做的稳定化变量，是 `20iter` 之后的后段 `xyz lr` 降档与 `lambda_real : lambda_pseudo` 再平衡；在这之前，仍不急着对 raw RGB mask 直接做 densify，也不急着上 `xyz+opacity`、soft gating 或 full SPGM。
 
 ### 6.4 当前不建议做的事
 
@@ -345,7 +347,7 @@ signal_v2/frame_<frame_id>/
 
 当前可以把设计判断固定成一句话：
 
-**当前真正值得优先推进的，不是继续在 StageA-only 上比较 replay，也不是继续在 legacy `StageA.5` 上细磨 threshold，而是：把 `RGB-only v2 + gated_rgb0192` 作为当前主候选 refine 分支，先做更长一点的 joint-verify，再决定是否需要受几何约束的 support/depth expand；不要先去 densify raw RGB mask。**
+**当前真正值得优先推进的，不是继续在 StageA-only 上比较 replay，也不是继续在 legacy `StageA.5` 上细磨 threshold，而是：承认 `RGB-only v2 + gated_rgb0192` 虽然是当前最好的一条 refine 分支，但它在 `StageB-120iter` 还不稳定；因此下一步应优先做 `StageB stabilization`（回落窗口定位 + 后段调度），而不是先去 densify raw RGB mask。**
 
 
 ## 8. Internal cache -> StageA/A.5 -> StageB 当前方法与 pipeline（2026-04-13）

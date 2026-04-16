@@ -7,27 +7,26 @@
 
 如果用户让我回忆最近做了什么，默认按这个顺序：
 1. 先看本文件 `docs/hermes.md`
-2. 再看 `docs/P0_absprior_and_P1A_stageA_signal_compare_20260415.md`
-3. 再看 `docs/BRPO_absprior_compare_local_gating_execution_plan_20260415.md`
-4. 再看 `docs/STATUS.md`
-5. 再看 `docs/DESIGN.md`
-6. 再看 `docs/CHANGELOG.md`
+2. 再看 `docs/P2H_stageB_v2rgbonly_verify120_20260416.md`
+3. 再看 `docs/P2G_stageB_v2rgbonly_realbranch_compare_20260416.md`
+4. 再看 `docs/P2F_stageA5_v2rgbonly_gating_compare_20260416.md`
+5. 再看 `docs/STATUS.md`
+6. 再看 `docs/DESIGN.md`
+7. 再看 `docs/CHANGELOG.md`
 
-如果用户问“现在为什么不继续看 StageA replay”，先去看：
+如果用户问“为什么现在不继续看 StageA replay”，先看：
 - `docs/P0_absprior_and_P1A_stageA_signal_compare_20260415.md`
-- 里面已经明确写了：当前纯 `stage_mode=stageA` 不更新 Gaussian，replay-on-PLY 只是 identity sanity check。
+- 核心原因已经固定：当前纯 `stage_mode=stageA` 不更新 Gaussian，replay-on-PLY 只是 identity sanity check。
 
-## 2. 当前项目位置（压缩后最新状态）
+## 2. 当前项目位置（最新压缩状态）
 
-当前主线已经从“继续在旧 mask/depth 链路里叠规则”推进到更收敛的六步状态：
-1. abs prior 固定成可复用背景
-2. signal branch 完成最小必要比较
-3. P2 local Gaussian gating 第一版已接通
-4. 8-frame `StageA.5` gated vs ungated compare 已完成
-5. 带 real branch 的 `StageB` gated vs ungated compare 已完成
-6. legacy gate threshold 诊断 + calibration 已完成
-7. `RGB-only v2` 的 `StageA.5` short compare 已完成，当前主线已转向这条支路
-8. `RGB-only v2 + gated_rgb0192` 的 `StageB` real-branch short compare 已完成，并通过了 joint refine 短验证
+当前主线已经推进到这里：
+1. abs prior 已固定成可复用背景；
+2. signal branch 的最小必要 compare 已完成；
+3. local Gaussian gating 第一版已接通；
+4. `RGB-only v2` 已在 `StageA.5` 和 `StageB-20iter` 上优于 legacy；
+5. 但最新 `P2-H` 已确认：把当前 `StageB` 预算拉到 `120iter` 后，两条 v2 臂都会退回负区间；
+6. 所以下一个主问题已经不是“要不要切到 v2”，而是“怎么稳住 `StageB` 后段，而不是让 20iter 的正益在 120iter 被吃掉”。
 
 已经完成的关键节点：
 - `E1 / E1.5 / E2` 已完成，当前 pseudo selection default winner 仍是 `signal-aware-8 = [23, 57, 92, 127, 162, 196, 225, 260]`
@@ -36,130 +35,104 @@
 - `P0` split abs prior 标定已完成
 - `P1A` StageA-only 的 `legacy / v2-rgb-only / v2-full` compare 已完成
 - `P2` 第一版 local Gaussian gating 已完成代码接入与 smoke
-- `P2-B` 8-frame `StageA.5` 的 `legacy ungated vs gated` short compare 已完成
-- `P2-C` 带 real branch 的 `StageB ungated vs gated` short compare 已完成
-- `P2-D` 已确认 current threshold 在 legacy 上几乎是 no-op
-- `P2-E` 已完成 legacy `StageA.5` threshold calibration（`0.02 / 0.03`）
-- `P2-F` 已完成 `RGB-only v2` 的 `StageA.5` ungated vs branch-specific gated compare
-- `P2-G` 已完成 `RGB-only v2 + gated_rgb0192` 的 `StageB` real-branch short compare
-
-当前真正未完成、也是最高优先级的事：
-- 以 `RGB-only v2 + gated_rgb0192` 为主候选，做一轮更长一点的 `StageB` / 完整 schedule verify
-- 只有在更长验证明确暴露 coverage 瓶颈后，再分析是否需要受几何约束的 support/depth expand；当前不急着做 raw RGB densify
+- `P2-B / P2-C / P2-D / P2-E` 已完成，legacy 阈值诊断与 calibration 已基本收口
+- `P2-F` 已确认 `RGB-only v2` 在 `StageA.5` 上明显优于 legacy，且 `gated_rgb0192` 有小幅正增益
+- `P2-G` 已确认 `RGB-only v2 + gated_rgb0192` 在 `StageB-20iter` 上优于本支路 ungated，也优于 legacy
+- `P2-H` 已确认：到了 `StageB-120iter`，ungated / gated 两臂都低于 `after_opt` baseline，也低于各自 `StageA.5` handoff 起点；gating 仍然真实工作，但只能轻微减缓退化，不能阻止 regression
 
 ## 3. 当前最重要的结论
 
 ### 3.1 关于 abs prior
 
-当前可以先固定：
+当前先固定：
 - `lambda_abs_t = 3.0`
 - `lambda_abs_r = 0.1`
 - `abs_pose_robust = charbonnier`
 - `stageA_abs_pose_scale_source = render_depth_trainmask_median`
 
-原因不是它“最优”已经完全证明，而是：
-- 相比 noabs，它能显著收住 drift；
-- 相比更弱配置，它更稳定；
-- 相比更强配置，它没有明显多出来的收益；
-- 梯度量级上它已经进入有效区间，但还没压过 depth_total 一个数量级以上。
+它的角色是稳定可复用背景，不是当前主瓶颈。
 
-### 3.2 关于 signal 侧
+### 3.2 关于 signal / gating 主线
 
-当前 `mask / depth / confidence` pipeline 的角色，更像 signal gate，而不是会持续制造大量新增监督的主引擎。
-
-这一轮之后要记住五句话：
-- `v2 RGB-only` 不只是“StageA-only 看起来不坏”，而是已经在 `StageA.5` 和 `StageB` 上都明显优于 legacy；
+现在要记住六句话：
+- `v2 RGB-only` 已经证明自己比 legacy 更值得保留；
 - `full v2 depth` 当前仍然过窄；
-- `RGB-only v2 + gated_rgb0192` 已经成为当前主候选 refine 分支；
-- raw RGB support 虽然看起来点状，但当前证据还不支持立刻去 densify raw RGB mask；
-- 所以下一步更该做的是更长一点的 joint verify，而不是继续围着 full-v2 depth 或 raw RGB densify 打转。
+- `RGB-only v2 + gated_rgb0192` 仍然是当前最好的一条 refine 分支；
+- 但它目前只证明了 `StageA.5` 和 `StageB-20iter` 的短程优势；
+- `P2-H` 已经说明它还不是稳定的中预算 `StageB` 主线；
+- 所以下一步该做的是 `StageB stabilization`，不是 raw RGB densify。
 
 目前最关键的 grounded 对照：
-- legacy `StageA.5` ungated replay：`PSNR ≈ 23.8518 / SSIM ≈ 0.87064 / LPIPS ≈ 0.08093`
-- `RGB-only v2` `StageA.5` ungated replay：`PSNR ≈ 23.9232 / SSIM ≈ 0.87228 / LPIPS ≈ 0.07995`
 - `RGB-only v2` `StageA.5` gated_rgb0192 replay：`PSNR ≈ 23.9248 / SSIM ≈ 0.87232 / LPIPS ≈ 0.07993`
-- `RGB-only v2` `StageB` ungated replay：`PSNR ≈ 23.9945 / SSIM ≈ 0.87287 / LPIPS ≈ 0.08038`
-- `RGB-only v2` `StageB` gated_rgb0192 replay：`PSNR ≈ 24.0106 / SSIM ≈ 0.87302 / LPIPS ≈ 0.08036`
+- `RGB-only v2` `StageB-20iter` gated_rgb0192 replay：`PSNR ≈ 24.0106 / SSIM ≈ 0.87302 / LPIPS ≈ 0.08036`
+- `RGB-only v2` `StageB-120iter` gated_rgb0192 replay：`PSNR ≈ 23.9146 / SSIM ≈ 0.86873 / LPIPS ≈ 0.08485`
+
+这三行本身就说明了当前问题：`StageB` 的短程 gain 没有自然延续到 `120iter`。
 
 ### 3.3 关于 replay / compare 口径
 
 这是压缩后最容易丢的关键信息，必须记住：
+- 当前纯 `stage_mode=stageA` 不更新 Gaussian；
+- `BASE_PLY` 与 `stageA_noabs_80 / stageA_abs_t3_r0p1_80` 的 `refined_gaussians.ply` 已验证同 hash；
+- 所以 `StageA-only replay` 不是判优指标；
+- 真正有区分度的 replay compare 只放在会更新 Gaussian 的 `StageA.5 / StageB`。
 
-当前纯 `stage_mode=stageA` 不更新 Gaussian。
+### 3.4 关于当前真正的瓶颈
 
-已经实测验证：
-- `BASE_PLY`
-- `stageA_noabs_80/refined_gaussians.ply`
-- `stageA_abs_t3_r0p1_80/refined_gaussians.ply`
+`P2-H` 之后，当前最该优先锁定的瓶颈已经不是：
+- legacy threshold 太松；
+- raw RGB mask 太稀；
+- full-v2 depth 还没再调够。
 
-三者 `sha256sum` 完全一致。
+当前更像是：
+- gating 机制已经真实工作；
+- real branch 没被明显误伤；
+- 但现有 `StageB` 后段训练动力学会把 `20iter` 的正益吃掉。
 
-因此：
-- `StageA-only replay-on-PLY` 不是判优指标；
-- 它只能说明“没有把 PLY 写坏”；
-- 如果用户问“为什么现在不看 replay delta”，就直接回答：因为当前这个 stage 根本没改 Gaussian，replay 对 PLY 没有区分度。
-
-### 3.4 关于 map-side refine
-
-当前最值得优先做的 map-side 改动不是 full SPGM，而是 `local Gaussian gating / 子集 refine`。
-
-原因已经进一步明确：
-- abs prior 已经够用，不是当前第一瓶颈；
-- full-v2 depth 也已证明太窄；
-- StageA-only replay 又没有信息量；
-- 所以真正该解决的是：`weak local supervision -> global Gaussian perturbation`
+所以优先级已经收束为：`StageB stabilization > support/depth expand > raw RGB densify`。
 
 ## 4. 当前必看的专项文档
 
-### 第一优先级：这次必须先看的
-1. `docs/P0_absprior_and_P1A_stageA_signal_compare_20260415.md`
-   - 用途：看 P0 和 P1A 的真实 grounded 结果
-   - 重点：abs prior 为什么固定成 `3.0 / 0.1`，以及为什么 StageA-only replay 无信息
-2. `docs/BRPO_absprior_compare_local_gating_execution_plan_20260415.md`
-   - 用途：看当前总执行方案
-   - 重点：后续顺序固定为 `P0 -> P1 -> P2`，且现在应直接进入 `P2`
+### 第一优先级
+1. `docs/P2H_stageB_v2rgbonly_verify120_20260416.md`
+   - 用途：看最新 grounded 结论
+   - 重点：为什么当前主候选虽然在 20iter 是正向的，但到 120iter 还会 regression
+2. `docs/P2G_stageB_v2rgbonly_realbranch_compare_20260416.md`
+   - 用途：看当前主候选是怎么从 short compare 里站出来的
+3. `docs/P2F_stageA5_v2rgbonly_gating_compare_20260416.md`
+   - 用途：看为什么 `RGB-only v2` 比 legacy 更值得保留
 
-### 第二优先级：实现与设计背景
-1. `docs/BRPO_fusion_mask_spgm_subset_refine.md`
-   - 用途：看为什么当前应该优先 local gating，而不是先上 full SPGM
-2. `docs/STATUS.md`
-   - 用途：看当前状态与实验根
-3. `docs/DESIGN.md`
-   - 用途：看为什么“StageA-only replay 无信息”已经变成设计结论，而不是临时口头判断
-4. `docs/CHANGELOG.md`
-   - 用途：看 2026-04-15 ~ 2026-04-16 这轮真实做过的工程与实验更新
+### 第二优先级
+1. `docs/STATUS.md`
+2. `docs/DESIGN.md`
+3. `docs/CHANGELOG.md`
+4. `docs/BRPO_absprior_compare_local_gating_execution_plan_20260415.md`
 
 ## 5. 当前回答用户时的推荐口径
 
 如果用户问“现在结论是什么”，优先回答：
-- abs prior 先固定 `lambda_abs_t=3.0`、`lambda_abs_r=0.1`
-- `RGB-only v2 + gated_rgb0192` 已经在 `StageA.5` 和 `StageB` 两层都优于 legacy，可作为当前主候选 refine 分支
-- `full v2 depth` 当前仍过窄
-- 当前纯 `StageA` 不改 Gaussian，所以 replay 不是有效判优指标
-- 下一步更该做的是围绕当前主候选做更长一点的 joint verify，而不是先做 raw RGB densify
-
-如果用户问“为什么不继续做 StageA compare”，优先回答：
-- 因为当前 StageA 只改 pseudo camera / exposure，不改 Gaussian
-- replay-on-PLY 在这个 stage 上没有区分度
-- 后续真正依赖 replay 的 compare 要放到 `StageA.5` 或其他会更新 Gaussian 的 stage
+- `RGB-only v2 + gated_rgb0192` 仍然是当前最好的一条 refine 分支；
+- 但 `P2-H` 已经确认：它在 `StageB-120iter` 上还不稳；
+- gating 机制是真实工作的，real branch 也没明显被伤到；
+- 所以当前主问题不是“gate 没生效”，而是 `StageB` 后段稳定性；
+- 下一步不该先去 raw RGB densify，而该做 `StageB stabilization`。
 
 如果用户问“下一步具体做什么”，优先回答：
-1. 以 `RGB-only v2 + gated_rgb0192` 为当前主候选，做更长一点的 `StageB` / 完整 schedule verify
-2. 如果更长验证仍然成立，再决定是否需要更大预算或更完整 joint schedule
-3. 只有在这条线明确暴露 coverage 瓶颈时，再考虑受几何约束的 support/depth expand；先不要直接 densify raw RGB mask
+1. 围绕 gated 主候选做 `StageB` 回落窗口定位（至少 `20 / 40 / 80 / 120`）
+2. 以 `20iter` 之后的后段 `lr / lambda_real : lambda_pseudo` 调度为第一批稳定化变量
+3. 只有在 `StageB stabilization` 仍然稳定失败时，再讨论 early-stop 是否成为默认策略
+4. 在这之前不要先做 raw RGB densify
 
 ## 6. 下次回来先检查什么
 
-1. `RGB-only v2` 的最新主对照报告：`docs/P2F_stageA5_v2rgbonly_gating_compare_20260416.md`
-2. `RGB-only v2` 的最新 `StageB` real-branch 报告：`docs/P2G_stageB_v2rgbonly_realbranch_compare_20260416.md`
-3. 是否已经补做更长一点的 `StageB` / 完整 schedule verify
-4. 若要继续做 gating，是否仍围绕 `min_rgb_mask_ratio` 做 branch-specific 微调，而不是回 legacy 侧细扫
-5. 若讨论 densify，先确认讨论对象是不是 `raw_rgb_confidence_v2` 本身；默认更应考虑受几何约束的 support/depth expand
-6. 实验输出默认是否已切到 `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments`
+1. `docs/P2H_stageB_v2rgbonly_verify120_20260416.md`
+2. `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_p2h_stageB_v2rgbonly_verify120_e1/summary.json`
+3. 是否已经开始做 `StageB stabilization` 的窗口定位或后段 schedule compare
+4. 如果要讨论 support/densify，先确认是不是在 `StageB stabilization` 明确失败之后才谈
 
 ## 7. 给下一个 Hermes 的一句话
 
-现在不要再把主要注意力放在 full-v2 depth 的细调上，也不要再把 StageA-only replay 当成有效指标。legacy 侧的 gate 诊断和 calibration 已经做完，`RGB-only v2 + gated_rgb0192` 也已经通过了 `StageB` real-branch 短验证；下一步应直接做更长一点的 joint verify，确认它是不是稳定主线，而不是先做 raw RGB densify。
+不要再把下一步表述成“先做更长一点的 StageB verify”。这件事已经由 `P2-H` 回答了：当前 `RGB-only v2 + gated_rgb0192` 在 `20iter` 好、到 `120iter` 会回落。现在真正该做的是 `StageB stabilization`（窗口定位 + 后段调度），而不是先去 densify raw RGB mask。
 
 ## 8. 云服务器环境信息（固定配置）
 
@@ -193,4 +166,4 @@ ssh Group8DDY "cd /home/bzhang512/CV_Project/part3_BRPO && export PYTHONPATH=/ho
 ### 注意事项
 - SSH alias 必须用 `Group8DDY`（不是 `group8ddy`）
 - 远端执行必须显式设置 `PYTHONPATH`
-- 当前磁盘很紧：`/` 也偏满，`/data` 已满；新实验默认写 `/data2`，不要再往 `/data` 或低收益的大目录复制上堆东西
+- 当前 `/` 盘仍很紧，`/data` 已满；新实验默认写 `/data2`，文档修改也尽量保持轻量，不要做低收益复制

@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-16 01:49 CST
+> 更新时间：2026-04-16 13:56 CST
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -60,9 +60,10 @@
 - 已完成 `P2-E`：legacy `StageA.5` threshold calibration（`min_verified_ratio=0.02 / 0.03`）已把 gate 拉进真实 reject 区，但 replay 提升仍然极弱；当前若只保留一个 calibrated legacy gate 参考，`vr=0.02` 比 `vr=0.03` 更合适；
 - 已完成 `P2-F`：`RGB-only v2` 的 `StageA.5` ungated vs branch-specific gated（`min_rgb_mask_ratio=0.0192`）short compare 已跑完，结果表明这条支路在 `StageA.5` replay 上明显强于 legacy，而且 gating 还能带来小幅正增益；
 - 已完成 `P2-G`：固定 `signal-aware-8` 的 `StageB` real-branch short compare 已跑完，结果表明 `RGB-only v2 + gated_rgb0192` 在 joint refine 下仍然明显优于 legacy，也优于同支路 ungated；
-- 因而当前新的判断是：`RGB-only v2 + gated_rgb0192` 已经可以提升为当前主候选 refine 分支；下一步更该做的是更长一点的 `StageB` / 完整 schedule verify，而不是先做 raw RGB densify。
+- 已完成 `P2-H`：在完全复用 `P2-G` 协议、仅把 `stageB_iters` 提到 `120` 的 verify 中，`ungated / gated` 两臂都退回到低于 `after_opt` baseline、也低于各自 `StageA.5` handoff 起点的区间；gating 仍然真实工作、也没有明显伤到 real branch，但只能轻微减缓退化；
+- 因而当前新的判断是：`RGB-only v2 + gated_rgb0192` 仍是当前最好的一条 refine 分支，但还不能视为已稳定的中预算 `StageB` 主线；下一步应转向 `StageB stabilization`（窗口定位 + 后段调度），而不是先做 raw RGB densify 或 support/depth expand。
 
-一句话说：**现在已经不是“要不要从 legacy 切到 v2”的问题，而是：`RGB-only v2 + gated_rgb0192` 已经在 `StageA.5` 和 `StageB` 两层都站住了；当前更合理的下一步是做更长一点的验证来确认它是不是稳定主线，而不是急着做 raw RGB densify。**
+一句话说：**现在已经不是“要不要从 legacy 切到 v2”的问题，而是：`RGB-only v2 + gated_rgb0192` 虽然在 `StageA.5` 和 `StageB-20iter` 上成立，但到 `StageB-120iter` 还会 regression；当前更合理的下一步是稳住 `StageB` 后段，而不是急着做 raw RGB densify。**
 
 ## 2. 数据结构
 
@@ -439,7 +440,8 @@ Stage B                          -> 明确不建议现在进入 ❌
 - [x] 当前已完成 `P2-F`：`RGB-only v2` 的 `StageA.5` ungated vs gated short compare 已表明，这条支路在自然 `StageA→A.5` handoff 下明显优于 legacy；branch-specific gating（`min_rgb_mask_ratio=0.0192`）会稳定拒掉 `225/260` 两档弱 pseudo，并带来小幅 replay 正增益
 - [x] 当前对 densify 的判断也更清楚了：raw RGB mask 虽然看起来点状，但它并没有阻止 `RGB-only v2` 在 `StageA.5` 上明显优于 legacy；因此现在不应急着对 raw RGB mask 做 densify，若后续需要扩张，更应考虑受几何约束的 support/depth expand
 - [x] 当前已完成 `P2-G`：固定 `signal-aware-8` 的 `StageB` real-branch short compare 已表明，`RGB-only v2 + gated_rgb0192` 在 StageB 下也优于本支路 ungated（`+0.0161 PSNR / +0.000147 SSIM / -2.16e-05 LPIPS`），并且明显优于 legacy StageB；real branch 未被明显误伤
-- [x] 当前新的判断是：`RGB-only v2 + gated_rgb0192` 已可提升为当前主候选 refine 分支；下一步应做更长一点的 StageB / 完整 schedule verify，而不是先做 raw RGB densify
+- [x] 当前已完成 `P2-H`：`StageB-120iter` verify 已表明，当前主候选虽然仍略优于同支路 ungated（`+0.00421 PSNR / +7.77e-05 SSIM`），但两臂都已低于 `after_opt` baseline，也低于各自 `StageA.5` handoff 起点；gating 机制仍然真实工作（`96/120` iter rejection，拒绝 `225/260`），但不足以阻止中预算 regression
+- [x] 当前新的判断是：当前主问题已经从“是否继续做更长一点的 verify”切换成“如何稳住 `StageB` 后段”；下一步应转向 `StageB stabilization`（窗口定位 + 后段 `lr / lambda_real:lambda_pseudo` 调度），而不是先做 raw RGB densify
 
 ### 6.3 当前进行中 ⚠️
 
@@ -449,14 +451,15 @@ Stage B                          -> 明确不建议现在进入 ❌
 - [x] 完成 legacy `StageA.5` 第一轮 threshold calibration short compare（`min_verified_ratio=0.02 / 0.03`），确认 gate 已进入真实 reject 区
 - [x] 完成 `RGB-only v2` `StageA.5` ungated vs branch-specific gated compare，并确认这条支路比 legacy 更值得保留
 - [x] 完成 `RGB-only v2` `StageB` real-branch short compare，并确认当前主候选已延续到 joint refine
-- [ ] 继续围绕 `RGB-only v2 + gated_rgb0192` 做更长一点的 StageB / 完整 schedule verify
-- [ ] 若后续继续扩展，再决定是否补 `xyz+opacity`、soft gating 与更重的 SPGM
+- [x] 完成 `RGB-only v2 + gated_rgb0192` 的 `StageB-120iter` verify，并确认 gating 机制仍真实工作，但 20iter 的正益不能自然延续到 120iter
+- [ ] 围绕 `RGB-only v2 + gated_rgb0192` 做 `StageB stabilization`：先定位 `20 -> 120` 的回落窗口，再做后段 `lr / lambda_real:lambda_pseudo` 调度验证
+- [ ] 若后续稳定化仍失败，再决定是否把 early-stop、`xyz+opacity`、soft gating 或更重的 SPGM 提上日程
 
 ### 6.4 下一阶段待办 ⏳
 
-- [ ] 以 `RGB-only v2 + gated_rgb0192` 为当前主候选，补一轮更长一点的 `StageB` / 完整 schedule verify
-- [ ] 若继续做 gating compare，优先围绕 `RGB-only v2` 微调 branch-specific threshold，不再回 legacy 侧高密度细扫
-- [ ] 只有在更长验证明确暴露 coverage 瓶颈后，再讨论受几何约束的 support/depth expand；先不做 raw RGB densify
+- [ ] 围绕 `RGB-only v2 + gated_rgb0192` 做 `StageB stabilization`：优先补 `20 / 40 / 80 / 120` 回落窗口定位，并扫描 `20iter` 之后的后段调度
+- [ ] 第一批稳定化变量优先选 `xyz lr` 降档与 `lambda_real : lambda_pseudo` 再平衡，不先回 legacy 侧高密度细扫 threshold
+- [ ] 只有在 `StageB stabilization` 仍明确失败后，再讨论 early-stop 默认化或受几何约束的 support/depth expand；先不做 raw RGB densify
 
 ### 6.5 当前明确不建议做的事 🚫
 

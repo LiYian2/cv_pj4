@@ -5,6 +5,40 @@
 
 ---
 
+## 2026-04-16
+
+### P2-H：RGB-only v2 `StageB-120iter` verify 完成
+
+运行根：
+- `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_p2h_stageB_v2rgbonly_verify120_e1`
+
+新增文档：
+- `docs/P2H_stageB_v2rgbonly_verify120_20260416.md`
+
+协议：
+1. 完全复用 `P2-G` 的 `RGB-only v2 StageB` 协议；
+2. 只把 `stageB_iters` 从 `20` 提到 `120`；
+3. 仍从 `P2-F` 的两条 `StageA.5` handoff（ungated / gated_rgb0192）起跑；
+4. 继续保持 `xyz-only`、`lambda_real=lambda_pseudo=1.0`、`num_real_views=2`、`num_pseudo_views=4`。
+
+关键结果：
+- `after_opt baseline`: `23.94891 / 0.87349 / 0.07878`
+- `ungated_120`: `23.91042 / 0.86866 / 0.08485`
+- `gated_rgb0192_120`: `23.91463 / 0.86873 / 0.08485`
+- `gated - ungated`: `+0.00421 PSNR / +7.77e-05 SSIM / +7.22e-07 LPIPS`
+
+机制层结论：
+- gating 这次不是 no-op：`gated_rgb0192` 在 `120iter` 中有 `96/120` iter rejection，累计拒绝 `116` 次 sample eval，持续拒掉 `225 / 260`；
+- `grad_keep_ratio_xyz_mean≈0.729`，说明 pseudo-side Gaussian 更新范围仍在被真实裁剪；
+- `loss_real_last` 与 pose aggregate 和 ungated 基本同量级，说明 real branch 依旧没有被明显误伤。
+
+新的项目判断：
+- 当前主候选仍然是 `RGB-only v2 + gated_rgb0192`，但它还不能视为已经稳定的中预算 `StageB` 主线；
+- `P2-H` 已把问题从“还要不要继续做更长一点的 verify”收束成“如何稳住 `StageB` 后段”；
+- 因此下一步优先级应切到 `StageB stabilization`（回落窗口定位 + 后段 `lr / lambda_real:lambda_pseudo` 调度），而不是先做 raw RGB densify 或 support/depth expand。
+
+---
+
 ## 2026-04-15
 
 ### Fusion：BRPO-style `target ↔ reference overlap confidence` 第一版落地
