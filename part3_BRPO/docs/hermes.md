@@ -1,117 +1,165 @@
 # hermes.md
 
-> 用途：给后续 Hermes 自己看的快速回忆文档。对话断了、上下文丢了、或者用户直接让我“先回忆一下”时，先看这份，再按这里给出的文档路径继续展开。
+> 用途：给后续 Hermes 自己看的快速回忆文档。对话断了、上下文丢了、或者用户让我“先回忆一下”时，先看这份，再按这里给出的文档路径继续展开。
 > 维护原则：轻量覆盖更新，不做第二份 changelog，只保留当前最该知道的状态、文档入口和下一步重点。
 
 ## 1. 现在先怎么用这份文档
 
 如果用户让我回忆最近做了什么，默认按这个顺序：
 1. 先看本文件 `docs/hermes.md`
-2. 再看 `docs/STATUS.md`
-3. 再看 `docs/DESIGN.md`
-4. 再看 `docs/CHANGELOG.md`
-5. 如果当前问题是“fusion / mask / depth / refine 下一步怎么改”，优先看这两份新方案：
-   - `docs/BRPO_fusion_rgb_mask_depth_v2_engineering_plan_20260415.md`
-   - `docs/BRPO_local_gaussian_gating_engineering_plan_20260415.md`
+2. 再看 `docs/P0_absprior_and_P1A_stageA_signal_compare_20260415.md`
+3. 再看 `docs/BRPO_absprior_compare_local_gating_execution_plan_20260415.md`
+4. 再看 `docs/STATUS.md`
+5. 再看 `docs/DESIGN.md`
+6. 再看 `docs/CHANGELOG.md`
 
-如果用户问“你记不记得上次对 BRPO 差异的判断”，不要先翻聊天记录，先看：
-1. `docs/BRPO_fusion_mask_spgm_subset_refine.md`
-2. 再看这次落地方案文档
+如果用户问“现在为什么不继续看 StageA replay”，先去看：
+- `docs/P0_absprior_and_P1A_stageA_signal_compare_20260415.md`
+- 里面已经明确写了：当前纯 `stage_mode=stageA` 不更新 Gaussian，replay-on-PLY 只是 identity sanity check。
 
-## 2. 当前项目位置（最新人工摘要）
+## 2. 当前项目位置（压缩后最新状态）
 
-当前主线已经从“继续在旧 mask/depth 链路上调参”切到“两条明确的新改造线”：
-1. BRPO-style fusion + RGB mask / depth supervision v2
-2. local Gaussian gating / 子集 refine
+当前主线已经从“继续在旧 mask/depth 链路里叠规则”推进到更收敛的六步状态：
+1. abs prior 固定成可复用背景
+2. signal branch 完成最小必要比较
+3. P2 local Gaussian gating 第一版已接通
+4. 8-frame `StageA.5` gated vs ungated compare 已完成
+5. 带 real branch 的 `StageB` gated vs ungated compare 已完成
+6. legacy gate threshold 诊断 + calibration 已完成
+7. `RGB-only v2` 的 `StageA.5` short compare 已完成，当前主线已转向这条支路
+8. `RGB-only v2 + gated_rgb0192` 的 `StageB` real-branch short compare 已完成，并通过了 joint refine 短验证
 
-现在的关键判断不是“handeoff bug 有没有修掉”。那个问题已经修掉了，但修掉之后 pipeline 仍未转正。当前更深层的主矛盾已经收敛为：
-- `signal weak`
-- `supervision scope / optimization scope mismatch`
+已经完成的关键节点：
+- `E1 / E1.5 / E2` 已完成，当前 pseudo selection default winner 仍是 `signal-aware-8 = [23, 57, 92, 127, 162, 196, 225, 260]`
+- canonical E1 root 上的新版 fusion 已补齐
+- canonical E1 root 上的 8-frame `signal_v2` 已生成完成
+- `P0` split abs prior 标定已完成
+- `P1A` StageA-only 的 `legacy / v2-rgb-only / v2-full` compare 已完成
+- `P2` 第一版 local Gaussian gating 已完成代码接入与 smoke
+- `P2-B` 8-frame `StageA.5` 的 `legacy ungated vs gated` short compare 已完成
+- `P2-C` 带 real branch 的 `StageB ungated vs gated` short compare 已完成
+- `P2-D` 已确认 current threshold 在 legacy 上几乎是 no-op
+- `P2-E` 已完成 legacy `StageA.5` threshold calibration（`0.02 / 0.03`）
+- `P2-F` 已完成 `RGB-only v2` 的 `StageA.5` ungated vs branch-specific gated compare
+- `P2-G` 已完成 `RGB-only v2 + gated_rgb0192` 的 `StageB` real-branch short compare
 
-更具体地说：
-1. 当前有效几何监督仍偏稀、偏弱；
-2. 当前 fusion 和 mask 的主语义仍不够接近 BRPO；
-3. 当前 A.5 / StageB 仍让弱局部监督去推动过大的全局 Gaussian 更新范围。
+当前真正未完成、也是最高优先级的事：
+- 以 `RGB-only v2 + gated_rgb0192` 为主候选，做一轮更长一点的 `StageB` / 完整 schedule verify
+- 只有在更长验证明确暴露 coverage 瓶颈后，再分析是否需要受几何约束的 support/depth expand；当前不急着做 raw RGB densify
 
 ## 3. 当前最重要的结论
 
-### 3.1 关于 signal 侧
+### 3.1 关于 abs prior
 
-当前 `mask / depth / confidence` pipeline 不是完全错误，但它作为主增益来源已经很接近见顶。
-E1 `signal-aware-8` 是当前 default winner；E2 已说明“增加 pseudo 数量”不能替代“提高 winner 质量”。
+当前可以先固定：
+- `lambda_abs_t = 3.0`
+- `lambda_abs_r = 0.1`
+- `abs_pose_robust = charbonnier`
+- `stageA_abs_pose_scale_source = render_depth_trainmask_median`
 
-因此现在真正值得继续推进的，不是再在旧 `seed_support -> train_mask -> target_depth_for_refine/v2` 路径上叠更多小补丁，而是：
-- 把 fusion 改回 target↔reference overlap confidence 主语义；
-- 把 RGB mask 和 depth supervision 彻底解耦；
-- 建一条与旧链路隔离的 v2 signal path。
+原因不是它“最优”已经完全证明，而是：
+- 相比 noabs，它能显著收住 drift；
+- 相比更弱配置，它更稳定；
+- 相比更强配置，它没有明显多出来的收益；
+- 梯度量级上它已经进入有效区间，但还没压过 depth_total 一个数量级以上。
 
-### 3.2 关于 map-side refine
+### 3.2 关于 signal 侧
 
-当前最值得优先做的 map-side 改动不是 full SPGM，而是 local Gaussian gating / 子集 refine。
-原因很直接：当前真正的结构问题是“弱局部监督在推动全局 Gaussian `xyz/opacity`”。
+当前 `mask / depth / confidence` pipeline 的角色，更像 signal gate，而不是会持续制造大量新增监督的主引擎。
 
-所以后续默认判断应是：
-- 先做 local gating，让 pseudo branch 只更新可见且过 gate 的 Gaussian 子集；
-- 再看 replay 是否止跌；
-- 再决定要不要继续往更重的 SPGM / management 方向走。
+这一轮之后要记住五句话：
+- `v2 RGB-only` 不只是“StageA-only 看起来不坏”，而是已经在 `StageA.5` 和 `StageB` 上都明显优于 legacy；
+- `full v2 depth` 当前仍然过窄；
+- `RGB-only v2 + gated_rgb0192` 已经成为当前主候选 refine 分支；
+- raw RGB support 虽然看起来点状，但当前证据还不支持立刻去 densify raw RGB mask；
+- 所以下一步更该做的是更长一点的 joint verify，而不是继续围着 full-v2 depth 或 raw RGB densify 打转。
+
+目前最关键的 grounded 对照：
+- legacy `StageA.5` ungated replay：`PSNR ≈ 23.8518 / SSIM ≈ 0.87064 / LPIPS ≈ 0.08093`
+- `RGB-only v2` `StageA.5` ungated replay：`PSNR ≈ 23.9232 / SSIM ≈ 0.87228 / LPIPS ≈ 0.07995`
+- `RGB-only v2` `StageA.5` gated_rgb0192 replay：`PSNR ≈ 23.9248 / SSIM ≈ 0.87232 / LPIPS ≈ 0.07993`
+- `RGB-only v2` `StageB` ungated replay：`PSNR ≈ 23.9945 / SSIM ≈ 0.87287 / LPIPS ≈ 0.08038`
+- `RGB-only v2` `StageB` gated_rgb0192 replay：`PSNR ≈ 24.0106 / SSIM ≈ 0.87302 / LPIPS ≈ 0.08036`
+
+### 3.3 关于 replay / compare 口径
+
+这是压缩后最容易丢的关键信息，必须记住：
+
+当前纯 `stage_mode=stageA` 不更新 Gaussian。
+
+已经实测验证：
+- `BASE_PLY`
+- `stageA_noabs_80/refined_gaussians.ply`
+- `stageA_abs_t3_r0p1_80/refined_gaussians.ply`
+
+三者 `sha256sum` 完全一致。
+
+因此：
+- `StageA-only replay-on-PLY` 不是判优指标；
+- 它只能说明“没有把 PLY 写坏”；
+- 如果用户问“为什么现在不看 replay delta”，就直接回答：因为当前这个 stage 根本没改 Gaussian，replay 对 PLY 没有区分度。
+
+### 3.4 关于 map-side refine
+
+当前最值得优先做的 map-side 改动不是 full SPGM，而是 `local Gaussian gating / 子集 refine`。
+
+原因已经进一步明确：
+- abs prior 已经够用，不是当前第一瓶颈；
+- full-v2 depth 也已证明太窄；
+- StageA-only replay 又没有信息量；
+- 所以真正该解决的是：`weak local supervision -> global Gaussian perturbation`
 
 ## 4. 当前必看的专项文档
 
-### 第一优先级：这次新写的两份工程落地方案
-1. `docs/BRPO_fusion_rgb_mask_depth_v2_engineering_plan_20260415.md`
-   - 用途：指导如何重写 fusion，并建立与旧 mask/depth 路径隔离的 v2 signal pipeline。
-   - 核心口径：`fusion 用 depth/geometry；mask 用 fused RGB correspondence；depth supervision 单独生成。`
-2. `docs/BRPO_local_gaussian_gating_engineering_plan_20260415.md`
-   - 用途：指导如何在 `run_pseudo_refinement_v2.py` 中落地 local Gaussian gating / subset refine。
-   - 核心口径：`pseudo branch 只更新 local visible subset，real branch 保留全局纠偏。`
+### 第一优先级：这次必须先看的
+1. `docs/P0_absprior_and_P1A_stageA_signal_compare_20260415.md`
+   - 用途：看 P0 和 P1A 的真实 grounded 结果
+   - 重点：abs prior 为什么固定成 `3.0 / 0.1`，以及为什么 StageA-only replay 无信息
+2. `docs/BRPO_absprior_compare_local_gating_execution_plan_20260415.md`
+   - 用途：看当前总执行方案
+   - 重点：后续顺序固定为 `P0 -> P1 -> P2`，且现在应直接进入 `P2`
 
-### 第二优先级：理论判断与现状回顾
+### 第二优先级：实现与设计背景
 1. `docs/BRPO_fusion_mask_spgm_subset_refine.md`
-   - 用途：看为什么当前应该优先做 fusion/mask 语义重排 + local gating，而不是直接上 full SPGM。
+   - 用途：看为什么当前应该优先 local gating，而不是先上 full SPGM
 2. `docs/STATUS.md`
-   - 用途：看当前状态、最近阶段推进结果。
+   - 用途：看当前状态与实验根
 3. `docs/DESIGN.md`
-   - 用途：看设计判断为何从“signal semantics”进一步收敛到“新版 fusion/mask + local gating”。
+   - 用途：看为什么“StageA-only replay 无信息”已经变成设计结论，而不是临时口头判断
 4. `docs/CHANGELOG.md`
-   - 用途：看具体实现与实验过程。
-5. `docs/SIGNAL_ENHANCEMENT.md`
-   - 用途：看 E1/E2 为什么收敛到 `signal-aware-8` 是当前 winner。
+   - 用途：看 2026-04-15 ~ 2026-04-16 这轮真实做过的工程与实验更新
 
 ## 5. 当前回答用户时的推荐口径
 
-如果用户问“现在最大的问题是什么”，优先回答：
-- 不是 handoff bug 了；
-- 当前主问题是 `signal weak + optimization scope too global`；
-- 其中 signal 侧最该改的是 fusion/mask/depth 的语义重排；
-- map-side 最该改的是 local Gaussian gating，而不是继续全局 refine。
+如果用户问“现在结论是什么”，优先回答：
+- abs prior 先固定 `lambda_abs_t=3.0`、`lambda_abs_r=0.1`
+- `RGB-only v2 + gated_rgb0192` 已经在 `StageA.5` 和 `StageB` 两层都优于 legacy，可作为当前主候选 refine 分支
+- `full v2 depth` 当前仍过窄
+- 当前纯 `StageA` 不改 Gaussian，所以 replay 不是有效判优指标
+- 下一步更该做的是围绕当前主候选做更长一点的 joint verify，而不是先做 raw RGB densify
 
-如果用户问“下一步该做什么”，优先回答：
-1. 写清楚并执行 BRPO-style fusion + RGB mask / depth supervision v2 的工程方案
-2. 写清楚并执行 local Gaussian gating / 子集 refine 的工程方案
-3. 用 E1 `signal-aware-8` 做短跑验证，不要默认退回 midpoint8
-4. 没证明新链路有效之前，不要继续在旧链路里高强度加复杂度
+如果用户问“为什么不继续做 StageA compare”，优先回答：
+- 因为当前 StageA 只改 pseudo camera / exposure，不改 Gaussian
+- replay-on-PLY 在这个 stage 上没有区分度
+- 后续真正依赖 replay 的 compare 要放到 `StageA.5` 或其他会更新 Gaussian 的 stage
+
+如果用户问“下一步具体做什么”，优先回答：
+1. 以 `RGB-only v2 + gated_rgb0192` 为当前主候选，做更长一点的 `StageB` / 完整 schedule verify
+2. 如果更长验证仍然成立，再决定是否需要更大预算或更完整 joint schedule
+3. 只有在这条线明确暴露 coverage 瓶颈时，再考虑受几何约束的 support/depth expand；先不要直接 densify raw RGB mask
 
 ## 6. 下次回来先检查什么
 
-1. 这两份新方案文档是否已经开始落地到代码：
-   - `BRPO_fusion_rgb_mask_depth_v2_engineering_plan_20260415.md`
-   - `BRPO_local_gaussian_gating_engineering_plan_20260415.md`
-2. `run_pseudo_refinement_v2.py` 是否已经新增：
-   - `signal_pipeline = brpo_v2`
-   - `pseudo_local_gating_*` CLI
-3. 是否已经新建隔离目录：
-   - `pseudo_branch/brpo_v2_signal/`
-   - `pseudo_branch/local_gating/`
-4. 是否已经在新的 pseudo cache / signal outputs 中把新旧 artifact 名字彻底隔开
-5. 是否已经用 E1 winner 做了至少一轮 2-frame 或 8-frame smoke / short compare
+1. `RGB-only v2` 的最新主对照报告：`docs/P2F_stageA5_v2rgbonly_gating_compare_20260416.md`
+2. `RGB-only v2` 的最新 `StageB` real-branch 报告：`docs/P2G_stageB_v2rgbonly_realbranch_compare_20260416.md`
+3. 是否已经补做更长一点的 `StageB` / 完整 schedule verify
+4. 若要继续做 gating，是否仍围绕 `min_rgb_mask_ratio` 做 branch-specific 微调，而不是回 legacy 侧细扫
+5. 若讨论 densify，先确认讨论对象是不是 `raw_rgb_confidence_v2` 本身；默认更应考虑受几何约束的 support/depth expand
+6. 实验输出默认是否已切到 `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments`
 
 ## 7. 给下一个 Hermes 的一句话
 
-现在不要再把注意力主要放在旧 `train_mask / target_depth_for_refine/v2` 路径里调阈值。当前最高优先级已经切到两份新工程方案：
-- `docs/BRPO_fusion_rgb_mask_depth_v2_engineering_plan_20260415.md`
-- `docs/BRPO_local_gaussian_gating_engineering_plan_20260415.md`
-
-前者负责把 signal 语义重排到更接近 BRPO；后者负责把 pseudo supervision 对 Gaussian 的作用范围收回来。默认从这两份文档开始恢复上下文，而不是再从旧阶段计划里找下一步。
+现在不要再把主要注意力放在 full-v2 depth 的细调上，也不要再把 StageA-only replay 当成有效指标。legacy 侧的 gate 诊断和 calibration 已经做完，`RGB-only v2 + gated_rgb0192` 也已经通过了 `StageB` real-branch 短验证；下一步应直接做更长一点的 joint verify，确认它是不是稳定主线，而不是先做 raw RGB densify。
 
 ## 8. 云服务器环境信息（固定配置）
 
@@ -134,7 +182,8 @@ difix 部分：
 
 ### 项目路径
 - Part3 BRPO root: `/home/bzhang512/CV_Project/part3_BRPO`
-- 实验输出: `/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments`
+- 实验输出默认优先: `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments`
+- 旧输出: `/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments`
 
 ### 执行模板
 ```bash
@@ -144,3 +193,4 @@ ssh Group8DDY "cd /home/bzhang512/CV_Project/part3_BRPO && export PYTHONPATH=/ho
 ### 注意事项
 - SSH alias 必须用 `Group8DDY`（不是 `group8ddy`）
 - 远端执行必须显式设置 `PYTHONPATH`
+- 当前磁盘很紧：`/` 也偏满，`/data` 已满；新实验默认写 `/data2`，不要再往 `/data` 或低收益的大目录复制上堆东西

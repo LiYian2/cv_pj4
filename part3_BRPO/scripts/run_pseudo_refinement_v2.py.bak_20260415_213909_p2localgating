@@ -30,13 +30,6 @@ from pseudo_branch.pseudo_camera_state import (
 from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
 from pseudo_branch.pseudo_refine_scheduler import StageAConfig, StageA5Config, build_stageA_optimizer, build_stageA5_optimizers
 from pseudo_branch.gaussian_param_groups import build_micro_gaussian_param_groups
-from pseudo_branch.local_gating import (
-    PseudoLocalGatingConfig,
-    evaluate_sampled_views_for_local_gating,
-    build_visibility_weight_map,
-    apply_gaussian_grad_mask,
-    build_iteration_gating_summary,
-)
 
 
 def load_v1_module():
@@ -102,14 +95,6 @@ def parse_args():
     p.add_argument('--stageA5_lr_opacity', type=float, default=5e-4)
     p.add_argument('--stageA5_disable_densify', action='store_true', default=True)
     p.add_argument('--stageA5_disable_prune', action='store_true', default=True)
-    p.add_argument('--pseudo_local_gating', choices=['off', 'hard_visible_union_signal', 'soft_visible_union_signal'], default='off')
-    p.add_argument('--pseudo_local_gating_params', choices=['xyz', 'xyz_opacity'], default='xyz')
-    p.add_argument('--pseudo_local_gating_min_verified_ratio', type=float, default=0.01)
-    p.add_argument('--pseudo_local_gating_min_rgb_mask_ratio', type=float, default=0.01)
-    p.add_argument('--pseudo_local_gating_max_fallback_ratio', type=float, default=0.995)
-    p.add_argument('--pseudo_local_gating_min_correction', type=float, default=0.0)
-    p.add_argument('--pseudo_local_gating_soft_power', type=float, default=1.0)
-    p.add_argument('--pseudo_local_gating_log_interval', type=int, default=20)
     p.add_argument('--stageB_iters', type=int, default=120)
     p.add_argument('--init_pseudo_camera_states_json', default=None, help='Optional pseudo_camera_states_*.json from a previous stage for sequential handoff')
     p.add_argument('--init_pseudo_reference_mode', choices=['keep', 'reset_to_loaded'], default='keep', help='Whether to keep original R0/T0 anchors or reset them to the loaded handoff state')
@@ -574,118 +559,6 @@ def save_json(path: Path, obj):
         json.dump(obj, f, indent=2)
 
 
-def build_pseudo_local_gating_cfg(args) -> PseudoLocalGatingConfig:
-    return PseudoLocalGatingConfig(
-        mode=args.pseudo_local_gating,
-        params=args.pseudo_local_gating_params,
-        min_verified_ratio=float(args.pseudo_local_gating_min_verified_ratio),
-        min_rgb_mask_ratio=float(args.pseudo_local_gating_min_rgb_mask_ratio),
-        max_fallback_ratio=float(args.pseudo_local_gating_max_fallback_ratio),
-        min_correction=float(args.pseudo_local_gating_min_correction),
-        soft_power=float(args.pseudo_local_gating_soft_power),
-        log_interval=int(args.pseudo_local_gating_log_interval),
-    )
-
-
-def _grad_norm_from_param(param) -> float:
-    if param is None or getattr(param, 'grad', None) is None:
-        return 0.0
-    return float(torch.norm(param.grad).detach().cpu().item())
-
-
-def _init_gating_history_lists(container: dict) -> None:
-    container.update(
-        {
-            'pseudo_local_gating_mode': [],
-            'pseudo_local_gating_params': [],
-            'accepted_pseudo_sample_ids': [],
-            'rejected_pseudo_sample_ids': [],
-            'rejected_reasons': [],
-            'accepted_signal_weights': [],
-            'sample_signal_metrics': [],
-            'visible_union_ratio': [],
-            'visible_union_weight_mean': [],
-            'accepted_visibility_count': [],
-            'grad_keep_ratio_xyz': [],
-            'grad_keep_ratio_opacity': [],
-            'grad_weight_mean_xyz': [],
-            'grad_weight_mean_opacity': [],
-            'grad_norm_xyz_pre_mask': [],
-            'grad_norm_xyz_post_mask': [],
-            'grad_norm_opacity_pre_mask': [],
-            'grad_norm_opacity_post_mask': [],
-        }
-    )
-
-
-def _append_gating_history(container: dict, summary: dict) -> None:
-    keys = [
-        'pseudo_local_gating_mode',
-        'pseudo_local_gating_params',
-        'accepted_pseudo_sample_ids',
-        'rejected_pseudo_sample_ids',
-        'rejected_reasons',
-        'accepted_signal_weights',
-        'sample_signal_metrics',
-        'visible_union_ratio',
-        'visible_union_weight_mean',
-        'accepted_visibility_count',
-        'grad_keep_ratio_xyz',
-        'grad_keep_ratio_opacity',
-        'grad_weight_mean_xyz',
-        'grad_weight_mean_opacity',
-        'grad_norm_xyz_pre_mask',
-        'grad_norm_xyz_post_mask',
-        'grad_norm_opacity_pre_mask',
-        'grad_norm_opacity_post_mask',
-    ]
-    for key in keys:
-        container[key].append(summary.get(key))
-
-
-def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, gating_cfg: PseudoLocalGatingConfig) -> dict:
-    sampled_ids = [int(v['sample_id']) for v in sampled_views]
-    gate_results = evaluate_sampled_views_for_local_gating(sampled_views, gating_cfg)
-    if gating_cfg.enabled():
-        visibility_stats = build_visibility_weight_map(
-            render_packages=render_packages,
-            gate_results=gate_results,
-            num_gaussians=int(gaussians._xyz.shape[0]),
-            device=gaussians._xyz.device,
-        )
-        grad_stats = apply_gaussian_grad_mask(
-            gaussians=gaussians,
-            weights=visibility_stats['weights'],
-            params_mode=gating_cfg.params,
-        )
-    else:
-        grad_xyz = _grad_norm_from_param(getattr(gaussians, '_xyz', None))
-        grad_opacity = _grad_norm_from_param(getattr(gaussians, '_opacity', None))
-        visibility_stats = {
-            'visible_union_ratio': None,
-            'visible_union_weight_mean': None,
-            'accepted_count': len(sampled_views),
-        }
-        grad_stats = {
-            'grad_keep_ratio_xyz': 1.0 if 'xyz' in gating_cfg.params else None,
-            'grad_keep_ratio_opacity': 1.0 if 'opacity' in gating_cfg.params else None,
-            'grad_weight_mean_xyz': 1.0 if 'xyz' in gating_cfg.params else None,
-            'grad_weight_mean_opacity': 1.0 if 'opacity' in gating_cfg.params else None,
-            'grad_norm_xyz_pre_mask': grad_xyz,
-            'grad_norm_xyz_post_mask': grad_xyz,
-            'grad_norm_opacity_pre_mask': grad_opacity,
-            'grad_norm_opacity_post_mask': grad_opacity,
-        }
-    return build_iteration_gating_summary(
-        mode=gating_cfg.mode,
-        params=gating_cfg.params,
-        sampled_ids=sampled_ids,
-        gate_results=gate_results,
-        visibility_stats=visibility_stats,
-        grad_stats=grad_stats,
-    )
-
-
 def main():
     args = parse_args()
     random.seed(args.seed)
@@ -756,7 +629,6 @@ def main():
             "disable_prune": args.stageA5_disable_prune,
         } if args.stage_mode == "stageA5" else {}),
     )
-    pseudo_local_gating_cfg = build_pseudo_local_gating_cfg(args)
     if args.stage_mode == "stageA5":
         optimizer, gaussian_optimizer = build_stageA5_optimizers(pseudo_views, gaussians, cfg)
     else:
@@ -775,7 +647,6 @@ def main():
         'grad_contrib': [],
         'grad_norm_xyz': []
     }
-    _init_gating_history_lists(history)
 
     for it in tqdm(range(1, cfg.num_iterations + 1), desc='StageA pseudo pose+exposure'):
         optimizer.zero_grad(set_to_none=True)
@@ -788,14 +659,10 @@ def main():
         per_view_losses = []
         per_view_stats = []
         sampled_ids = []
-        sampled_views = []
-        render_packages = []
         for pidx in pseudo_indices:
             view = pseudo_views[pidx]
             sampled_ids.append(int(view['sample_id']))
-            sampled_views.append(view)
             pkg = render(view['vp'], gaussians, pipeline_params, bg)
-            render_packages.append(pkg)
             if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                 loss, stats = build_stageA_loss_source_aware(
                     render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], rgb_confidence_mask=view.get('conf_rgb'), depth_confidence_mask=view.get('conf_depth'), beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
@@ -809,13 +676,6 @@ def main():
 
         total_loss = torch.stack(per_view_losses).mean()
         total_loss.backward()
-        gating_summary = maybe_apply_pseudo_local_gating(
-            gaussians=gaussians,
-            sampled_views=sampled_views,
-            render_packages=render_packages,
-            gating_cfg=pseudo_local_gating_cfg if gaussian_optimizer is not None else PseudoLocalGatingConfig(mode='off', params=args.pseudo_local_gating_params),
-        )
-        _append_gating_history(history, gating_summary)
         optimizer.step()
         if gaussian_optimizer is not None:
             gaussian_optimizer.step()
@@ -856,13 +716,6 @@ def main():
                 f"pose_reg={avg_stats['loss_pose_reg']:.4f}, abs_pose={avg_stats['loss_abs_pose_reg']:.4f} (t={avg_stats['loss_abs_pose_trans']:.4f}, r={avg_stats['loss_abs_pose_rot']:.4f}), "
                 f"abs_norm(rho={avg_stats['abs_pose_rho_norm']:.4f}, theta={avg_stats['abs_pose_theta_norm']:.4f}), scale={avg_stats['scene_scale_used']:.4f}, exp_reg={avg_stats['loss_exp_reg']:.4f}, pose_updates={num_pose_updates}"
             )
-        if gaussian_optimizer is not None and pseudo_local_gating_cfg.enabled() and (it == 1 or it % max(1, int(pseudo_local_gating_cfg.log_interval)) == 0):
-            print(
-                f"    [local-gating] iter {it}: accepted={len(gating_summary['accepted_pseudo_sample_ids'])}/{len(sampled_ids)}, "
-                f"visible_union={float(gating_summary.get('visible_union_ratio') or 0.0):.4f}, "
-                f"keep_xyz={float(gating_summary.get('grad_keep_ratio_xyz') or 0.0):.4f}, "
-                f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
-            )
 
     stageA_states = [export_view_state(v) for v in pseudo_views]
     save_json(output_dir / 'pseudo_camera_states_stageA.json', stageA_states)
@@ -888,13 +741,6 @@ def main():
             'stageA_abs_pose_robust': args.stageA_abs_pose_robust,
             'stageA_abs_pose_scale_source': args.stageA_abs_pose_scale_source,
             'stageA_abs_pose_fixed_scale': float(args.stageA_abs_pose_fixed_scale),
-            'pseudo_local_gating_mode': pseudo_local_gating_cfg.mode,
-            'pseudo_local_gating_params': pseudo_local_gating_cfg.params,
-            'pseudo_local_gating_min_verified_ratio': float(pseudo_local_gating_cfg.min_verified_ratio),
-            'pseudo_local_gating_min_rgb_mask_ratio': float(pseudo_local_gating_cfg.min_rgb_mask_ratio),
-            'pseudo_local_gating_max_fallback_ratio': float(pseudo_local_gating_cfg.max_fallback_ratio),
-            'pseudo_local_gating_min_correction': float(pseudo_local_gating_cfg.min_correction),
-            'pseudo_local_gating_soft_power': float(pseudo_local_gating_cfg.soft_power),
             'mean_stageA_scene_scale': float(np.mean([v.get('stageA_scene_scale', 1.0) for v in pseudo_views])),
             'mean_confidence_nonzero_ratio': float(np.mean([v.get('confidence_nonzero_ratio', 0.0) for v in pseudo_views])),
             'mean_target_depth_verified_ratio': float(np.mean([(v.get('target_depth_verified_ratio') or 0.0) for v in pseudo_views])),
@@ -911,7 +757,7 @@ def main():
             }
             for v in pseudo_views
         ],
-        'history': history, 'stageA_disable_depth': bool(args.stageA_disable_depth), 'stageA_mask_mode': args.stageA_mask_mode, 'stageA_rgb_mask_mode': args.stageA_rgb_mask_mode, 'stageA_depth_mask_mode': args.stageA_depth_mask_mode, 'stageA_confidence_variant': args.stageA_confidence_variant, 'stageA_target_depth_mode': args.stageA_target_depth_mode, 'stageA_depth_loss_mode': args.stageA_depth_loss_mode, 'stageA_apply_pose_update': bool(args.stageA_apply_pose_update), 'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed), 'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense), 'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback), 'stageA_lambda_abs_pose': float(args.stageA_lambda_abs_pose), 'stageA_lambda_abs_t': float(args.stageA_lambda_abs_t), 'stageA_lambda_abs_r': float(args.stageA_lambda_abs_r), 'stageA_abs_pose_robust': args.stageA_abs_pose_robust, 'stageA_abs_pose_scale_source': args.stageA_abs_pose_scale_source, 'stageA_abs_pose_fixed_scale': float(args.stageA_abs_pose_fixed_scale), 'stageA_log_grad_contrib': bool(args.stageA_log_grad_contrib), 'stageA_log_grad_interval': int(args.stageA_log_grad_interval), 'pseudo_local_gating': pseudo_local_gating_cfg.as_dict(), 'final_states': stageA_states,
+        'history': history, 'stageA_disable_depth': bool(args.stageA_disable_depth), 'stageA_mask_mode': args.stageA_mask_mode, 'stageA_rgb_mask_mode': args.stageA_rgb_mask_mode, 'stageA_depth_mask_mode': args.stageA_depth_mask_mode, 'stageA_confidence_variant': args.stageA_confidence_variant, 'stageA_target_depth_mode': args.stageA_target_depth_mode, 'stageA_depth_loss_mode': args.stageA_depth_loss_mode, 'stageA_apply_pose_update': bool(args.stageA_apply_pose_update), 'stageA_lambda_depth_seed': float(args.stageA_lambda_depth_seed), 'stageA_lambda_depth_dense': float(args.stageA_lambda_depth_dense), 'stageA_lambda_depth_fallback': float(args.stageA_lambda_depth_fallback), 'stageA_lambda_abs_pose': float(args.stageA_lambda_abs_pose), 'stageA_lambda_abs_t': float(args.stageA_lambda_abs_t), 'stageA_lambda_abs_r': float(args.stageA_lambda_abs_r), 'stageA_abs_pose_robust': args.stageA_abs_pose_robust, 'stageA_abs_pose_scale_source': args.stageA_abs_pose_scale_source, 'stageA_abs_pose_fixed_scale': float(args.stageA_abs_pose_fixed_scale), 'stageA_log_grad_contrib': bool(args.stageA_log_grad_contrib), 'stageA_log_grad_interval': int(args.stageA_log_grad_interval), 'final_states': stageA_states,
         'residual_delta_summary_post_foldback': [
             {'sample_id': int(v['sample_id']), 'frame_id': int(v['frame_id']), 'rot_norm': float(torch.norm(v['vp'].cam_rot_delta).detach().cpu().item()), 'trans_norm': float(torch.norm(v['vp'].cam_trans_delta).detach().cpu().item()), 'exposure_a': float(v['vp'].exposure_a.detach().cpu().item()), 'exposure_b': float(v['vp'].exposure_b.detach().cpu().item())}
             for v in pseudo_views
@@ -946,7 +792,6 @@ def main():
             'iters': int(args.stageB_iters),
             'has_real_branch': bool(has_real_branch),
             'resolved_train_rgb_dir': resolved_train_rgb_dir,
-            'pseudo_local_gating': pseudo_local_gating_cfg.as_dict(),
             'iterations': [],
             'loss_total': [],
             'loss_real': [],
@@ -959,7 +804,6 @@ def main():
             'sampled_real_frame_ids': [],
             'sampled_pseudo_sample_ids': [],
         }
-        _init_gating_history_lists(stageB_history)
         cfg_real = {'Training': {'lambda_pseudo': 1.0, 'rgb_boundary_threshold': 0.01, 'monocular': False}}
 
         for it in tqdm(range(1, int(args.stageB_iters) + 1), desc='StageB conservative joint'):
@@ -986,14 +830,10 @@ def main():
             pseudo_losses = []
             per_view_stats = []
             sampled_pseudo_ids = []
-            sampled_pseudo_views = []
-            pseudo_render_packages = []
             for pidx in pseudo_indices:
                 view = pseudo_views[pidx]
                 sampled_pseudo_ids.append(int(view['sample_id']))
-                sampled_pseudo_views.append(view)
                 pkg = render(view['vp'], gaussians, pipeline_params, bg)
-                pseudo_render_packages.append(pkg)
                 if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                     loss, stats = build_stageA_loss_source_aware(
                         render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], rgb_confidence_mask=view.get('conf_rgb'), depth_confidence_mask=view.get('conf_depth'), beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0),
@@ -1006,19 +846,8 @@ def main():
                 per_view_stats.append(stats)
 
             pseudo_loss_tensor = torch.stack(pseudo_losses).mean()
-            pseudo_backward = args.lambda_pseudo * pseudo_loss_tensor
             total_loss = args.lambda_real * real_loss_tensor + args.lambda_pseudo * pseudo_loss_tensor
-            pseudo_backward.backward(retain_graph=bool(has_real_branch))
-            gating_summary = maybe_apply_pseudo_local_gating(
-                gaussians=gaussians,
-                sampled_views=sampled_pseudo_views,
-                render_packages=pseudo_render_packages,
-                gating_cfg=pseudo_local_gating_cfg,
-            )
-            _append_gating_history(stageB_history, gating_summary)
-            if has_real_branch:
-                real_backward = args.lambda_real * real_loss_tensor
-                real_backward.backward()
+            total_loss.backward()
             stageB_pseudo_optimizer.step()
             stageB_gaussian_optimizer.step()
 
@@ -1046,13 +875,6 @@ def main():
 
             if it == 1 or it % 20 == 0:
                 print(f"  [StageB] iter {it}: total={stageB_history['loss_total'][-1]:.4f}, real={stageB_history['loss_real'][-1]:.4f}, pseudo={stageB_history['loss_pseudo'][-1]:.4f}, rgb={stageB_history['loss_rgb'][-1]:.4f}, depth={stageB_history['loss_depth'][-1]:.4f}")
-            if pseudo_local_gating_cfg.enabled() and (it == 1 or it % max(1, int(pseudo_local_gating_cfg.log_interval)) == 0):
-                print(
-                    f"    [StageB local-gating] iter {it}: accepted={len(gating_summary['accepted_pseudo_sample_ids'])}/{len(sampled_pseudo_ids)}, "
-                    f"visible_union={float(gating_summary.get('visible_union_ratio') or 0.0):.4f}, "
-                    f"keep_xyz={float(gating_summary.get('grad_keep_ratio_xyz') or 0.0):.4f}, "
-                    f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
-                )
 
         save_json(output_dir / 'stageB_history.json', stageB_history)
         final_states = [export_view_state(v) for v in pseudo_views]

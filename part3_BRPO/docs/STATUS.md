@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-15 04:50 CST
+> 更新时间：2026-04-16 01:49 CST
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -48,15 +48,21 @@
 
 ## 1. 概览
 
-当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但当前工程重点已经切到两条新改造线：
-- 已完成 `E1 / E1.5 / E2`：确认 `signal-aware-8` 是当前 pseudo selection default winner；
-- 已完成新版方案文档：`BRPO_fusion_rgb_mask_depth_v2_engineering_plan_20260415.md` 与 `BRPO_local_gaussian_gating_engineering_plan_20260415.md`；
-- 已完成 fusion 第一步代码落地：`pseudo_fusion.py` 与 `prepare_stage1_difix_dataset_s3po_internal.py::stage_fusion()` 已改成 **target ↔ reference overlap confidence** 口径；
-- 已完成隔离的 `signal_v2` 第一步实现：fused RGB mask v2 与 depth supervision v2 已可独立生成，不再写回旧 `seed_support -> train_mask -> target_depth` 链路；
-- 已完成 `run_pseudo_refinement_v2.py` 最小接入：`signal_pipeline=brpo_v2` 与 `brpo_v2_raw / brpo_v2_cont / brpo_v2_depth / target_depth_for_refine_v2_brpo` 已能真实读取 `signal_v2` 产物；
-- 已完成 3-frame coverage eval + 3-frame StageA smoke：当前状态已经从“能独立产出 signal_v2”推进到“能接进 refinement 跑通 smoke”。
+当前主线仍然是 **mask-problem route on top of Re10k-1 full internal route**，但 2026-04-15 的最新实测已经把优先级进一步推进到六个明确状态：
+- 已完成 `P0`：在 E1 winner 的 canonical legacy root 上完成 split abs prior 标定，当前固定背景配置收敛为 `lambda_abs_t=3.0`、`lambda_abs_r=0.1`；
+- 已完成 `P1A`：在同一 E1 winner 上补齐 8-frame `signal_v2` 并跑完 `legacy / v2-rgb-only / v2-full` 的 StageA-only 短对照；
+- 已确认一个关键结构事实：当前纯 `stage_mode=stageA` 不会更新 Gaussian，`refined_gaussians.ply` 与输入 `BASE_PLY` hash 完全一致，因此 replay-on-PLY 在 StageA-only compare 中只是 identity sanity check，不是判优指标；
+- 已完成 `P2` 第一版工程接入：`run_pseudo_refinement_v2.py` 已新增 `pseudo_local_gating_*` CLI，`pseudo_branch/local_gating/` 已创建，StageA.5 / StageB 的 pseudo-side local gating 路径已经接通并通过 smoke；
+- 已完成 `P2-B`：8-frame `StageA.5` 的 `legacy ungated vs gated` short compare 已跑完，当前结论是 gated 相比 ungated 只有极轻微 replay 优势，但没有出现显著改善，也没有把 depth loss 压没；
+- 已完成 `P2-C`：带 real branch 的 `StageB ungated vs gated` short compare 也已跑完，当前结论是 gated 不会明显误伤 real branch，但仍然没有展现出足够明确的收益；
+- 已确认若要保留 v2 分支，当前更值得保留的是 `RGB-only v2`，而不是直接让 `full v2 depth` 接管默认训练口径；
+- 当前 `P2-D` 诊断已完成：current threshold（`min_verified=0.01 / min_rgb=0.01 / max_fallback=0.995`）在 legacy 上基本等于 no-op，因此 StageA.5 / StageB 的 `0 rejection` 是阈值过松而不是实现失效；
+- 已完成 `P2-E`：legacy `StageA.5` threshold calibration（`min_verified_ratio=0.02 / 0.03`）已把 gate 拉进真实 reject 区，但 replay 提升仍然极弱；当前若只保留一个 calibrated legacy gate 参考，`vr=0.02` 比 `vr=0.03` 更合适；
+- 已完成 `P2-F`：`RGB-only v2` 的 `StageA.5` ungated vs branch-specific gated（`min_rgb_mask_ratio=0.0192`）short compare 已跑完，结果表明这条支路在 `StageA.5` replay 上明显强于 legacy，而且 gating 还能带来小幅正增益；
+- 已完成 `P2-G`：固定 `signal-aware-8` 的 `StageB` real-branch short compare 已跑完，结果表明 `RGB-only v2 + gated_rgb0192` 在 joint refine 下仍然明显优于 legacy，也优于同支路 ungated；
+- 因而当前新的判断是：`RGB-only v2 + gated_rgb0192` 已经可以提升为当前主候选 refine 分支；下一步更该做的是更长一点的 `StageB` / 完整 schedule verify，而不是先做 raw RGB densify。
 
-一句话说：**现在已经到“fusion / mask v2 / depth supervision v2 / refine consumer”四段都打通的状态；下一步不是再证明能不能接上，而是做一轮 legacy vs `signal_v2` 的 apples-to-apples short compare，并开始 local Gaussian gating。**
+一句话说：**现在已经不是“要不要从 legacy 切到 v2”的问题，而是：`RGB-only v2 + gated_rgb0192` 已经在 `StageA.5` 和 `StageB` 两层都站住了；当前更合理的下一步是做更长一点的验证来确认它是不是稳定主线，而不是急着做 raw RGB densify。**
 
 ## 2. 数据结构
 
@@ -217,7 +223,7 @@ signal_v2/frame_<frame_id>/
 | `prepare_stage1_difix_dataset_s3po_internal.py` | internal `select / difix / fusion / verify / pack` | ✅ 可用 | `stage_fusion()` 已切到 BRPO-style overlap-confidence 口径；`verify / pack` 仍是旧 mask/depth 路径 |
 | `brpo_build_mask_from_internal_cache.py` | 从 internal cache 构建 verification / seed / train mask / projected depth | ✅ 可用 | 当前仍是旧 mask/depth 主线；尚未切到 fused-RGB-first 的 v2 mask 语义 |
 | `run_pseudo_refinement.py` | v1 standalone refine 入口 | ✅ 可用 | fixed-pose appearance tuning |
-| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 已支持 split+scaled abs prior（`lambda_abs_t/r + robust + scene_scale`）；现已新增 `signal_pipeline=brpo_v2` 与 `brpo_v2_raw / brpo_v2_cont / brpo_v2_depth / target_depth_for_refine_v2_brpo` 读取 |
+| `run_pseudo_refinement_v2.py` | BRPO-style refine v2 / Stage A 入口 | ✅ 可用 | 已支持 split+scaled abs prior（`lambda_abs_t/r + robust + scene_scale`）、`signal_pipeline=brpo_v2`，并已新增 `pseudo_local_gating_*` CLI、StageA.5 grad mask 与 StageB split backward |
 | `analyze_m5_depth_signal.py` | M5-0：分析当前 depth signal 在 train-mask 内的结构 | ✅ 可用 | 不改训练，仅诊断 |
 | `materialize_m5_depth_targets.py` | M5-1：写出 `target_depth_for_refine_v2` 与 densify 产物 | ✅ 可用 | 当前 selected 参数已验证 |
 | `diagnose_stageA_gradients.py` | M5 diagnosis：检查 forward sensitivity 与 grad 连通性 | ✅ 可用 | 当前已发现 Stage A pose path 异常 |
@@ -236,6 +242,7 @@ signal_v2/frame_<frame_id>/
 | `brpo_depth_target.py` | 组装 M3/M5 depth target | ✅ 可用 | 当前已支持 `v1 + v2` 双版本 |
 | `brpo_depth_densify.py` | M5：densify log-depth correction field | ✅ 可用 | 当前首版 patch-wise densify 已跑通 |
 | `pseudo_camera_state.py` / `pseudo_loss_v2.py` / `pseudo_refine_scheduler.py` | Stage A pseudo camera + loss + optimizer | ✅ 可用 | 已补 `apply_pose_residual_()`；已接入 absolute pose prior（`R0/T0`, `SE3_log`, `lambda_abs_pose`） |
+| `pseudo_branch/local_gating/` | pseudo-side local Gaussian gating / grad mask / history schema | ✅ 首版已接通 | 当前已包含 signal gate、visibility union、grad mask、history 序列化；默认先服务 `StageA.5 + xyz-only + hard gating` |
 | `pseudo_fusion.py` | left/right repaired RGB 融合 | ✅ 已接入 | 当前已改为 `target ↔ reference overlap confidence` 权重，并导出 `fusion_weight_* / overlap_conf_* / overlap_mask_*` |
 | `pseudo_branch/brpo_v2_signal/` | 隔离的 fused-RGB mask v2 + depth supervision v2 | ✅ 可用 | `rgb_mask_inference.py` 不依赖旧 depth seed；`depth_supervision_v2.py` 只写 `signal_v2/` |
 
@@ -243,10 +250,10 @@ signal_v2/frame_<frame_id>/
 
 | 文件 | 计划改动 |
 |------|----------|
-| `run_pseudo_refinement_v2.py` | 已完成 `signal_pipeline=brpo_v2` 最小接入；下一步转为做 `legacy vs brpo_v2` apples-to-apples short compare |
-| `pseudo_cache / signal_v2` 桥接层 | 决定新 signal_v2 产物是单独读取还是链接进新的 pseudo_cache_v2 schema |
-| `pseudo_refine_scheduler.py` / local gating 路径 | 落地 pseudo-side local Gaussian gating / subset refine |
-| `docs/*` | 根据 signal_v2 实测更新 gate、默认阈值和接入边界 |
+| `run_pseudo_refinement_v2.py` | 已完成 `pseudo_local_gating_*` CLI、StageA.5 grad mask 与 StageB split backward；已跑完 8-frame `StageA.5` gated vs ungated short compare，下一步转为做带 real branch 的 `StageB` gated vs ungated short compare |
+| `pseudo_branch/local_gating/` | 已完成第一版 hard gating 骨架；下一步视 compare 结果决定是否补 `xyz+opacity`、soft gating 与更细的 signal rule |
+| `pseudo_cache / signal_v2` 桥接层 | 当前暂不扩张 schema；先等 gating compare 回答 `legacy` 还是 `RGB-only v2` 更值得继续挂接 |
+| `docs/*` | 根据 P2 smoke 与后续 compare 更新默认 gate、验收口径和下一阶段边界 |
 
 ## 4. Pipeline
 
@@ -416,23 +423,40 @@ Stage B                          -> 明确不建议现在进入 ❌
 
 ### 6.2 当前判断 ⚠️
 
-- [x] 当前已确认：新 `signal_v2` 中的 RGB mask 已不再依赖旧 depth seed / train_mask，而是来自 fused RGB ↔ reference RGB correspondence
-- [x] 新 `depth supervision v2` 已与旧 `target_depth_for_refine{,_v2}` 链路隔离，只写 `signal_v2/` 并通过 `fusion_weight + projected_depth + raw_rgb_confidence_v2` 生成
-- [x] 3-frame coverage eval 结果表明：当前 v2 mask 是一个更窄但更干净的 fused-RGB correspondence mask；`raw/depth verified` 平均约 `1.82%`，而不是再靠旧 `train_mask` 扩覆盖
-- [x] `run_pseudo_refinement_v2.py` 已真实读取 `signal_v2`：`signal_pipeline=brpo_v2`、`brpo_v2_raw`、`brpo_v2_depth` 与 `target_depth_for_refine_v2_brpo` 已在 3-frame StageA smoke 中跑通
-- [x] 因此当前状态已经不是“文件存在但没接上”，而是“fusion + mask v2 + depth supervision v2 + refine consumer”四段都已打通；下一步关键问题变成：这版窄覆盖到底值不值得，以及 local Gaussian gating 是否还需要补进来
+- [x] 当前已确认：split abs prior 在当前 E1 winner + legacy StageA 背景下已经进入有效区间，当前固定背景配置可先收敛为 `lambda_abs_t=3.0`、`lambda_abs_r=0.1`
+- [x] 当前已确认：纯 `stage_mode=stageA` 不会更新 Gaussian；`BASE_PLY` 与 `stageA_noabs_80 / stageA_abs_t3_r0p1_80` 的 `refined_gaussians.ply` 已用 `sha256sum` 验证为完全同 hash，因此 replay-on-PLY 在 StageA-only compare 中不是判优指标
+- [x] 当前已完成 canonical E1 root 的 8-frame `signal_v2` 构建，并完成 `legacy / v2-rgb-only / v2-full` 的 `StageA-only` 短对照
+- [x] 当前结论是：`v2 RGB-only` 不是明显坏方向，但 `full v2 depth` 当前仍然过窄；其 `mean_target_depth_verified_ratio` 约 `1.96%`，明显低于 legacy 的约 `4.13%`
+- [x] 当前已完成 P2 第一版工程接入：`run_pseudo_refinement_v2.py` 已新增 `pseudo_local_gating_*` CLI、StageA.5 grad mask、StageB split backward，以及 `pseudo_branch/local_gating/` 模块目录
+- [x] 当前已完成最小 smoke：StageA.5 / StageB history 会真实记录 accepted/rejected pseudo ids、visible union、grad keep ratio、pre/post grad norm；严格阈值下已实测可把 xyz grad 从非零裁到 0
+- [x] 当前已完成 P2-B：8-frame `StageA.5` gated vs ungated short compare 已表明 gating 不会把 depth loss 压空，也不会显著恶化 replay，但在当前阈值下只带来极轻微 replay 改善
+- [x] 当前已完成 P2-C：带 real branch 的 `StageB` gated vs ungated short compare 已表明 gating 不会明显误伤 real branch，但 replay / loss 仍然与 ungated 几乎重合
+- [x] 当前新的结构判断是：无论在 StageA.5 还是 StageB compare 中，current threshold 下都持续 `0 rejection`；因此第一版 gating 的作用主要只剩 `visibility_filter union`，而不是通过 signal gate 主动拒绝 weak pseudo views
+- [x] 当前 `P2-D` 统计诊断已确认：legacy sampled view 的 `verified_ratio` 最低约 `1.89%`、`rgb_mask_ratio` 最低约 `14.68%`、`fallback_ratio` 最高约 `98.11%`，而 current gate 默认阈值仅为 `1% / 1% / 99.5%`，所以 `0 rejection` 在当前代码口径下是结构必然
+- [x] 当前进一步确认：如果不先重标定阈值，就直接把同一版 gating 挂到 `RGB-only v2` 上，仍大概率只会得到另一个 `0 rejection`；而若直接抬高 `v2` 的 RGB 阈值，又会因为量纲差异导致过度 reject，因此先做了 legacy 上的 gate threshold calibration
+- [x] 当前已完成 `P2-E`：`min_verified_ratio=0.02 / 0.03` 已在 legacy `StageA.5` 上产生真实 rejection（`vr=0.02` 主要拒 `260`，`vr=0.03` 继续拒 `225+260`），但 replay 只出现极小幅度变化；其中 `vr=0.02` 是更保守的 calibrated legacy 参考臂
+- [x] 当前新的判断是：legacy 侧的 threshold softness 已不是主瓶颈；继续在 legacy `StageA.5` 上细扫阈值的 ROI 很低，后续若继续推进 gating，更值得转向 `RGB-only v2` 的 branch-specific calibration
+- [x] 当前已完成 `P2-F`：`RGB-only v2` 的 `StageA.5` ungated vs gated short compare 已表明，这条支路在自然 `StageA→A.5` handoff 下明显优于 legacy；branch-specific gating（`min_rgb_mask_ratio=0.0192`）会稳定拒掉 `225/260` 两档弱 pseudo，并带来小幅 replay 正增益
+- [x] 当前对 densify 的判断也更清楚了：raw RGB mask 虽然看起来点状，但它并没有阻止 `RGB-only v2` 在 `StageA.5` 上明显优于 legacy；因此现在不应急着对 raw RGB mask 做 densify，若后续需要扩张，更应考虑受几何约束的 support/depth expand
+- [x] 当前已完成 `P2-G`：固定 `signal-aware-8` 的 `StageB` real-branch short compare 已表明，`RGB-only v2 + gated_rgb0192` 在 StageB 下也优于本支路 ungated（`+0.0161 PSNR / +0.000147 SSIM / -2.16e-05 LPIPS`），并且明显优于 legacy StageB；real branch 未被明显误伤
+- [x] 当前新的判断是：`RGB-only v2 + gated_rgb0192` 已可提升为当前主候选 refine 分支；下一步应做更长一点的 StageB / 完整 schedule verify，而不是先做 raw RGB densify
 
 ### 6.3 当前进行中 ⚠️
 
-- [ ] 做一轮 apples-to-apples short compare：`legacy` vs `signal_v2`，保持同一组 pseudo / 同一组 iter / 同一组 refine 超参
-- [ ] 设计 `signal_v2 -> pseudo_cache_v2 / sample loader` 的桥接方式，避免新旧 artifact 名字混用
-- [ ] 开始 local Gaussian gating / subset refine 的第一版实现与 smoke
+- [x] 做一轮 apples-to-apples `StageA-only` short compare：`legacy / v2-rgb-only / v2-full`，保持同一组 pseudo、同一组 iter、同一组 abs prior 背景
+- [x] 先在会真实更新 Gaussian 的 stage 上做第一版 gating compare，并确认它对 replay / real branch 基本无害
+- [x] 完成 signal gate 阈值 / 统计诊断，确认 current threshold 下的 `0 rejection` 来自阈值过松而不是实现失效
+- [x] 完成 legacy `StageA.5` 第一轮 threshold calibration short compare（`min_verified_ratio=0.02 / 0.03`），确认 gate 已进入真实 reject 区
+- [x] 完成 `RGB-only v2` `StageA.5` ungated vs branch-specific gated compare，并确认这条支路比 legacy 更值得保留
+- [x] 完成 `RGB-only v2` `StageB` real-branch short compare，并确认当前主候选已延续到 joint refine
+- [ ] 继续围绕 `RGB-only v2 + gated_rgb0192` 做更长一点的 StageB / 完整 schedule verify
+- [ ] 若后续继续扩展，再决定是否补 `xyz+opacity`、soft gating 与更重的 SPGM
 
 ### 6.4 下一阶段待办 ⏳
 
-- [ ] 把 short compare 的结论固化成默认建议，回答 `brpo_v2_raw / brpo_v2_depth / target_depth_for_refine_v2_brpo` 相对 legacy 是否更稳
-- [ ] 根据 short compare 结果决定 depth supervision v2 是否需要再加 expand / fallback reweight
-- [ ] 在 local Gaussian gating 到位前，不直接把当前窄监督长跑扩展到 A.5 / StageB
+- [ ] 以 `RGB-only v2 + gated_rgb0192` 为当前主候选，补一轮更长一点的 `StageB` / 完整 schedule verify
+- [ ] 若继续做 gating compare，优先围绕 `RGB-only v2` 微调 branch-specific threshold，不再回 legacy 侧高密度细扫
+- [ ] 只有在更长验证明确暴露 coverage 瓶颈后，再讨论受几何约束的 support/depth expand；先不做 raw RGB densify
 
 ### 6.5 当前明确不建议做的事 🚫
 
@@ -690,3 +714,85 @@ Stage B                          -> 明确不建议现在进入 ❌
 当前建议的下一步不再是继续扩张 E2，而是：
 - 若继续给这条 pipeline 一次机会，只做一次基于 E1 winner 的 E3 final probe；
 - 若 E3 仍不能在 short compare 上优于 E1，就应把这条线从“主线增益来源”降级为“已基本收口的 signal gate 层”。
+
+## 23. P0 abs prior 标定 + P1A StageA-only signal compare（2026-04-15）
+
+### run roots
+- P0：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_absprior_calibration_legacy_e1`
+- P1A：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_signal_compare_stageAonly_e1`
+- 报告：`docs/P0_absprior_and_P1A_stageA_signal_compare_20260415.md`
+
+### 本轮关键结果
+- [x] 已完成 split abs prior 标定：当前固定背景配置收敛为 `lambda_abs_t=3.0`、`lambda_abs_r=0.1`
+- [x] 已确认纯 `StageA` 不更新 Gaussian；`refined_gaussians.ply` 与 `BASE_PLY` 的 hash 完全一致，因此 replay-on-PLY 只剩 identity sanity check 作用
+- [x] 已完成 `legacy / v2-rgb-only / v2-full` 的 `StageA-only` 短对照
+- [x] `v2 RGB-only` 可作为后续 signal probe 保留；`full v2 depth` 当前则明显过窄：`verified_ratio` 约 `1.96%`，而 legacy 约 `4.13%`
+
+### 当前结论
+- 这轮之后，纯 `StageA` 上已经没有必要继续纠缠 replay；
+- 如果后续想让 replay 成为有区分度的验收指标，必须进入会真实更新 Gaussian 的 stage；
+- 因此当前下一步应切到 `P2 local Gaussian gating`，优先在 `StageA.5` 上落地 `xyz-only + hard gating + pseudo-side only`。
+
+## 24. P2 local Gaussian gating 第一版实现 + smoke（2026-04-15）
+
+### run roots
+- smoke 根：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_local_gating_smoke`
+- 报告：`docs/P2_local_gaussian_gating_first_impl_smoke_20260415.md`
+
+### 本轮关键结果
+- [x] 已在 `run_pseudo_refinement_v2.py` 中新增 `pseudo_local_gating_*` CLI
+- [x] 已新增 `pseudo_branch/local_gating/`，拆出 signal gate / visibility union / grad mask / history schema
+- [x] 已接通 `StageA.5`：`backward -> local gate mask -> gaussian step`
+- [x] 已接通 `StageB`：split backward 后只裁 pseudo-side Gaussian grad，不直接裁 real branch
+- [x] `stageA_history.json / stageB_history.json` 已真实记录 accepted/rejected pseudo ids、rejected reasons、visible union、grad keep ratio 与 pre/post grad norm
+- [x] 严格阈值 smoke 已验证：当 sampled pseudo views 被 gate 全拒绝时，`xyz` grad 可从非零真实裁到 0
+
+### 当前结论
+- 第一版 local gating 已从计划进入真实代码路径；
+- 在 `StageA.5 pseudo-only` 下，若 sampled pseudo views 全部通过 signal gate，则第一版 `visibility_filter union` 对 xyz grad norm 基本不再额外收缩；
+- 因此第一版 gating 的主要价值，体现在“拒绝 weak pseudo views 时阻断它们对 Gaussian 的更新”；
+- 当前下一步应直接进入 8-frame `StageA.5` gated vs ungated short compare，而不是继续停在 smoke 级别。
+
+## 25. P2-B：8-frame StageA.5 gated vs ungated short compare（2026-04-15）
+
+### run roots
+- compare 根：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_p2b_stageA5_local_gating_compare_e1`
+- 报告：`docs/P2B_stageA5_local_gating_compare_20260415.md`
+
+### 本轮关键结果
+- [x] 已完成 `legacy ungated xyz` vs `legacy hard_visible_union_signal xyz` 的 8-frame `StageA.5` short compare
+- [x] gated replay 相比 ungated 仅有极轻微优势：
+  - PSNR `+0.000439`
+  - SSIM `+0.000001`
+  - LPIPS `-0.000001`
+- [x] gated 没有把 depth loss 压没：`loss_depth_last` 约 `0.05947`，与 ungated 的 `0.05948` 基本一致
+- [x] gated 的 `grad_keep_ratio_xyz` 最后一轮约 `0.8302`，80 iter 平均约 `0.7247`
+- [x] 但这轮 compare 中 `iters_with_rejection = 0 / 80`，说明所有 sampled pseudo views 都通过了 signal gate
+
+### 当前结论
+- 第一版 gating 在当前阈值下是“基本无害但提升极弱”；
+- 这轮没有出现真正的 view-level rejection，因此 gating 的主要作用只剩 visible union；
+- 这也解释了为什么 replay 改善极弱、`grad_norm_xyz` 也没有出现明显收缩；
+- 因此当前下一步应切到带 real branch 的 `StageB` short compare，验证 pseudo-side gating 不会把 global correction 一并裁掉。
+
+## 26. P2-C：real-branch StageB gated vs ungated short compare（2026-04-15）
+
+### run roots
+- compare 根：`/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_p2c_stageB_local_gating_compare_e1`
+- 报告：`docs/P2C_stageB_local_gating_realbranch_compare_20260415.md`
+
+### 本轮关键结果
+- [x] 已完成带 real branch 的 `StageB ungated` vs `StageB hard_visible_union_signal` short compare
+- [x] 两臂都从同一个 `StageA.5 gated` 输出起跑，以隔离 `StageB` gating 本身的影响
+- [x] gated 不会明显误伤 real branch：`loss_real_last` 与 ungated 几乎完全一致（约 `0.14798`）
+- [x] gated replay 相比 ungated 反而略差一点，但量级几乎可忽略：
+  - PSNR `-0.000045`
+  - SSIM `-0.00000056`
+  - LPIPS `+0.00000057`
+- [x] 这轮 compare 中同样 `iters_with_rejection = 0 / 20`
+
+### 当前结论
+- 第一版 gating 在 real branch 打开后仍然是“基本无害但收益极弱”；
+- 当前最关键的问题已经不再是 real branch 会不会被误伤，而是：为什么 current threshold 下 signal gate 在 StageA.5 / StageB 都持续 `0 rejection`；
+- 因而后续优先级应切到解释和重设 signal gate，而不是继续默认把当前 hard gating 当 winner 直接推进。
+

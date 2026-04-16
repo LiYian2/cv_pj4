@@ -162,6 +162,386 @@ StageA refine smoke：
 - 下一步应该直接做一轮 apples-to-apples short compare：`legacy vs signal_v2`，使用同一组 pseudo、同一组 iter、同一组 refine 超参；
 - local Gaussian gating 仍是后续必须补的结构项，不应因为 smoke 通过就后移得过远。
 
+### P0：legacy E1 root 上的 split abs prior 标定 + compare 汇总脚本补齐
+
+代码/脚本变更：
+- `scripts/summarize_stageA_compare.py`
+- `scripts/run_p0_absprior.sh`
+- `docs/P0_absprior_and_P1A_stageA_signal_compare_20260415.md`
+
+本轮执行：
+1. 在 `20260414_signal_enhancement_e15_compare/pseudo_cache_baseline` 上，以 `legacy + target_depth_for_refine_v2 + source_aware` 口径完成 6 组 `StageA-80iter` split abs prior 标定；
+2. 同时补齐统一汇总脚本 `summarize_stageA_compare.py`，直接读取 `stageA_history.json` / `replay_eval.json` 并输出 `summary.json + compare_table.csv + compare_table.md`；
+3. 当前固定背景配置收敛为：`lambda_abs_t=3.0`、`lambda_abs_r=0.1`。
+
+关键结论：
+- noabs 的 drift 明显更大；
+- `(3.0, 0.1)` 已进入有效区间；
+- 继续把 `lambda_abs_t` 从 `3.0` 拉到 `6.0` 没有换来足够明确的额外收益；
+- 因此后续 compare 默认先固定在 `(3.0, 0.1)`，不再继续大范围粗扫。
+
+### P0：确认纯 `StageA` 不更新 Gaussian，StageA-only replay 只是 identity sanity check
+
+本轮验证：
+- 已直接比对：
+  - `BASE_PLY`
+  - `stageA_noabs_80/refined_gaussians.ply`
+  - `stageA_abs_t3_r0p1_80/refined_gaussians.ply`
+- 三者 `sha256sum` 完全一致。
+
+因此当前必须修正的设计/实验口径是：
+- 纯 `stage_mode=stageA` 只更新 pseudo camera / exposure，不更新 Gaussian；
+- 所以 replay-on-PLY 在 `StageA-only` compare 中不是判优指标；
+- 后续真正依赖 replay 的 compare，必须移到 `StageA.5 / StageB` 或其他会真实更新 Gaussian 的阶段。
+
+### P1A：canonical E1 root 补齐 8-frame `signal_v2`，并完成 `legacy / v2-rgb-only / v2-full` 的 StageA-only compare
+
+执行前置：
+- 由于 canonical E1 root 之前并没有完整保留新版 fusion 输出，先重新补齐：
+  - `prepare_stage1_difix_dataset_s3po_internal.py --stage fusion`
+- 同时为历史 root 构造了平铺的 DiFix symlink 根：
+  - `_flat_difix_from_pseudo_cache_baseline/{left_fixed,right_fixed}`
+- 然后在 canonical E1 root 上成功生成：
+  - `.../20260414_signal_enhancement_e15_compare/signal_v2`
+
+执行脚本：
+- `scripts/run_p1_stageA_signal_compare.sh`
+
+本轮 compare 固定：
+- pseudo set = `E1 signal-aware-8`
+- abs prior = `(3.0, 0.1)`
+- `stageA_iters=80`
+
+三臂：
+1. `legacy`
+2. `v2-rgb-only`
+3. `v2-full`
+
+关键结论：
+- `v2-rgb-only` 不是明显坏方向；
+- `full v2 depth` 当前明显过窄：`mean_target_depth_verified_ratio` 从 legacy 的约 `4.13%` 收到约 `1.96%`，`loss_depth_dense` 也几乎掉空；
+- 因此当前若保留 v2，更值得保留的是 `RGB-only v2` 作为 signal probe，而不是直接让 `full v2 depth` 接管默认训练分支。
+
+### 文档同步
+
+本轮同时更新：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+- `docs/hermes.md`
+
+并把当前下一步明确收敛到：
+- `P2 local Gaussian gating`（优先 `StageA.5 + xyz-only + hard gating + pseudo-side only`）
+
+### P2-G：signal-aware-8 固定下的 RGB-only v2 StageB real-branch short compare
+
+本轮无代码改动，重点是验证：`RGB-only v2 + gated_rgb0192` 在 joint refine（带 real branch）里能不能站住。
+
+运行位置：
+- `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_p2g_stageB_v2rgbonly_realbranch_compare_e1`
+
+新增运行：
+- `stageB_from_stageA5_v2rgbonly_ungated_20`
+- `stageB_from_stageA5_v2rgbonly_gated_rgb0192_20`
+
+协议要点：
+- fixed signal-aware-8 pseudo set，不扩 pseudo 数量
+- `signal_pipeline=brpo_v2`
+- `stageA_rgb_mask_mode=brpo_v2_raw`
+- `stage_mode=stageB`
+- `stageB_iters=20`
+- `num_real_views=2`
+- `lambda_real=lambda_pseudo=1.0`
+- 两臂分别从各自的 `StageA.5` 自然分支输出进入 StageB
+
+关键结果：
+- `v2 StageB ungated` replay：`PSNR 23.994534 / SSIM 0.872871 / LPIPS 0.080385`
+- `v2 StageB gated_rgb0192` replay：`PSNR 24.010606 / SSIM 0.873018 / LPIPS 0.080363`
+- gated 相比 ungated：`+0.0161 PSNR / +0.000147 SSIM / -2.16e-05 LPIPS`
+- gated 臂真实 rejection：`18/20` iter，`22/80` sample eval，被拒 id 主要是 `225 / 260`，原因全是 `rgb_mask_ratio`
+- `loss_real_last` 与 ungated 几乎一致，说明 real branch 未被明显误伤
+- 更重要的是：`RGB-only v2` 的 StageB 表现仍明显优于 legacy StageB
+
+工程判断更新：
+- `RGB-only v2 + gated_rgb0192` 已经从 A.5 候选升级成当前主候选 refine 分支；
+- 下一步不该先去 densify raw RGB mask，而应该先做更长一点的 `StageB` / 完整 schedule verify；
+- 若后续仍要扩张，优先考虑受几何约束的 support/depth expand。
+
+新增报告：
+- `docs/P2G_stageB_v2rgbonly_realbranch_compare_20260416.md`
+
+### 文档同步
+
+本轮同时更新：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+- `docs/hermes.md`
+
+并把当前下一步明确收敛到：
+- 以 `RGB-only v2 + gated_rgb0192` 为主候选做更长一点的验证；
+- 暂不直接做 raw RGB densify。
+
+### P2-F：RGB-only v2 StageA.5 ungated vs branch-specific gated compare
+
+本轮无代码改动，重点是把 gating 主线从 legacy 转到 `RGB-only v2`，并按用户要求把新实验输出写到 `/data2`。
+
+运行位置：
+- `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_p2f_stageA5_v2rgbonly_gating_compare_e1`
+
+新增运行：
+- `stageA5_v2rgbonly_xyz_ungated_80`
+- `stageA5_v2rgbonly_xyz_gated_rgb0192_80`
+
+协议要点：
+- `signal_pipeline=brpo_v2`
+- `stageA_rgb_mask_mode=brpo_v2_raw`
+- `stageA_depth_mask_mode=train_mask`
+- `stageA_target_depth_mode=target_depth_for_refine_v2`
+- `StageA.5 + xyz-only`
+- gated 臂使用 `min_rgb_mask_ratio=0.0192`，目的不是大扫，而是稳定拒掉最弱两档 RGB-only pseudo（`225 / 260`）
+
+关键结果：
+- `RGB-only v2 ungated` replay：`PSNR 23.923221 / SSIM 0.872280 / LPIPS 0.079949`
+- `RGB-only v2 gated_rgb0192` replay：`PSNR 23.924801 / SSIM 0.872320 / LPIPS 0.079931`
+- gated 相比 ungated：`+0.00158 PSNR / +3.92e-05 SSIM / -1.76e-05 LPIPS`
+- gated 臂产生真实 rejection：`59/80` iter，`74/320` sample eval，被拒 id 为 `225 / 260`，原因全是 `rgb_mask_ratio`
+- 更重要的是：`RGB-only v2` 整体在 `StageA.5` 上明显优于 legacy `StageA.5`
+
+工程判断更新：
+- gating 主线不必再停留在 legacy；`RGB-only v2` 已经是更值得继续推进的支路；
+- raw RGB support 图虽然看起来点状，但当前证据还不支持“必须立刻做 RGB densify”；
+- 若后续需要扩张，更合理的对象是受几何约束的 support/depth expand，而不是直接把 `raw_rgb_confidence_v2` 糊开。
+
+新增报告：
+- `docs/P2F_stageA5_v2rgbonly_gating_compare_20260416.md`
+
+### 文档同步
+
+本轮同时更新：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+- `docs/hermes.md`
+
+并把当前下一步明确收敛到：
+- 若继续推进 gating，围绕 `RGB-only v2` 做下一轮 branch-specific compare / StageB 验证；
+- 暂不直接做 raw RGB densify。
+
+### P2-E：legacy StageA.5 threshold calibration（`min_verified_ratio=0.02 / 0.03`）
+
+本轮无代码改动，重点是把 `P2-D` 的阈值诊断真正落实成 replay-grounded short compare。
+
+运行说明：
+- 由于 canonical `output/` 实际落在 `/data`，而本轮执行时 `/data` 已满，新实验目录临时写到：
+  - `/home/bzhang512/tmp_part3_brpo_outputs/20260416_p2e_stageA5_threshold_calibration_e1`
+- 输入协议与旧 `P2-B` 保持一致，只改 `pseudo_local_gating_min_verified_ratio`。
+
+新增运行：
+- `stageA5_legacy_xyz_gatevr002_80`
+- `stageA5_legacy_xyz_gatevr003_80`
+
+关键结果：
+- `vr=0.02`：开始稳定拒掉最弱 pseudo（`sample_id=260`），`37/80` iter 出现 rejection，`37/320` sample eval 被拒；
+- `vr=0.03`：进一步稳定拒掉 `225 + 260`，`59/80` iter 出现 rejection，`74/320` sample eval 被拒；
+- 所有 rejection 都只来自 `verified_ratio`，而不是 `rgb_mask_ratio` / `fallback_ratio`；
+- 但 replay 仍几乎不动：
+  - `vr=0.02`: `PSNR 23.852479 / SSIM 0.870652 / LPIPS 0.080929`
+  - `vr=0.03`: `PSNR 23.852239 / SSIM 0.870651 / LPIPS 0.080930`
+- 因而本轮真正得到的工程判断是：legacy `StageA.5` 上的 threshold softness 已不是主瓶颈；即便 gate 进入有效 reject 区，继续细磨 legacy threshold 的收益也很有限。
+
+新增报告：
+- `docs/P2E_stageA5_threshold_calibration_20260416.md`
+
+### 文档同步
+
+本轮同时更新：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+
+并把当前下一步明确收敛到：
+- 若只需要 calibrated legacy 参考臂，优先保留 `vr=0.02`；
+- 若继续推进 gating，更值得转到 `RGB-only v2` 做 branch-specific threshold calibration / short compare。
+
+### P2-D：signal gate 阈值 / 统计诊断
+
+本轮无代码改动，重点是把 `P2-B / P2-C` 里持续 `0 rejection` 的原因做成 code-grounded 诊断。
+
+检查对象：
+- `pseudo_branch/local_gating/gating_schema.py`
+- `pseudo_branch/local_gating/signal_gate.py`
+- `scripts/run_pseudo_refinement_v2.py`
+- `20260415_p2b_stageA5_local_gating_compare_e1/.../stageA_history.json`
+- `20260415_p2c_stageB_local_gating_compare_e1/.../stageB_history.json`
+- `20260415_signal_compare_stageAonly_e1/{legacy,v2-rgb-only,v2-full}`
+
+关键结论：
+- current gate 默认阈值 `min_verified=0.01 / min_rgb=0.01 / max_fallback=0.995` 对 legacy sampled view 来说过松，因此 `StageA.5 / StageB` 上的 `0 rejection` 是结构必然，不是实现没生效；
+- legacy sampled view 的实际范围约为：`verified 1.89%~5.17%`、`rgb 14.68%~22.05%`、`fallback 94.83%~98.11%`；
+- 如果想让 legacy gate 真正开始筛 weak pseudo，第一轮更值得扫的是 `min_verified_ratio`，推荐先看 `0.02 / 0.03`；
+- `RGB-only v2` 的 `rgb_confidence_nonzero_ratio` 只有约 `1.90%~2.01%`，与 legacy 的 `~18.9%` 不在同一量纲；因此在没做 branch-specific calibration 之前，不应直接把 current-threshold gating 挂到 `RGB-only v2` 上做可解释 compare。
+
+新增报告：
+- `docs/P2D_signal_gate_threshold_diagnostics_20260416.md`
+
+### 文档同步
+
+本轮同时更新：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+
+并把当前下一步明确收敛到：
+- 先做 legacy 口径下的 signal gate threshold calibration；
+- 再决定是否把 gating 挂到 `RGB-only v2` 上做 short compare。
+
+### P2：local Gaussian gating 第一版实现 + smoke
+
+代码变更：
+- `scripts/run_pseudo_refinement_v2.py`
+- `pseudo_branch/local_gating/__init__.py`
+- `pseudo_branch/local_gating/gating_schema.py`
+- `pseudo_branch/local_gating/signal_gate.py`
+- `pseudo_branch/local_gating/visibility_union.py`
+- `pseudo_branch/local_gating/grad_mask.py`
+- `pseudo_branch/local_gating/gating_io.py`
+
+本轮实现：
+1. 在 `run_pseudo_refinement_v2.py` 中新增 `pseudo_local_gating_*` CLI；
+2. 在 `StageA.5` 上接入：`pseudo-only backward -> local gate mask -> gaussian step`；
+3. 在 `StageB` 上改成 split backward：先 `pseudo_backward(retain_graph=has_real_branch)`，只裁 pseudo-side Gaussian grad，再叠 `real_backward()`；
+4. gating summary 现在会写进 `stageA_history.json / stageB_history.json`，包括 accepted/rejected pseudo ids、rejected reasons、visible union、grad keep ratio、pre/post grad norm；
+5. 第一版模块已拆到 `pseudo_branch/local_gating/`，避免把 signal gate / visibility union / grad mask 全塞在主脚本里。
+
+验证：
+- 远端 `py_compile` 已通过：
+  - `scripts/run_pseudo_refinement_v2.py`
+  - `pseudo_branch/local_gating/*.py`
+- 已完成 `StageA.5` smoke：
+  - off：`.../20260415_local_gating_smoke/stageA5_legacy_off_2iter`
+  - hard：`.../20260415_local_gating_smoke/stageA5_legacy_hard_2iter`
+- 已完成严格阈值 reject harness：
+  - `.../20260415_local_gating_smoke/stageA5_legacy_hard_reject_finalcheck`
+  - 实测 `xyz_grad` 可从 `3.79e-01 -> 0.0`
+- 已完成 `StageB` no-real smoke：
+  - `.../20260415_local_gating_smoke/stageB_legacy_hard_noreal_1x1`
+  - 实测 StageB split-backward + pseudo-side grad mask 路径可执行，`xyz_grad` 可从 `6.38e-02 -> 0.0`
+
+结构判断更新：
+- 第一版 local gating 已经从计划项变成真实代码路径；
+- 在 `StageA.5 pseudo-only` 下，如果 sampled pseudo views 全部通过 signal gate，那么 `visibility_filter union` 往往不会额外收缩 xyz grad norm；
+- 因而第一版 gating 的主要价值，体现在“拒绝 weak pseudo views 时阻断它们对 Gaussian 的更新”，而不是在全部 sampled views 都通过时再额外制造一层局部性。
+
+新增报告：
+- `docs/P2_local_gaussian_gating_first_impl_smoke_20260415.md`
+
+### 文档同步（P2 后）
+
+本轮在 P2 smoke 后再次同步：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+
+并把当前下一步更新为：
+- 8-frame `StageA.5` gated vs ungated short compare
+- 通过后再补 real-branch `StageB` smoke / short compare
+
+### P2-B：8-frame StageA.5 gated vs ungated short compare
+
+新增报告：
+- `docs/P2B_stageA5_local_gating_compare_20260415.md`
+
+运行根：
+- `/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_p2b_stageA5_local_gating_compare_e1`
+
+固定口径：
+- `signal_pipeline=legacy`
+- `stage_mode=stageA5`
+- `stageA_iters=80`
+- `num_pseudo_views=4`
+- `stageA5_trainable_params=xyz`
+- abs prior 固定为 `lambda_abs_t=3.0`、`lambda_abs_r=0.1`
+- init states 来自：`20260415_signal_compare_stageAonly_e1/stageA_legacy_80/pseudo_camera_states_stageA.json`
+
+对照臂：
+1. `stageA5_legacy_xyz_ungated_80`
+2. `stageA5_legacy_xyz_gated_80`
+
+关键结果：
+- gated replay 相比 ungated 只有极轻微优势：
+  - PSNR `+0.000439`
+  - SSIM `+0.000001`
+  - LPIPS `-0.000001`
+- gated 没有把 depth loss 压没：`loss_depth_last` 约 `0.05947`，与 ungated 的 `0.05948` 基本一致；
+- gated 的 `grad_keep_ratio_xyz` 最后一轮约 `0.8302`，80 iter 平均约 `0.7247`；
+- 但这轮 compare 中 `iters_with_rejection = 0 / 80`，说明所有 sampled pseudo views 都通过了 signal gate。
+
+结构判断更新：
+- 第一版 gating 在当前 fixed threshold 下是“基本无害，但区分度很弱”；
+- 当前 replay 改善极弱的核心原因，不是 wiring 没生效，而是 signal gate 没有真的拒掉 weak pseudo view；
+- 因此下一步最该验证的已经变成：real branch 打开后，pseudo-side gating 会不会误伤 global correction。
+
+### 文档同步（P2-B 后）
+
+本轮在 StageA.5 compare 后再次同步：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+
+并把当前下一步更新为：
+- 带 real branch 的 `StageB` gated vs ungated short compare
+
+### P2-C：real-branch StageB gated vs ungated short compare
+
+新增报告：
+- `docs/P2C_stageB_local_gating_realbranch_compare_20260415.md`
+
+运行根：
+- `/home/bzhang512/my_storage_500G/CV_Project/output/part3_BRPO/experiments/20260415_p2c_stageB_local_gating_compare_e1`
+
+固定口径：
+- 两臂都从同一个 `StageA.5 gated` 输出起跑：
+  - `refined_gaussians.ply`
+  - `pseudo_camera_states_final.json`
+- `stage_mode=stageB`
+- `stageA_iters=0`
+- `stageB_iters=20`
+- `num_pseudo_views=4`
+- `num_real_views=2`
+- `lambda_real=1.0`
+- `lambda_pseudo=1.0`
+- real branch:
+  - `train_manifest=/home/bzhang512/my_storage_500G/CV_Project/dataset/Re10k-1/part2_s3po/sparse/split_manifest.json`
+  - `train_rgb_dir=/home/bzhang512/my_storage_500G/CV_Project/dataset/Re10k-1/part2_s3po/sparse/rgb`
+
+对照臂：
+1. `stageB_from_stageA5gated_ungated_20`
+2. `stageB_from_stageA5gated_gated_20`
+
+关键结果：
+- gated 不会明显误伤 real branch：`loss_real_last` 与 ungated 几乎完全一致（约 `0.14798`）
+- gated replay 相比 ungated 甚至略差一点，但量级几乎可忽略：
+  - PSNR `-0.000045`
+  - SSIM `-0.00000056`
+  - LPIPS `+0.00000057`
+- 这轮 compare 中同样 `iters_with_rejection = 0 / 20`
+
+结构判断更新：
+- 当前最关键的问题已经不再是“real branch 会不会被误伤”；
+- 更真实的问题是：current threshold 下 signal gate 在 StageA.5 / StageB 都持续 `0 rejection`，所以第一版 gating 大部分时间只是在做 visible union，而没有真正筛掉 weak pseudo view。
+
+### 文档同步（P2-C 后）
+
+本轮在 StageB compare 后再次同步：
+- `docs/STATUS.md`
+- `docs/DESIGN.md`
+- `docs/CHANGELOG.md`
+
+并把当前下一步更新为：
+- 解释 current threshold 下为什么持续 `0 rejection`
+- 再决定是先调 signal gate 阈值，还是先把 gating 挂到 `RGB-only v2`
+
 ## 2026-04-13
 
 ### A+B 实施：split+scaled abs prior + 梯度贡献诊断
