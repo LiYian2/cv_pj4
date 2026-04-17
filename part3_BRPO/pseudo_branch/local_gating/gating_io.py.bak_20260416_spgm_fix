@@ -64,7 +64,6 @@ def build_iteration_gating_summary(
         'spgm_cluster_count_near': None,
         'spgm_cluster_count_mid': None,
         'spgm_cluster_count_far': None,
-        'spgm_density_mode_effective': None,
     }
     
     if spgm_stats:
@@ -85,7 +84,6 @@ def build_iteration_gating_summary(
             'spgm_cluster_count_near': spgm_stats.get('cluster_count_near'),
             'spgm_cluster_count_mid': spgm_stats.get('cluster_count_mid'),
             'spgm_cluster_count_far': spgm_stats.get('cluster_count_far'),
-            'spgm_density_mode_effective': spgm_stats.get('density_mode_effective'),
         })
     
     summary.update(spgm_fields)

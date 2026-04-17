@@ -1,7 +1,7 @@
 # DESIGN.md - Part3 设计文档
 
 > 本文档记录**当前实际采用**的设计决策、接口定义与默认实验方案。
-> 最后更新：2026-04-16 13:56 CST
+> 最后更新：2026-04-17 01:07 CST
 
 ---
 
@@ -330,12 +330,17 @@ signal_v2/frame_<frame_id>/
 18. `P2-H` 的 `StageB-120iter` verify 又把问题进一步收紧了：当前主候选虽然仍略优于同支路 ungated，但两条臂都已退回到低于 `after_opt` baseline、也低于各自 `StageA.5` handoff 起点的区间。
 19. 更关键的是：这次 regression 并不是因为 gating 失效；相反，`gated_rgb0192` 在 `120iter` 中依然有 `96/120` 的 rejection、持续拒掉 `225/260`，`grad_keep_ratio_xyz_mean≈0.729`，而 `loss_real_last` 与 pose aggregate 又与 ungated 基本同量级。
 20. 因而当前更合理的设计判断是：主要瓶颈已经从“signal gate 阈值是否合适”转到“StageB 后段训练动力学是否稳定”；也就是说，现在该优先修的是 `StageB schedule / objective balance`，而不是继续把问题往 raw RGB 稀疏或 support 扩张上解释。
+21. `P2-I` 的窗口定位又把这个判断进一步 sharpen 了：当前 gated 主候选的 PSNR 正向窗口并不只停在 `20iter`，而是至少能延续到 `80iter`，其中 `40iter` 是当前最优 PSNR 点；这说明 `StageB` 不是“从一开始就错”，而是“late-stage 失稳”。
+22. 但另一方面，`SSIM / LPIPS` 的最好点都停在 `20iter`，其中 LPIPS 从 `20 -> 40 -> 80 -> 120` 呈单调变差；而 `80 -> 120` 还伴随 `loss_real` 从约 `0.0277` 回弹到约 `0.1191`。这说明当前 `StageB` 的后段并不是简单的“继续优化同一目标”，而更像是目标平衡被重新打坏了。
+23. `P2-J` 则进一步说明：这个 late-stage cliff 不是不可救。只靠一个很小的 bounded schedule 改动（尤其 `post40_lr03_120`）就能把原始 `120iter` 明显拉回，并在 PSNR 上略高于此前 `40iter` 的最佳点。
+24. 但同样重要的是：`P2-J` 也没有把 `StageB` 变成一个明显强于早期窗口的新长程 regime。它更像是“给出一个足够好的 bounded baseline”，而不是“证明 StageB 仍值得继续深调”。
+25. 因而从设计优先级看，当前最合理的判断已经从“继续修 StageB schedule / objective balance”转成“保留一个 bounded StageB baseline，然后把主工程重心切到 SPGM 第一版落地”。
 
 ### 6.3 下一步（当前真正优先级）
 
 - legacy `StageA.5` 的 threshold calibration 已完成，当前 legacy 侧只保留 `min_verified_ratio=0.02` 作为参考臂即可；
-- `P2-H` 已经回答了“更长一点的 StageB verify 会发生什么”这个问题：当前主候选在 `20iter` 好、到 `120iter` 会 regression；因此下一步不再是笼统地继续加长 budget，而是转入 `StageB stabilization`；
-- 第一批最值得做的稳定化变量，是 `20iter` 之后的后段 `xyz lr` 降档与 `lambda_real : lambda_pseudo` 再平衡；在这之前，仍不急着对 raw RGB mask 直接做 densify，也不急着上 `xyz+opacity`、soft gating 或 full SPGM。
+- `P2-J` 已经把 bounded StageB follow-up 做完了：当前可以直接把 `post40_lr03_120` 视为 bounded StageB baseline，而不必再继续开新的长跑 schedule compare。
+- 但从结构优先级看，当前主线已经从“先把 SPGM 接到 StageB 看看”进一步收紧到“先把 SPGM 从 suppressor 修成 selector”。`P2-L` 的 aligned compare 证明了 current deterministic `spgm_keep` 仍低于 canonical baseline；而 `P2-M` 又证明了只要减弱 suppress 强度，replay 就能明显回升，但仍不能完全追平 baseline。因此下一步不再是继续扫 soft suppress 强度，而是应以 repair A 为 anchor 做 selector-first 改写。在这之前，仍不急着对 raw RGB mask 直接做 densify，也不急着上 full stochastic attenuation。
 
 ### 6.4 当前不建议做的事
 
@@ -347,7 +352,7 @@ signal_v2/frame_<frame_id>/
 
 当前可以把设计判断固定成一句话：
 
-**当前真正值得优先推进的，不是继续在 StageA-only 上比较 replay，也不是继续在 legacy `StageA.5` 上细磨 threshold，而是：承认 `RGB-only v2 + gated_rgb0192` 虽然是当前最好的一条 refine 分支，但它在 `StageB-120iter` 还不稳定；因此下一步应优先做 `StageB stabilization`（回落窗口定位 + 后段调度），而不是先去 densify raw RGB mask。**
+**当前真正值得优先推进的，不是继续在 StageA-only 上比较 replay，也不是继续把主要精力压在 `StageB` schedule 微调上，而是：保留 `post40_lr03_120` 这个 bounded StageB baseline，然后把主工程重心切到 `SPGM` 的 selector-first repair（以 conservative repair A 为新 anchor）。**
 
 
 ## 8. Internal cache -> StageA/A.5 -> StageB 当前方法与 pipeline（2026-04-13）
@@ -766,3 +771,179 @@ P2-B / P2-C 都给出了同一个信号：
    - 在 `RGB-only v2` 分支上测试同样 gating 看 rejection 是否更自然出现；
 3. 只有当 signal gate 真能筛掉一部分 weak pseudo view 时，再讨论 `xyz+opacity`、soft gating 或更重的 SPGM 才有意义。
 
+## 24. SPGM 第一版工程接入设计（2026-04-16）
+
+### 24.1 SPGM 落点不是上游 signal builder，而是 Gaussian-side grad management
+
+当前 repo 已经具备：
+- run_pseudo_refinement_v2.py 的 backward 后插口
+- local_gating 的 visibility_union 到 grad_mask 路径
+- StageA.5 / StageB 的 pseudo/real backward 分离
+
+因此 SPGM 最自然的落点是：
+- 把 accepted pseudo views 到 visibility union 到 grad mask
+- 升级为 accepted pseudo views 到 per-Gaussian stats 到 importance 到 grad weights
+
+### 24.2 Phase 0 plumbing 已完成：三路分支 wiring 通
+
+Phase 0 完成内容：
+- 新增 pseudo_branch/spgm/ 三层骨架：stats.py / score.py / policy.py
+- 扩展 gating_schema.py：SPGM 字段 + uses_spgm() 方法
+- 扩展 CLI：spgm_keep / spgm_soft mode + 11 个 SPGM 超参
+- 扩展 history：17 个 spgm_* 统计字段
+- 三路分支：visibility_union / spgm / off
+
+### 24.3 Phase 1-3 待实现：stats/score/policy 真实逻辑
+
+Phase 1（stats.py）✅ 已完成：
+- 向量化 weighted median 实现（方案A）
+- smoke 验证：active_ratio 非全 0，每 iter 约 1.3s
+- 原版 Python 循环版本卡死（>5min/iter）
+
+Phase 1（stats.py）原计划：
+- support_count：per-Gaussian pseudo view 支持数
+- depth_value：camera-space depth（用 gaussians.get_xyz + current_w2c）
+- density_proxy：opacity * support normalized
+- active_mask：support_count > 0
+
+Phase 2（score.py）✅ 已完成：
+- depth partition (K=3)、density entropy、importance fusion
+- smoke 验证：importance_mean=0.557、cluster 分布合理
+
+Phase 2（score.py）原计划：
+- depth partition（K=3 quantile）
+- depth_score / density_entropy / density_score
+- importance_score + support modifier
+
+Phase 3（policy.py）✅ 已完成：
+- deterministic soft keep + cluster-aware weighting
+- smoke验证：weight_mean=0.458, grad真实被调制
+- SPGM v1不再是placeholder,而是real working pipeline
+
+Phase 3（policy.py）原计划：
+- deterministic soft keep
+- cluster-aware weighting
+- inactive -> 0
+
+### 24.4 SPGM 第一版不做的边界
+
+Phase 0-3 明确不做：
+- 不改 build_brpo_v2_signal_from_internal_cache.py
+- 不改 pseudo_loss_v2.py
+- 不上 stochastic drop
+- 不把 SPGM 压到 real branch
+- 不先做 xyz_opacity
+- 不覆盖旧 hard_visible_union_signal 路径
+
+
+
+
+### 24.9 原始 StageB-120 compare 的正确口径（经 forensic audit 修正）
+
+`20260416_spgm_v1_stageB_compare_120iter` 这轮结果现在必须按审查后的真实 protocol 来理解：
+- baseline: `hard_visible_union_signal`
+- exp: `spgm_keep`
+- 但它不是 canonical `post40_lr03_120 / gated_rgb0192` compare；实际仍是 `stageB_post_switch_iter=0`、`min_rgb_mask_ratio=0.01`、且没有复用 `init_pseudo_camera_states_json` 的 raw-120 protocol。
+
+因此这轮原始 replay 结果：
+- baseline：`24.136 / 0.87385 / 0.08189`
+- exp：`23.594 / 0.85926 / 0.08912`
+- delta：`-0.542 PSNR / -0.01459 SSIM / +0.00724 LPIPS`
+
+它真正证明的是：在这条 raw protocol 下，当前 deterministic `SPGM v1` 比自己的 matched baseline 更差；但它本身还不足以回答“SPGM 是否输给项目当前主 baseline”。
+
+### 24.10 Canonical StageB formal compare（2026-04-17）
+
+`P2-L` 已把这一步正式补齐：[参见 `docs/P2L_spgm_canonical_stageB_compare_20260417.md`]。
+
+对齐后的 protocol 固定为：
+- same StageA.5 handoff：`stageA5_v2rgbonly_xyz_gated_rgb0192_80`
+- same sequential handoff：`init_pseudo_camera_states_json = pseudo_camera_states_final.json`
+- same StageB schedule：`post40_lr03_120`
+- same upstream view gate：`gated_rgb0192` 对应的 `min_rgb_mask_ratio=0.0192`
+- only study variable：Gaussian-side pseudo grad manager（baseline `hard_visible_union_signal` vs exp `spgm_keep`）
+
+正式结果：
+- canonical baseline：`24.02982 / 0.87229 / 0.08177`
+- canonical SPGM：`23.94230 / 0.86956 / 0.08359`
+- delta（SPGM - baseline）：`-0.08753 PSNR / -0.00273 SSIM / +0.00182 LPIPS`
+
+这一步把设计判断进一步收紧成三点：
+1. **protocol drift 已不再是主解释。** 对齐到 canonical baseline 后，SPGM 仍然是负结果。
+2. **当前 deterministic SPGM 更像 suppressor，不像 selector。** 两臂 rejection 完全一致（`96/120` iter，拒绝 `225/260`），`grad_keep_ratio_xyz_mean` 也几乎不变（`0.7290 -> 0.7290`），说明 active set 没改；但 `grad_weight_mean_xyz_mean` 从 baseline 的 `0.7290` 压到 SPGM 的 `0.3586`，说明主要变化仍是对同一 active set 做更强连续压制。
+3. **real 更低、pseudo 更高的模式仍存在。** `loss_real_last` 从 baseline 的 `0.12154` 降到 SPGM 的 `0.11920`，但 `loss_pseudo_last` 从 `0.02706` 升到 `0.02922`；这更像 pseudo-side 更新被压住，而不是更优的 Gaussian 选择。
+
+因此当前设计优先级应明确固定为：
+- baseline 保留：`post40_lr03_120 / gated_rgb0192`
+- SPGM 下一步：conservative deterministic + selector-first repair
+- 暂不推进：stochastic drop、`xyz+opacity`、更长 iter 放大
+
+### 24.11 Conservative deterministic repair compare（2026-04-17）
+`P2-M` 在不改 protocol 的前提下，对 `P2-L` 的当前 deterministic SPGM 做了最小 repair：[参见 `docs/P2M_spgm_conservative_repair_compare_20260417.md`]。
+
+repair 结果需要记住四点：
+1. **减弱 suppress 强度是有效的。** 最好 A 臂（`keep=(1,1,1), eta=0, weight_floor=0.25`）把 replay 从原始 SPGM 的 `23.94230 / 0.86956 / 0.08359` 拉回到 `24.00212 / 0.87132 / 0.08244`，说明当前负结果里确实有相当一部分来自 policy 过强。
+2. **但仅靠更温和的 soft suppress 还不够。** repair A 相对 canonical baseline 仍有 `-0.02771 PSNR / -0.00096 SSIM / +0.00067 LPIPS`，所以 current policy 的问题不只是“压太狠”，还包括“没有真正改 active set”。
+3. **机制证据依旧一致。** repair A / B 的 rejection 与 active ratio 仍几乎不变，真正回升的是 `grad_weight_mean_xyz_mean`：从原始 SPGM 的 `0.3586` 回到 A 的 `0.5497`、B 的 `0.4977`。这说明当前 repair 仍主要是在修正 suppress 强度，而不是做 selection。
+4. **因此下一步的设计重点必须转成 selector-first。** 当前最合理的路线不再是继续扫 `weight_floor / eta / cluster_keep` 的软强度，而是让 policy 在 cluster 内先做 quantile / top-k keep，再决定 soft weight 如何叠加。
+
+当前更准确的设计口径应是：
+- baseline 保留：`post40_lr03_120 / gated_rgb0192`
+- SPGM 新 anchor：`spgm_repair_a_keep111_eta0_wf025`
+- 下一步：selector-first rewrite
+- 暂不推进：stochastic、`xyz+opacity`、更长 iter
+
+### 24.8 Phase 5 StageB 接入完成总结
+
+实验设置：
+- baseline: hard_visible_union_signal（StageB 40 iter）
+- exp: spgm_keep（StageB 40 iter）
+- 两臂均包含 StageA 300 iter 前置
+
+关键发现：
+1. **SPGM在StageB真实生效**：exp中 xyz grad 明显 pre->post 下降；baseline为 pre=post。
+2. **只压 pseudo side 成功**：StageB real loss 轨迹与 baseline 几乎一致（<1% 量级差异）。
+3. **active ratio 对齐**：exp 的 spgm_active_ratio 与 baseline keep_xyz 基本一致。
+4. **短预算40 iter下总体稳定**：total/real/pseudo loss 无异常发散。
+
+结论：
+- Phase 5 达成：SPGM 已成功接入 StageB，且保持“只作用 pseudo backward 后 grad”的设计边界。
+- 下一步建议：Phase 6 做更长预算（120 iter）与 replay 评估，确认收益方向。
+
+### 24.7 Phase 4 StageA.5 Compare 完成总结
+
+实验设置：
+- baseline: hard_visible_union_signal (20 iter)
+- exp: spgm_keep (20 iter)
+- 其他参数与 P2-F winner 一致
+
+关键发现：
+1. **Grad modulation 生效**：Exp 的 grad_norm_xyz 从 pre→post 有真实降低（67%保留率），baseline 无调制
+2. **Active ratio 一致**：两臂的 active ratio 完全一致（0.587→0.830），说明 SPGM 的 active 判断与 visibility-union 一致
+3. **Loss/pose trajectory 一致**：两臂的 total_loss 和 pose delta 几乎完全一致，说明 SPGM 的 grad modulation 对短期优化动力学影响很小
+4. **SPGM stats 正常**：weight_mean≈0.46, importance_mean≈0.56, density_entropy≈0.09, cluster 分布合理
+
+结论：
+- SPGM v1 不是 no-op，而是 real working per-Gaussian grad weighting
+- 短期（20 iter）看不出明显差异，需要更长时间或 StageB 接入验证
+- 下一步：Phase 5（StageB 接入）或 Phase 4.5（更长 iter compare）
+
+### 24.6 Phase 0-3 完成总结
+
+SPGM v1 实现状态：
+- Phase 0：plumbing ✅ (CLI/config/history/三路分支)
+- Phase 1：stats.py ✅ (向量化weighted median)
+- Phase 2：score.py ✅ (depth partition/entropy/importance)
+- Phase 3：policy.py ✅ (soft keep + cluster weights)
+
+Smoke验证结果：
+- spgm_active_ratio ≈ 0.59, 非全0
+- spgm_weight_mean ≈ 0.46, 权重分布合理
+- grad_keep_ratio_xyz ≈ 0.59, grad真实被调制
+- SPGM不再是no-op
+
+### 24.5 验证阶梯
+
+1. StageA.5 smoke（5 iter）：wiring 通、不是 no-op
+2. StageA.5 正式 compare（20 iter）：与 baseline 有可观察差异
+3. StageB 接入：只压 pseudo backward，不动 real branch

@@ -37,11 +37,6 @@ from pseudo_branch.local_gating import (
     apply_gaussian_grad_mask,
     build_iteration_gating_summary,
 )
-from pseudo_branch.spgm import (
-    collect_spgm_stats,
-    build_spgm_importance_score,
-    build_spgm_grad_weights,
-)
 
 
 def load_v1_module():
@@ -107,7 +102,7 @@ def parse_args():
     p.add_argument('--stageA5_lr_opacity', type=float, default=5e-4)
     p.add_argument('--stageA5_disable_densify', action='store_true', default=True)
     p.add_argument('--stageA5_disable_prune', action='store_true', default=True)
-    p.add_argument('--pseudo_local_gating', choices=['off', 'hard_visible_union_signal', 'soft_visible_union_signal', 'spgm_keep', 'spgm_soft'], default='off')
+    p.add_argument('--pseudo_local_gating', choices=['off', 'hard_visible_union_signal', 'soft_visible_union_signal'], default='off')
     p.add_argument('--pseudo_local_gating_params', choices=['xyz', 'xyz_opacity'], default='xyz')
     p.add_argument('--pseudo_local_gating_min_verified_ratio', type=float, default=0.01)
     p.add_argument('--pseudo_local_gating_min_rgb_mask_ratio', type=float, default=0.01)
@@ -115,18 +110,6 @@ def parse_args():
     p.add_argument('--pseudo_local_gating_min_correction', type=float, default=0.0)
     p.add_argument('--pseudo_local_gating_soft_power', type=float, default=1.0)
     p.add_argument('--pseudo_local_gating_log_interval', type=int, default=20)
-    # SPGM-specific CLI parameters
-    p.add_argument('--pseudo_local_gating_spgm_num_clusters', type=int, default=3)
-    p.add_argument('--pseudo_local_gating_spgm_alpha_depth', type=float, default=0.5)
-    p.add_argument('--pseudo_local_gating_spgm_beta_entropy', type=float, default=0.5)
-    p.add_argument('--pseudo_local_gating_spgm_gamma_entropy', type=float, default=0.5)
-    p.add_argument('--pseudo_local_gating_spgm_support_eta', type=float, default=0.5)
-    p.add_argument('--pseudo_local_gating_spgm_weight_floor', type=float, default=0.05)
-    p.add_argument('--pseudo_local_gating_spgm_entropy_bins', type=int, default=32)
-    p.add_argument('--pseudo_local_gating_spgm_density_mode', default='opacity_support')
-    p.add_argument('--pseudo_local_gating_spgm_cluster_keep_near', type=float, default=1.0)
-    p.add_argument('--pseudo_local_gating_spgm_cluster_keep_mid', type=float, default=0.8)
-    p.add_argument('--pseudo_local_gating_spgm_cluster_keep_far', type=float, default=0.6)
     p.add_argument('--stageB_iters', type=int, default=120)
     p.add_argument('--stageB_post_switch_iter', type=int, default=0, help='If >0, apply post-switch StageB settings starting from this iteration + 1')
     p.add_argument('--stageB_post_lr_scale_xyz', type=float, default=1.0, help='Scale xyz lr by this factor after --stageB_post_switch_iter')
@@ -629,18 +612,6 @@ def build_pseudo_local_gating_cfg(args) -> PseudoLocalGatingConfig:
         min_correction=float(args.pseudo_local_gating_min_correction),
         soft_power=float(args.pseudo_local_gating_soft_power),
         log_interval=int(args.pseudo_local_gating_log_interval),
-        # SPGM-specific hyperparameters
-        spgm_num_clusters=int(args.pseudo_local_gating_spgm_num_clusters),
-        spgm_alpha_depth=float(args.pseudo_local_gating_spgm_alpha_depth),
-        spgm_beta_entropy=float(args.pseudo_local_gating_spgm_beta_entropy),
-        spgm_gamma_entropy=float(args.pseudo_local_gating_spgm_gamma_entropy),
-        spgm_support_eta=float(args.pseudo_local_gating_spgm_support_eta),
-        spgm_weight_floor=float(args.pseudo_local_gating_spgm_weight_floor),
-        spgm_entropy_bins=int(args.pseudo_local_gating_spgm_entropy_bins),
-        spgm_density_mode=args.pseudo_local_gating_spgm_density_mode,
-        spgm_cluster_keep_near=float(args.pseudo_local_gating_spgm_cluster_keep_near),
-        spgm_cluster_keep_mid=float(args.pseudo_local_gating_spgm_cluster_keep_mid),
-        spgm_cluster_keep_far=float(args.pseudo_local_gating_spgm_cluster_keep_far),
     )
 
 
@@ -660,11 +631,9 @@ def _init_gating_history_lists(container: dict) -> None:
             'rejected_reasons': [],
             'accepted_signal_weights': [],
             'sample_signal_metrics': [],
-            # Legacy visibility-union fields
             'visible_union_ratio': [],
             'visible_union_weight_mean': [],
             'accepted_visibility_count': [],
-            # Grad stats (common)
             'grad_keep_ratio_xyz': [],
             'grad_keep_ratio_opacity': [],
             'grad_weight_mean_xyz': [],
@@ -673,24 +642,6 @@ def _init_gating_history_lists(container: dict) -> None:
             'grad_norm_xyz_post_mask': [],
             'grad_norm_opacity_pre_mask': [],
             'grad_norm_opacity_post_mask': [],
-            # SPGM-specific fields
-            'spgm_active_ratio': [],
-            'spgm_accepted_view_count': [],
-            'spgm_support_mean': [],
-            'spgm_support_p50': [],
-            'spgm_support_max': [],
-            'spgm_depth_entropy': [],
-            'spgm_density_entropy': [],
-            'spgm_importance_mean': [],
-            'spgm_importance_p50': [],
-            'spgm_weight_mean': [],
-            'spgm_weight_p10': [],
-            'spgm_weight_p50': [],
-            'spgm_weight_p90': [],
-            'spgm_cluster_count_near': [],
-            'spgm_cluster_count_mid': [],
-            'spgm_cluster_count_far': [],
-            'spgm_density_mode_effective': [],
         }
     )
 
@@ -704,11 +655,9 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'rejected_reasons',
         'accepted_signal_weights',
         'sample_signal_metrics',
-        # Legacy visibility-union fields
         'visible_union_ratio',
         'visible_union_weight_mean',
         'accepted_visibility_count',
-        # Grad stats (common)
         'grad_keep_ratio_xyz',
         'grad_keep_ratio_opacity',
         'grad_weight_mean_xyz',
@@ -717,24 +666,6 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'grad_norm_xyz_post_mask',
         'grad_norm_opacity_pre_mask',
         'grad_norm_opacity_post_mask',
-        # SPGM-specific fields
-        'spgm_active_ratio',
-        'spgm_accepted_view_count',
-        'spgm_support_mean',
-        'spgm_support_p50',
-        'spgm_support_max',
-        'spgm_depth_entropy',
-        'spgm_density_entropy',
-        'spgm_importance_mean',
-        'spgm_importance_p50',
-        'spgm_weight_mean',
-        'spgm_weight_p10',
-        'spgm_weight_p50',
-        'spgm_weight_p90',
-        'spgm_cluster_count_near',
-        'spgm_cluster_count_mid',
-        'spgm_cluster_count_far',
-        'spgm_density_mode_effective',
     ]
     for key in keys:
         container[key].append(summary.get(key))
@@ -743,12 +674,19 @@ def _append_gating_history(container: dict, summary: dict) -> None:
 def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, gating_cfg: PseudoLocalGatingConfig) -> dict:
     sampled_ids = [int(v['sample_id']) for v in sampled_views]
     gate_results = evaluate_sampled_views_for_local_gating(sampled_views, gating_cfg)
-    
-    spgm_stats = None  # Will be filled only for SPGM modes
-    
-    # Three-way branch: visibility-union / SPGM / off
-    if not gating_cfg.enabled():
-        # No gating - full grad passthrough
+    if gating_cfg.enabled():
+        visibility_stats = build_visibility_weight_map(
+            render_packages=render_packages,
+            gate_results=gate_results,
+            num_gaussians=int(gaussians._xyz.shape[0]),
+            device=gaussians._xyz.device,
+        )
+        grad_stats = apply_gaussian_grad_mask(
+            gaussians=gaussians,
+            weights=visibility_stats['weights'],
+            params_mode=gating_cfg.params,
+        )
+    else:
         grad_xyz = _grad_norm_from_param(getattr(gaussians, '_xyz', None))
         grad_opacity = _grad_norm_from_param(getattr(gaussians, '_opacity', None))
         visibility_stats = {
@@ -766,85 +704,6 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
             'grad_norm_opacity_pre_mask': grad_opacity,
             'grad_norm_opacity_post_mask': grad_opacity,
         }
-    
-    elif gating_cfg.uses_visibility_union():
-        # Legacy visibility-union path
-        visibility_stats = build_visibility_weight_map(
-            render_packages=render_packages,
-            gate_results=gate_results,
-            num_gaussians=int(gaussians._xyz.shape[0]),
-            device=gaussians._xyz.device,
-        )
-        grad_stats = apply_gaussian_grad_mask(
-            gaussians=gaussians,
-            weights=visibility_stats['weights'],
-            params_mode=gating_cfg.params,
-        )
-    
-    elif gating_cfg.uses_spgm():
-        accepted_view_count = sum(1 for item in gate_results if float(item.get('weight', 0.0)) > 0.0)
-        spgm_raw_stats = collect_spgm_stats(
-            sampled_views=sampled_views,
-            gate_results=gate_results,
-            render_packages=render_packages,
-            gaussians=gaussians,
-            device=gaussians._xyz.device,
-        )
-        spgm_score = build_spgm_importance_score(
-            depth_value=spgm_raw_stats['depth_value'],
-            density_proxy=spgm_raw_stats['density_proxy'],
-            support_count=spgm_raw_stats['support_count'],
-            active_mask=spgm_raw_stats['active_mask'],
-            num_clusters=gating_cfg.spgm_num_clusters,
-            alpha_depth=gating_cfg.spgm_alpha_depth,
-            beta_entropy=gating_cfg.spgm_beta_entropy,
-            gamma_entropy=gating_cfg.spgm_gamma_entropy,
-            support_eta=gating_cfg.spgm_support_eta,
-            entropy_bins=gating_cfg.spgm_entropy_bins,
-            density_mode=gating_cfg.spgm_density_mode,
-        )
-        spgm_policy = build_spgm_grad_weights(
-            importance_score=spgm_score['importance_score'],
-            cluster_id=spgm_score['cluster_id'],
-            active_mask=spgm_raw_stats['active_mask'],
-            weight_floor=gating_cfg.spgm_weight_floor,
-            cluster_keep=(gating_cfg.spgm_cluster_keep_near, gating_cfg.spgm_cluster_keep_mid, gating_cfg.spgm_cluster_keep_far),
-        )
-        grad_stats = apply_gaussian_grad_mask(
-            gaussians=gaussians,
-            weights=spgm_policy['weights'],
-            params_mode=gating_cfg.params,
-        )
-        # SPGM mode doesn't use visibility_union, so mark as None
-        visibility_stats = {
-            'visible_union_ratio': None,
-            'visible_union_weight_mean': None,
-            'accepted_count': int(accepted_view_count),
-        }
-        # Collect SPGM summary for history
-        spgm_stats = {
-            'active_ratio': spgm_raw_stats['active_ratio'],
-            'accepted_view_count': int(accepted_view_count),
-            'support_mean': spgm_raw_stats['support_mean'],
-            'support_p50': spgm_raw_stats['support_p50'],
-            'support_max': spgm_raw_stats['support_max'],
-            'depth_entropy': spgm_score['depth_entropy'],
-            'density_entropy': spgm_score['density_entropy'],
-            'importance_mean': spgm_score['importance_mean'],
-            'importance_p50': spgm_score['importance_p50'],
-            'weight_mean': spgm_policy['weight_mean'],
-            'weight_p10': spgm_policy['weight_p10'],
-            'weight_p50': spgm_policy['weight_p50'],
-            'weight_p90': spgm_policy['weight_p90'],
-            'cluster_count_near': spgm_score['cluster_count_near'],
-            'cluster_count_mid': spgm_score['cluster_count_mid'],
-            'cluster_count_far': spgm_score['cluster_count_far'],
-            'density_mode_effective': spgm_score['density_mode_effective'],
-        }
-    
-    else:
-        raise ValueError(f'Unknown gating mode: {gating_cfg.mode}')
-    
     return build_iteration_gating_summary(
         mode=gating_cfg.mode,
         params=gating_cfg.params,
@@ -852,7 +711,6 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
         gate_results=gate_results,
         visibility_stats=visibility_stats,
         grad_stats=grad_stats,
-        spgm_stats=spgm_stats,
     )
 
 

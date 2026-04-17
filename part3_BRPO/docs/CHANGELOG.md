@@ -5,7 +5,201 @@
 
 ---
 
+## 2026-04-17
+
+### P2-M：SPGM conservative deterministic repair compare 完成
+
+运行根：
+- `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260417_p2m_spgm_conservative_repair_e1`
+
+新增文档：
+- `docs/P2M_spgm_conservative_repair_compare_20260417.md`
+
+协议：
+1. 完全复用 `P2-L` 的 canonical StageB protocol；
+2. 不改 handoff / schedule / upstream gate，只做 deterministic SPGM policy repair；
+3. 新增两条 conservative repair 臂：
+   - A: `keep=(1,1,1), support_eta=0.0, weight_floor=0.25`
+   - B: `keep=(1,1,0.9), support_eta=0.25, weight_floor=0.20`
+
+关键结果：
+- previous SPGM：`23.94230 / 0.86956 / 0.08359`
+- repair A：`24.00212 / 0.87132 / 0.08244`
+- repair B：`23.99595 / 0.87115 / 0.08259`
+- canonical baseline：`24.02982 / 0.87229 / 0.08177`
+
+机制层结论：
+- repair A / B 都明显优于 previous SPGM，说明 current policy 的主要问题确实包含 suppress 过强；
+- 但两臂 rejection 与 active ratio 仍几乎不变，真正回升的是 `grad_weight_mean_xyz_mean`（`0.3586 -> 0.5497 / 0.4977`），说明这一步仍主要是在修 suppress 强度，而不是改 selection；
+- best arm 为 A，但它仍略低于 canonical baseline。
+
+新的项目判断：
+- conservative deterministic repair 已证明这条方向能部分追回 replay；
+- 但只做更温和的 soft suppress 已接近边际，下一步应从 A 臂出发做 selector-first rewrite；
+- 在 selector-first 之前，不推进 stochastic drop、`xyz+opacity` 或更长 iter。
+
+---
+
+### P2-L：SPGM canonical StageB formal compare 完成
+
+运行根：
+- `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260417_p2k_canonical_stageB_compare_e1`
+
+新增文档：
+- `docs/P2L_spgm_canonical_stageB_compare_20260417.md`
+
+协议：
+1. 完全复用 canonical bounded StageB baseline：`RGB-only v2 + gated_rgb0192 + post40_lr03_120`；
+2. 完全复用顺序 handoff：`init_pseudo_camera_states_json = stageA5_v2rgbonly_xyz_gated_rgb0192_80/pseudo_camera_states_final.json`；
+3. 只替换 Gaussian-side pseudo grad manager：baseline=`hard_visible_union_signal`，exp=`spgm_keep`；
+4. 其余设置保持一致：同 pseudo cache、同 `signal_v2`、同 real branch、同 seed、同 replay evaluator。
+
+关键结果：
+- canonical baseline：`24.02982 / 0.87229 / 0.08177`
+- canonical SPGM：`23.94230 / 0.86956 / 0.08359`
+- delta（SPGM - baseline）：`-0.08753 PSNR / -0.00273 SSIM / +0.00182 LPIPS`
+
+机制层结论：
+- aligned compare 下，两臂 rejection 完全一致：`96/120` iter、拒绝 `225 / 260`；
+- `grad_keep_ratio_xyz_mean` 几乎不变：baseline `0.7290`，SPGM `0.7290`；
+- `grad_weight_mean_xyz_mean` 明显下降：baseline `0.7290`，SPGM `0.3586`；
+- `loss_real_last` 更低，但 `loss_pseudo_last` 更高，继续指向“强 suppressor 而不是 selector”。
+
+新的项目判断：
+- protocol drift 这一层已经被正式排除：即便对齐到 canonical baseline，当前 deterministic `SPGM v1` 仍低于 canonical baseline；
+- 因而下一步不再是“先补 formal compare”，而是进入 `SPGM repair`：优先 conservative deterministic / selector-first 改写；
+- 在此之前，不推进 stochastic drop、`xyz+opacity` 或更长 iter 放大。
+
+---
+
 ## 2026-04-16
+
+
+### P2-K：SPGM v1 forensic audit 完成
+
+### P2-K：forensic follow-up code hygiene fixes + protocol confirmation
+
+代码修补：
+- `pseudo_branch/spgm/score.py`：修正 density entropy 归一化为 `H / log(B)`；同时让 `density_mode` 真正参与 density-side score / entropy 分支，而不再是 dead param
+- `scripts/run_pseudo_refinement_v2.py`：SPGM 分支的 `accepted_count` 改为真实 accepted views 计数；并把 `density_mode_effective` 传入 summary/history
+- `pseudo_branch/local_gating/gating_io.py`：新增 `spgm_density_mode_effective` summary 字段
+
+验证：
+- 本地与远端 `py_compile` 已通过
+- 直接 smoke 已确认：
+  - uniform 2-bin entropy 返回 `1.0`（归一化标尺已正确）
+  - `density_mode='support'` 已被真实消费并写入 summary
+  - `maybe_apply_pseudo_local_gating()` 在 1 accepted / 1 rejected 的 stub 场景下，`accepted_visibility_count` 与 `spgm_accepted_view_count` 都正确记录为 `1`
+
+实验口径再确认：
+- 当前 canonical reference baseline 仍应是 `post40_lr03_120 / gated_rgb0192`
+- 已跑的 `20260416_spgm_v1_stageB_compare_120iter` 实际 protocol 为：`stageB_post_switch_iter=0`、`stageB_post_lr_scale_xyz=1.0`、`min_rgb_mask_ratio=0.01`、`spgm_keep/raw hard-visible-union compare`
+- 因而它不是对 canonical bounded baseline 的正式对照
+
+---
+
+
+审查文档：
+- `docs/P2K_spgm_v1_forensic_audit_20260416.md`
+
+审查范围：
+1. `STATUS / DESIGN / CHANGELOG / Noah.md / hermes.md`
+2. `scripts/run_pseudo_refinement_v2.py` 与 `pseudo_branch/spgm/*`
+3. `20260416_spgm_v1_stageA5_compare_e1`
+4. `20260416_spgm_v1_stageB_compare_e1`
+5. `20260416_spgm_v1_stageB_compare_120iter`
+
+冻结事实：
+- 代码主 wiring 是对的：SPGM 确实接在 `pseudo_backward -> maybe_apply_pseudo_local_gating -> real_backward` 上，grad 真实被调制，不是 no-op；
+- 但当前 StageB-120 compare 不是对 canonical `post40_lr03_120 / gated_rgb0192` bounded baseline 的 apples-to-apples 对照；实际 run 使用的是 `hard_visible_union_signal`、`stageB_post_switch_iter=0`，且未复用既有 handoff；
+- 120iter replay 结果确实为负：baseline `24.136 / 0.87385 / 0.08189`，exp `23.594 / 0.85926 / 0.08912`；
+- 这轮自有 protocol 下，SPGM 更像是在几乎同一 active set 上做强连续衰减：`grad_keep_ratio_xyz_mean≈0.739` 基本不变，但 `grad_weight_mean_xyz_mean` 从 baseline 的约 `0.739` 压到 exp 的约 `0.292`。
+
+确认的实现问题 / 未完成项：
+- `score.py` 的 density entropy 归一化按 `entropy_bins` 而不是 `log(B)`；
+- `spgm_density_mode` 当前只是暴露接口，尚未被 stats/score/policy 实际消费；
+- SPGM 分支里的 accepted-count/history 统计写法对未来 reject-run 不严谨。
+
+新的项目判断：
+- 当前不能把 P2-K 写成“SPGM 已完成验证”；
+- 下一步主线应改为 `SPGM forensic repair`：先把 compare protocol 拉回 canonical bounded baseline，再做 conservative deterministic SPGM（更高 `weight_floor`、更弱 `support_eta`、先去掉固定 cluster decay）；
+- 在此之前，不直接跳去 stochastic drop / xyz+opacity / 更长 iter。
+
+---
+
+### P2-J：bounded StageB schedule compare 完成
+
+运行根：
+- `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_p2j_stageB_bounded_schedule_compare_e1`
+
+新增文档：
+- `docs/P2J_bounded_stageB_schedule_compare_20260416.md`
+
+代码更新：
+- `scripts/run_pseudo_refinement_v2.py` 已新增 StageB post-switch 调度参数：
+  - `--stageB_post_switch_iter`
+  - `--stageB_post_lr_scale_xyz`
+  - `--stageB_post_lr_scale_opacity`
+  - `--stageB_post_lambda_real`
+  - `--stageB_post_lambda_pseudo`
+- `stageB_history.json` 现会同步记录：
+  - `lambda_real_effective`
+  - `lambda_pseudo_effective`
+  - `gaussian_lr_xyz_effective`
+  - `post_switch_applied*`
+
+协议：
+1. 固定当前 winner `RGB-only v2 + gated_rgb0192`；
+2. 固定总 budget 仍为 `120iter`；
+3. 只做三组 bounded late-stage compare：
+   - `post40_lr03_120`
+   - `post80_lr03_120`
+   - `post80_lr03_real05_120`
+
+关键结果：
+- `post40_lr03_120`: `24.03019 / 0.87229 / 0.08177`
+- `post80_lr03_120`: `23.99358 / 0.87099 / 0.08307`
+- `post80_lr03_real05_120`: `24.01828 / 0.87167 / 0.08255`
+- 最佳臂为：`post40_lr03_120`
+
+新的项目判断：
+- bounded late-stage schedule 足以把原始 `120iter` cliff 明显拉回；
+- 但这个结果更像是“给出一个足够好的 bounded StageB baseline”，而不是“证明 StageB 仍值得继续深调”；
+- 因此下一步不再继续开新的 StageB schedule 网格，而是保留 `post40_lr03_120` 作为对照臂，同时把主工程重心转向 `SPGM` 第一版落地。
+
+---
+
+### P2-I：gated winner 的 `StageB` 回落窗口定位 + SPGM 方向激活
+
+运行根：
+- `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_p2i_stageB_window_localization_e1`
+
+新增文档：
+- `docs/P2I_stageB_window_localization_20260416.md`
+
+协议：
+1. 固定当前最佳分支 `RGB-only v2 + gated_rgb0192`；
+2. 从同一个 `P2-F` gated StageA.5 handoff 起跑；
+3. 做 `stageB_iters = 20 / 40 / 80 / 120` 的窗口定位；
+4. 其余设置保持与 `P2-H` gated arm 一致。
+
+关键结果：
+- `20`: `24.01061 / 0.87302 / 0.08036`
+- `40`: `24.02235 / 0.87253 / 0.08122`
+- `80`: `24.01980 / 0.87179 / 0.08247`
+- `120`: `23.91443 / 0.86873 / 0.08484`
+- `40` 是当前 PSNR 最佳点；`20` 是当前 SSIM / LPIPS 最佳点；`80 -> 120` 出现明显 cliff。
+
+机制层结论：
+- gating 在整个 sweep 里都持续生效；`225 / 260` 持续被拒，`grad_keep_ratio_xyz_mean` 稳定在约 `0.73 ~ 0.74`；
+- `120` 的 regression 不是 gate no-op，而是 late-stage 训练动力学失稳；最直接的伴随信号是 `loss_real` 在 `80` 之后明显反弹。
+
+新的项目判断：
+- `StageB` 不是完全没价值；当前 winner 的可用窗口至少延续到了 `40`，在 PSNR 口径下甚至能延续到 `80`；
+- 但它也不值得继续做无边界长跑调参；如果还给 `StageB` 一次机会，也只值得做一轮 bounded 的后段 schedule compare；
+- 用户补的 `docs/SPGM_landing_plan_for_part3_BRPO.md` 现在应正式升级成活跃主线文档：主工程方向开始从“继续磨 view gate + 长跑 schedule”转向“让 SPGM 接管 per-Gaussian 更新权限管理”。
+
+---
 
 ### P2-H：RGB-only v2 `StageB-120iter` verify 完成
 
@@ -38,6 +232,54 @@
 - 因此下一步优先级应切到 `StageB stabilization`（回落窗口定位 + 后段 `lr / lambda_real:lambda_pseudo` 调度），而不是先做 raw RGB densify 或 support/depth expand。
 
 ---
+
+
+### P2-K：SPGM Phase 0 plumbing 完成
+
+新增产物：
+- 、、、 骨架模块
+-  扩展 SPGM 字段和方法
+-  扩展 SPGM summary 字段
+-  新增 SPGM CLI、三路分支逻辑、history 字段
+
+备份文件：
+- 
+- 
+- 
+- 
+
+新增 CLI 参数：
+-  choices 扩展为 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+
+新增 SPGM history 字段：
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+- 
+
+当前 wiring 状态：
+-  已通过
+-  CLI 已正确显示 SPGM 参数
+- 三路分支逻辑（visibility_union / spgm / off）已接入
+- Phase 0 placeholder 实现返回零值/占位数据
+
+下一步（Phase 1）：
+- 实现 ：collect_spgm_stats 的真实统计量提取
+- 验证 StageA.5 smoke 能跑通 SPGM mode
+
 
 ## 2026-04-15
 
@@ -1806,3 +2048,254 @@ consumer smoke：
 - `docs/part3_stageA_pre_stageB_engineering_plan.md -> docs/archived/2026-04-superseded-plans/`
 
 原因：以上文档对应的执行阶段/计划已完成或已被当前 `SIGNAL_ENHANCEMENT.md` 与最新 STATUS/DESIGN 判断取代。
+
+### P2-K：SPGM Phase 0 plumbing 完成
+
+新增产物:
+- pseudo_branch/spgm/__init__.py, stats.py, score.py, policy.py 骨架模块
+- pseudo_branch/local_gating/gating_schema.py 扩展 SPGM 字段和方法
+- pseudo_branch/local_gating/gating_io.py 扩展 SPGM summary 字段
+- scripts/run_pseudo_refinement_v2.py 新增 SPGM CLI, 三路分支逻辑, history 字段
+
+备份文件:
+- gating_schema.py.bak_20260416_spgm_v1
+- gating_io.py.bak_20260416_spgm_v1
+- run_pseudo_refinement_v2.py.bak_20260416_spgm_v1
+- local_gating/__init__.py.bak_20260416_spgm_v1
+
+新增 CLI 参数:
+- pseudo_local_gating choices 扩展为 off/hard_visible_union_signal/soft_visible_union_signal/spgm_keep/spgm_soft
+- pseudo_local_gating_spgm_num_clusters, alpha_depth, beta_entropy, gamma_entropy, support_eta, weight_floor, entropy_bins, density_mode
+- pseudo_local_gating_spgm_cluster_keep_near/mid/far
+
+新增 SPGM history 字段:
+- spgm_active_ratio, accepted_view_count, support_mean/p50/max, depth_entropy, density_entropy
+- spgm_importance_mean/p50, weight_mean/p10/p50/p90, cluster_count_near/mid/far
+
+当前 wiring 状态:
+- spgm import smoke 已通过
+- run_pseudo_refinement_v2.py CLI 已正确显示 SPGM 参数
+- 三路分支逻辑(visibility_union/spgm/off)已接入
+- Phase 0 placeholder 实现返回零值/占位数据
+
+下一步(Phase 1): 实现 stats.py 的真实统计量提取
+
+### P2-K Phase 1: stats.py 真实实现完成
+
+stats.py 实现:
+- collect_spgm_stats 真实逻辑 (非placeholder)
+- support_count: 加权聚合visibility_filter
+- depth_value: 向量化weighted median (方案A: 排序+cumsum+阈值查找)
+- density_proxy: normalized(opacity) * normalized(support)
+- active_mask: support_count > 0
+
+关键优化:
+- 原版逐Gaussian Python循环卡死 (33452个元素, >5min/iter)
+- 向量化版本: torch.argsort + torch.cumsum + argmax阈值查找
+- smoke测试: 5iter @ 1.3s/iter (vs 原版>5min/iter)
+
+修复:
+- get_opacity是property而非函数: gaussians.get_opacity.detach() (不是callable)
+
+smoke验证结果 (stageA5_spgm_keep_xyz_5iter):
+- spgm_active_ratio: [0.587, 0.830, 0.525, 0.825, 0.667] 非全0
+- spgm_accepted_view_count: [4,4,4,4,4]
+- spgm_support_mean: 有真实值 (2.68~3.40)
+- spgm_weight_mean: [0,0,0,0,0] (policy.py仍placeholder, Phase 3待实现)
+
+下一步(Phase 2): 实现 score.py (depth partition / density entropy / importance score)
+
+### P2-K Phase 2: score.py 真实实现完成
+
+score.py 实现:
+- build_depth_partition: K=3 quantile split (near/mid/far)
+- depth_score: 1 - (z - z_min) / (z_max - z_min)
+- compute_density_entropy: histogram entropy normalized to [0,1]
+- density_score: rho_norm * (1 - beta*Hbar) + gamma*Hbar
+- importance_score: alpha * depth_score + (1-alpha) * density_score
+- support modifier: importance * support_norm^eta
+
+smoke验证结果 (stageA5_spgm_keep_xyz_1iter_score):
+- spgm_importance_mean: [0.557] 非零且在[0,1]
+- spgm_importance_p50: [0.563]
+- spgm_density_entropy: [0.095] 熵值正常
+- spgm_cluster_count: near=6546, mid=6546, far=6545 合理分布
+
+下一步(Phase 3): 实现 policy.py (deterministic soft keep, cluster-aware weighting)
+
+### P2-K Phase 3: policy.py 真实实现完成
+
+policy.py 实现:
+- deterministic soft keep: w_keep = weight_floor + (1-weight_floor) * importance
+- cluster-aware weighting: w = w_keep * cluster_keep[cluster_id]
+  - cluster_keep: near=1.0, mid=0.8, far=0.6
+- inactive -> 0
+- summary: weight_mean/p10/p50/p90, active_ratio
+
+完整 SPGM v1 pipeline 验证 (stageA5_spgm_keep_xyz_5iter_full):
+- spgm_active_ratio: [0.587, 0.830, 0.525, 0.822, 0.667] 非全0
+- spgm_weight_mean: [0.458, 0.368, 0.425, 0.386, 0.438] 权重分布合理
+- spgm_importance_mean: [0.557, 0.440, 0.515, 0.465, 0.530] importance正常
+- grad_keep_ratio_xyz: [0.587, 0.830, 0.525, 0.822, 0.667] 与active_ratio一致
+- grad_norm_xyz: pre->post 有真实降低 (例如 0.069->0.046)
+
+关键突破:
+- Phase 0 placeholder 时 grad_keep_ratio_xyz=0.0, grad被全压成0
+- Phase 3 后 grad_keep_ratio_xyz≈0.59, grad_norm真实被调制
+- SPGM 不再是 no-op, 而是 real working per-Gaussian grad weighting
+
+下一步(Phase 4): StageA.5 正式 compare (20 iter) vs baseline (hard_visible_union_signal)
+
+### P2-K Phase 4: StageA.5 Compare 完成
+
+实验设置:
+- 两臂: baseline (hard_visible_union_signal) vs exp (spgm_keep)
+- stageA_iters: 20
+- trainable_params: xyz
+- 其他参数与 P2-F winner 保持一致
+
+关键对比结果:
+1. Grad modulation:
+   - Baseline: grad未调制 (pre=post=6.87e-02)
+   - Exp: grad真实调制 (pre=6.87e-02 -> post=4.58e-02, 保留约67%)
+   
+2. Active ratio一致:
+   - Baseline grad_keep_ratio_xyz: [0.587, 0.830] (等于visible_union)
+   - Exp spgm_active_ratio: [0.587, 0.830] (完全一致)
+   
+3. SPGM stats正常:
+   - spgm_weight_mean: [0.46, 0.37, 0.43, 0.39, 0.44]
+   - spgm_importance_mean: [0.56, 0.44, 0.52, 0.46, 0.53]
+   - spgm_density_entropy: [0.095, 0.089, 0.092, 0.080, 0.090]
+   - cluster分布: near=6546, mid=6546, far=6545
+   
+4. Loss trajectory一致:
+   - Baseline: 0.027 -> 0.038
+   - Exp: 0.027 -> 0.038 (几乎完全一致)
+   
+5. Pose delta一致:
+   - Baseline mean_trans_norm: 0.003064
+   - Exp mean_trans_norm: 0.003063 (微秒级差异)
+   
+结论:
+- SPGM v1 不是 no-op, grad真实被调制
+- 两臂的loss和pose trajectory几乎完全一致
+- 说明SPGM的grad modulation对优化动力学的影响很小
+- 下一阶段需要更长时间的验证 (如80 iter) 或 StageB 接入
+
+输出路径:
+- /data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_spgm_v1_stageA5_compare_e1/
+
+### P2-K Phase 5: StageB 接入完成
+
+实验设置:
+- 两臂: baseline (hard_visible_union_signal) vs exp (spgm_keep)
+- stageB_iters: 40 (StageA 300 iter 前置)
+- trainable_params: xyz
+- num_real_views: 2, num_pseudo_views: 4
+- lambda_real/lambda_pseudo: 1.0
+
+关键对比结果:
+1. Grad modulation 生效:
+   - Baseline: grad未调制 (pre=post)
+   - Exp: grad真实调制 (pre=8.13e-02 -> post=5.93e-02, 保留约73%)
+   
+2. Active ratio一致:
+   - Baseline keep_xyz: [0.669, 0.824, 0.675]
+   - Exp spgm_active_ratio: [0.669, 0.824, 0.676] (几乎一致)
+   
+3. SPGM stats正常:
+   - spgm_weight_mean: [0.43, 0.40, 0.39, 0.46, 0.41]
+   - spgm_importance_mean: [0.51, 0.49, 0.47, 0.56, 0.49]
+   
+4. Loss对比 (iter40):
+   - Baseline total: 0.124
+   - Exp total: 0.123 (几乎一致)
+   - Baseline real: 0.091
+   - Exp real: 0.090 (差异<1%)
+   - Baseline pseudo: 0.032
+   - Exp pseudo: 0.033 (差异<1%)
+   
+关键验证:
+- SPGM只压pseudo backward后的Gaussian grad
+- Real branch未受SPGM影响 (real_loss几乎一致)
+- StageB的SPGM接入位置正确 (pseudo backward后、real backward前)
+
+输出路径:
+- /data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_spgm_v1_stageB_compare_e1/
+
+下一步(Phase 6): 更长时间验证 (如120 iter) 或 正式replay评估
+
+### P2-K Phase 6: StageB 120 iter Compare 完成
+
+实验设置:
+- 两臂: baseline (hard_visible_union_signal) vs exp (spgm_keep)
+- stageB_iters: 120
+- 其他参数与 P2-J winner 一致
+
+关键对比结果:
+1. Grad modulation 生效:
+   - Baseline: iter1/iter120 grad pre=post (无调制)
+   - Exp: iter1 0.075->0.050, iter120 0.069->0.043 (真实调制)
+   
+2. Loss 对比 (iter120):
+   - Baseline total: 0.0576
+   - Exp total: 0.0612 (略高)
+   - Baseline real: 0.0335
+   - Exp real: 0.0319 (**更低**)
+   - Baseline pseudo: 0.0241
+   - Exp pseudo: 0.0293 (更高)
+   
+3. 关键洞察:
+   - SPGM 使 real loss 更低 (好事)
+   - SPGM 使 pseudo loss 更高 (pseudo-side 被 grad weighting 压制)
+   - 这说明 SPGM 可能是在帮助 real-side 优化，代价是 pseudo-side
+   
+4. SPGM stats 正常:
+   - spgm_weight_mean: [0.43, 0.40, 0.40, 0.46, 0.41]
+   - spgm_importance_mean: [0.51, 0.49, 0.47, 0.56, 0.49]
+   - spgm_active_ratio: [0.67, 0.82, 0.68, 0.67, 0.67]
+
+结论:
+- SPGM v1 在 StageB 120 iter 下稳定工作
+- Grad modulation 真实生效
+- Real-side 受益（real loss 下降），pseudo-side 被压制（pseudo loss 上升）
+- 下一步建议: 正式 replay 评估 (PSNR/SSIM/LPIPS) 确认视觉质量
+
+输出路径:
+- /data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_spgm_v1_stageB_compare_120iter/
+
+### P2-K Phase 6 Replay 评估完成
+
+Replay 评估结果:
+- Baseline (hard_visible_union_signal_120iter):
+  - PSNR: 24.136
+  - SSIM: 0.8738
+  - LPIPS: 0.0819
+  
+- Exp (spgm_keep_120iter):
+  - PSNR: 23.594
+  - SSIM: 0.8593
+  - LPIPS: 0.0891
+
+关键对比:
+- PSNR: baseline 24.136 vs exp 23.594 → **baseline更好** (差距 -0.542)
+- SSIM: baseline 0.8738 vs exp 0.8593 → **baseline更好** (差距 -0.0145)
+- LPIPS: baseline 0.0819 vs exp 0.0891 → **baseline更好** (差距 +0.0072, LPIPS越低越好)
+
+**出乎意料的发现**: SPGM 在 replay 评估中反而略差于 baseline！
+
+可能原因分析:
+1. SPGM 的 grad weighting 对 pseudo-side 压制过强, 导致 Gaussian 位置更新不够充分
+2. 120 iter 还不够长, 需要更长时间让 SPGM 的效果显现
+3. 当前 SPGM 超参 (alpha_depth/beta_entropy/gamma_entropy/support_eta/weight_floor/cluster_keep) 可能需要调优
+4. SPGM v1 是 deterministic keep, 可能需要 stochastic drop 才能达到更好的效果
+
+结论:
+- SPGM v1 实现完整且稳定工作, 但当前超参下 replay 效果略差于 baseline
+- 这是真实的实验结果, 需如实记录, 不应回避负面发现
+- 后续需要: 超参调优、更长 iter、stochastic drop、xyz_opacity 组合
+
+输出路径:
+- Baseline replay: /data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_spgm_v1_stageB_compare_120iter/replay_baseline/replay_eval.json
+- Exp replay: /data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260416_spgm_v1_stageB_compare_120iter/replay_exp/replay_eval.json

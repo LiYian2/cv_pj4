@@ -690,7 +690,6 @@ def _init_gating_history_lists(container: dict) -> None:
             'spgm_cluster_count_near': [],
             'spgm_cluster_count_mid': [],
             'spgm_cluster_count_far': [],
-            'spgm_density_mode_effective': [],
         }
     )
 
@@ -734,7 +733,6 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'spgm_cluster_count_near',
         'spgm_cluster_count_mid',
         'spgm_cluster_count_far',
-        'spgm_density_mode_effective',
     ]
     for key in keys:
         container[key].append(summary.get(key))
@@ -782,7 +780,8 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
         )
     
     elif gating_cfg.uses_spgm():
-        accepted_view_count = sum(1 for item in gate_results if float(item.get('weight', 0.0)) > 0.0)
+        # SPGM path (Phase 0: placeholder implementation)
+        # NOTE: gate_results still from signal_gate (view-level filter)
         spgm_raw_stats = collect_spgm_stats(
             sampled_views=sampled_views,
             gate_results=gate_results,
@@ -801,7 +800,6 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
             gamma_entropy=gating_cfg.spgm_gamma_entropy,
             support_eta=gating_cfg.spgm_support_eta,
             entropy_bins=gating_cfg.spgm_entropy_bins,
-            density_mode=gating_cfg.spgm_density_mode,
         )
         spgm_policy = build_spgm_grad_weights(
             importance_score=spgm_score['importance_score'],
@@ -819,12 +817,12 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
         visibility_stats = {
             'visible_union_ratio': None,
             'visible_union_weight_mean': None,
-            'accepted_count': int(accepted_view_count),
+            'accepted_count': len(sampled_views),
         }
         # Collect SPGM summary for history
         spgm_stats = {
             'active_ratio': spgm_raw_stats['active_ratio'],
-            'accepted_view_count': int(accepted_view_count),
+            'accepted_view_count': spgm_raw_stats['accepted_view_count'],
             'support_mean': spgm_raw_stats['support_mean'],
             'support_p50': spgm_raw_stats['support_p50'],
             'support_max': spgm_raw_stats['support_max'],
@@ -839,7 +837,6 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
             'cluster_count_near': spgm_score['cluster_count_near'],
             'cluster_count_mid': spgm_score['cluster_count_mid'],
             'cluster_count_far': spgm_score['cluster_count_far'],
-            'density_mode_effective': spgm_score['density_mode_effective'],
         }
     
     else:

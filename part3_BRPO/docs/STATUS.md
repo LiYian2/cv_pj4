@@ -1,6 +1,6 @@
 # STATUS.md 写作规范
 
-> 更新时间：2026-04-16 13:56 CST
+> 更新时间：2026-04-17 01:07 CST
 > 本文件记录 Part3 Stage1 的**当前状态**，每次有实质性进展时更新对应版块。
 
 ## 写作规范
@@ -61,9 +61,17 @@
 - 已完成 `P2-F`：`RGB-only v2` 的 `StageA.5` ungated vs branch-specific gated（`min_rgb_mask_ratio=0.0192`）short compare 已跑完，结果表明这条支路在 `StageA.5` replay 上明显强于 legacy，而且 gating 还能带来小幅正增益；
 - 已完成 `P2-G`：固定 `signal-aware-8` 的 `StageB` real-branch short compare 已跑完，结果表明 `RGB-only v2 + gated_rgb0192` 在 joint refine 下仍然明显优于 legacy，也优于同支路 ungated；
 - 已完成 `P2-H`：在完全复用 `P2-G` 协议、仅把 `stageB_iters` 提到 `120` 的 verify 中，`ungated / gated` 两臂都退回到低于 `after_opt` baseline、也低于各自 `StageA.5` handoff 起点的区间；gating 仍然真实工作、也没有明显伤到 real branch，但只能轻微减缓退化；
-- 因而当前新的判断是：`RGB-only v2 + gated_rgb0192` 仍是当前最好的一条 refine 分支，但还不能视为已稳定的中预算 `StageB` 主线；下一步应转向 `StageB stabilization`（窗口定位 + 后段调度），而不是先做 raw RGB densify 或 support/depth expand。
+- 已完成 `P2-I`：围绕 gated 主候选做 `20 / 40 / 80 / 120` 的窗口定位后，当前已经确认：PSNR 正向窗口至少延续到 `80iter`，其中 `40iter` 最好；但 `80 -> 120` 会出现明显 cliff，且这个 cliff 与 late-stage real loss rebound 同步出现；
+- 已完成 `P2-J`：一轮 bounded StageB schedule compare 已确认，只靠一个很小的 late-stage schedule 改动就能把 `120iter` 的 cliff 明显拉回；其中 `post40_lr03_120` 是当前最强 bounded StageB baseline。
+- 用户已补充 `docs/SPGM_landing_plan_for_part3_BRPO.md`，当前它应被视为活跃的结构性落地文档，而不只是背景分析；
+- 因而当前新的判断是：`StageB` 现在已经有了足够好的 bounded baseline，不再值得继续做无边界深调；而 `P2-L / P2-M` 的连续 compare 也已说明，当前 deterministic `SPGM v1` 虽可部分修复，但仍不能替代这条 baseline。
 
-一句话说：**现在已经不是“要不要从 legacy 切到 v2”的问题，而是：`RGB-only v2 + gated_rgb0192` 虽然在 `StageA.5` 和 `StageB-20iter` 上成立，但到 `StageB-120iter` 还会 regression；当前更合理的下一步是稳住 `StageB` 后段，而不是急着做 raw RGB densify。**
+一句话说：**现在已经不是“要不要从 legacy 切到 v2”的问题，而是：`RGB-only v2 + gated_rgb0192 + post40_lr03_120` 已经构成当前 canonical StageB baseline；而当前 SPGM repair 的最新状态是“conservative deterministic 已部分追回，但仍略低于 baseline”，所以下一步应从 repair A 出发做 selector-first 改写。**
+- 已完成 `P2-K` 第一轮 SPGM 接入与 forensic audit：[参见 `docs/P2K_spgm_v1_forensic_audit_20260416.md`]。结论是：主 wiring 是通的，但原始 `20260416_spgm_v1_*` compare protocol 漂离 canonical baseline；
+- 已完成 `P2-L` canonical formal compare：[参见 `docs/P2L_spgm_canonical_stageB_compare_20260417.md`]。在与 `post40_lr03_120 / gated_rgb0192` 完全对齐的 protocol 下，原始 deterministic `spgm_keep` 仍低于 baseline；
+- 已完成 `P2-M` conservative deterministic repair compare：[参见 `docs/P2M_spgm_conservative_repair_compare_20260417.md`]。最好 repair arm A = `24.00212 / 0.87132 / 0.08244`，比原始 SPGM 回升 `+0.05982 PSNR`，但相对 baseline 仍有 `-0.02771 PSNR / -0.00096 SSIM / +0.00067 LPIPS`；
+- 机制上，repair A/B 已证明“问题确实主要是 suppress 过强”：两臂 rejection 与 active ratio 仍几乎不变，但 `grad_weight_mean_xyz_mean` 已从原始 SPGM 的 `0.3586` 回升到 A 的 `0.5497`、B 的 `0.4977`；
+- 因而当前主线已从“先做 conservative deterministic”进一步收束到：以 repair A 为新 anchor，优先做 selector-first policy 改写，而不是继续只扫 soft suppress 强度。
 
 ## 2. 数据结构
 
@@ -441,7 +449,9 @@ Stage B                          -> 明确不建议现在进入 ❌
 - [x] 当前对 densify 的判断也更清楚了：raw RGB mask 虽然看起来点状，但它并没有阻止 `RGB-only v2` 在 `StageA.5` 上明显优于 legacy；因此现在不应急着对 raw RGB mask 做 densify，若后续需要扩张，更应考虑受几何约束的 support/depth expand
 - [x] 当前已完成 `P2-G`：固定 `signal-aware-8` 的 `StageB` real-branch short compare 已表明，`RGB-only v2 + gated_rgb0192` 在 StageB 下也优于本支路 ungated（`+0.0161 PSNR / +0.000147 SSIM / -2.16e-05 LPIPS`），并且明显优于 legacy StageB；real branch 未被明显误伤
 - [x] 当前已完成 `P2-H`：`StageB-120iter` verify 已表明，当前主候选虽然仍略优于同支路 ungated（`+0.00421 PSNR / +7.77e-05 SSIM`），但两臂都已低于 `after_opt` baseline，也低于各自 `StageA.5` handoff 起点；gating 机制仍然真实工作（`96/120` iter rejection，拒绝 `225/260`），但不足以阻止中预算 regression
-- [x] 当前新的判断是：当前主问题已经从“是否继续做更长一点的 verify”切换成“如何稳住 `StageB` 后段”；下一步应转向 `StageB stabilization`（窗口定位 + 后段 `lr / lambda_real:lambda_pseudo` 调度），而不是先做 raw RGB densify
+- [x] 当前已完成 `P2-I`：窗口定位已表明当前 gated 主候选的 PSNR 正向窗口可延续到 `80iter`，其中 `40iter` 最好；但 `SSIM / LPIPS` 更早开始走弱，而 `80 -> 120` 会出现与 real loss rebound 同步的明显 cliff
+- [x] 当前已完成 `P2-J`：bounded schedule compare 已表明，`post40_lr03_120` 可以把原始 `120iter` cliff 显著拉回，并在 PSNR 上略高于 `P2-I` 的 `40iter` 最佳点；但它没有把 `StageB` 变成一个明显强于早期窗口的新长程 regime
+- [x] 当前新的判断是：`StageB` 已经有了一个足够好的 bounded baseline，不再值得继续做无边界深调；下一步应把主工程方向转向 `SPGM` 第一版落地，同时把 `post40_lr03_120` 留作后续对照臂
 
 ### 6.3 当前进行中 ⚠️
 
@@ -452,18 +462,23 @@ Stage B                          -> 明确不建议现在进入 ❌
 - [x] 完成 `RGB-only v2` `StageA.5` ungated vs branch-specific gated compare，并确认这条支路比 legacy 更值得保留
 - [x] 完成 `RGB-only v2` `StageB` real-branch short compare，并确认当前主候选已延续到 joint refine
 - [x] 完成 `RGB-only v2 + gated_rgb0192` 的 `StageB-120iter` verify，并确认 gating 机制仍真实工作，但 20iter 的正益不能自然延续到 120iter
-- [ ] 围绕 `RGB-only v2 + gated_rgb0192` 做 `StageB stabilization`：先定位 `20 -> 120` 的回落窗口，再做后段 `lr / lambda_real:lambda_pseudo` 调度验证
-- [ ] 若后续稳定化仍失败，再决定是否把 early-stop、`xyz+opacity`、soft gating 或更重的 SPGM 提上日程
+- [x] 完成 `RGB-only v2 + gated_rgb0192` 的 `20 / 40 / 80 / 120` 窗口定位，并确认 `40iter` 是当前最佳 PSNR 点、`80 -> 120` 存在明显 cliff
+- [x] 完成一轮 bounded schedule compare，并确认 `post40_lr03_120` 是当前最佳 bounded StageB baseline
+- [x] 完成 `P2-K` forensic audit，并确认当前 SPGM 代码 wiring 已通、但原始 `20260416_spgm_v1_*` compare protocol 与 canonical bounded baseline 漂移 [参见 `docs/P2K_spgm_v1_forensic_audit_20260416.md`]
+- [x] 完成 `P2-L` canonical formal compare，并确认在 `post40_lr03_120 / gated_rgb0192` 对齐 protocol 下，当前 deterministic `spgm_keep` 仍低于 canonical baseline [参见 `docs/P2L_spgm_canonical_stageB_compare_20260417.md`]
+- [x] 完成 3 个已确认的小实现坑修补：entropy normalization、`spgm_density_mode` 实接、SPGM accepted-count/history 统计修正
+- [x] 完成 `P2-M` conservative deterministic SPGM 两臂 compare，并确认更温和的 deterministic policy 能部分追回 replay，其中 A 臂最佳 [参见 `docs/P2M_spgm_conservative_repair_compare_20260417.md`]
+- [ ] 以 `spgm_repair_a_keep111_eta0_wf025` 为新 anchor，把 current deterministic keep 从“强 suppressor”往“selector-first”改：先改 active set / cluster 内筛选，再决定是否保留 soft weight
 
 ### 6.4 下一阶段待办 ⏳
 
-- [ ] 围绕 `RGB-only v2 + gated_rgb0192` 做 `StageB stabilization`：优先补 `20 / 40 / 80 / 120` 回落窗口定位，并扫描 `20iter` 之后的后段调度
-- [ ] 第一批稳定化变量优先选 `xyz lr` 降档与 `lambda_real : lambda_pseudo` 再平衡，不先回 legacy 侧高密度细扫 threshold
-- [ ] 只有在 `StageB stabilization` 仍明确失败后，再讨论 early-stop 默认化或受几何约束的 support/depth expand；先不做 raw RGB densify
+- [ ] 在 `spgm_repair_a_keep111_eta0_wf025` 基础上做 selector-first policy：优先测试 cluster 内 quantile / top-k keep，让 active set 真正发生变化
+- [ ] support ratio 从当前 soft suppress 因子改为先参与 hard select、再参与 soft weight；目标是减少“同一 active set 被整体压弱”
+- [ ] 在 selector-first 至少不再明显伤 replay 之前，不推进 stochastic drop / xyz+opacity / 更长 iter；先不做 raw RGB densify
 
 ### 6.5 当前明确不建议做的事 🚫
 
-- [ ] 现在直接进入 Stage B
+- [ ] 在 current schedule 不变的前提下继续把 `StageB` 预算盲目往 `120+` 拉长
 - [ ] 把 `lambda_abs_pose`（legacy 单标量）当默认值
 - [ ] 把 `lambda_abs_t=3.0` 视为“能自动改善 depth”的最终解
 
@@ -798,4 +813,35 @@ Stage B                          -> 明确不建议现在进入 ❌
 - 第一版 gating 在 real branch 打开后仍然是“基本无害但收益极弱”；
 - 当前最关键的问题已经不再是 real branch 会不会被误伤，而是：为什么 current threshold 下 signal gate 在 StageA.5 / StageB 都持续 `0 rejection`；
 - 因而后续优先级应切到解释和重设 signal gate，而不是继续默认把当前 hard gating 当 winner 直接推进。
+
+
+## 27. P2-K Phase 5：SPGM StageB 接入完成（2026-04-16）
+
+- baseline: hard_visible_union_signal（StageB 40 iter）
+- exp: spgm_keep（StageB 40 iter）
+- 关键结果：
+  - exp 中 xyz grad 出现稳定 pre->post 下降（真实调制）
+  - baseline 中 xyz grad 维持 pre=post（无调制）
+  - real loss 与 baseline 基本一致（<1%），说明 real branch 未被误伤
+- 结论：SPGM 在 StageB 成功按设计“只作用 pseudo backward 后 grad”。
+
+## 28. P2-K Phase 6：StageB 120 iter Compare 完成（2026-04-16）
+
+- baseline: hard_visible_union_signal (StageB 120 iter)
+- exp: spgm_keep (StageB 120 iter)
+- 关键结果：
+  - exp 中 grad 真实调制（iter120: 0.069->0.043）
+  - baseline grad 无调制（pre=post）
+  - real loss: exp=0.0319 vs baseline=0.0335 (**exp更低**)
+  - pseudo loss: exp=0.0293 vs baseline=0.0241 (exp更高)
+- 结论：SPGM 在长时间预算下稳定工作，real-side 受益，pseudo-side 被压制。
+- Phase 0-6 全部完成 ✅
+### Replay 评估结果
+
+- Baseline replay: PSNR=24.136, SSIM=0.8738, LPIPS=0.0819
+- Exp replay: PSNR=23.594, SSIM=0.8593, LPIPS=0.0891
+- **发现**: SPGM 在当前超参下 replay 效果略差于 baseline (PSNR -0.542, SSIM -0.0145, LPIPS +0.0072)
+- **结论**: SPGM v1 实现完整稳定, 但超参需调优、iter需延长、或需引入 stochastic drop
+
+Phase 0-6 完成标记: ✅ plumbing/stats/score/policy + StageA.5/StageB/120iter + replay
 
