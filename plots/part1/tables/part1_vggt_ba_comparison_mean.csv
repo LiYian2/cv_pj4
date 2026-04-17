@@ -1,0 +1,5 @@
+setting,model,ours_40000.PSNR,ours_40000.SSIM,ours_40000.LPIPS
+vggt_108,3dgs,27.5298,0.8875,0.1434
+vggt_108,scaffold,28.3369,0.8965,0.1265
+vggt_ba_108,3dgs,29.8128,0.9146,0.1205
+vggt_ba_108,scaffold,29.2982,0.904,0.1395

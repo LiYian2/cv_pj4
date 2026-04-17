@@ -29,6 +29,13 @@ class PseudoLocalGatingConfig:
     spgm_cluster_keep_near: float = 1.0
     spgm_cluster_keep_mid: float = 0.8
     spgm_cluster_keep_far: float = 0.6
+    spgm_policy_mode: str = 'dense_keep'
+    spgm_ranking_mode: str = 'v1'
+    spgm_lambda_support_rank: float = 0.0
+    spgm_selector_keep_ratio_near: float = 1.0
+    spgm_selector_keep_ratio_mid: float = 1.0
+    spgm_selector_keep_ratio_far: float = 1.0
+    spgm_selector_min_keep: int = 1
 
     def enabled(self) -> bool:
         return (self.mode or 'off') != 'off'

@@ -49,6 +49,9 @@ def build_iteration_gating_summary(
     # SPGM-specific fields (Phase 0 plumbing - will be None for legacy modes)
     spgm_fields = {
         'spgm_active_ratio': None,
+        'spgm_selected_ratio': None,
+        'spgm_policy_mode_effective': None,
+        'spgm_ranking_mode_effective': None,
         'spgm_accepted_view_count': None,
         'spgm_support_mean': None,
         'spgm_support_p50': None,
@@ -57,6 +60,9 @@ def build_iteration_gating_summary(
         'spgm_density_entropy': None,
         'spgm_importance_mean': None,
         'spgm_importance_p50': None,
+        'spgm_ranking_score_mean': None,
+        'spgm_ranking_score_p50': None,
+        'spgm_support_norm_mean': None,
         'spgm_weight_mean': None,
         'spgm_weight_p10': None,
         'spgm_weight_p50': None,
@@ -64,12 +70,18 @@ def build_iteration_gating_summary(
         'spgm_cluster_count_near': None,
         'spgm_cluster_count_mid': None,
         'spgm_cluster_count_far': None,
+        'spgm_selected_count_near': None,
+        'spgm_selected_count_mid': None,
+        'spgm_selected_count_far': None,
         'spgm_density_mode_effective': None,
     }
     
     if spgm_stats:
         spgm_fields.update({
             'spgm_active_ratio': spgm_stats.get('active_ratio'),
+            'spgm_selected_ratio': spgm_stats.get('selected_ratio'),
+            'spgm_policy_mode_effective': spgm_stats.get('policy_mode_effective'),
+            'spgm_ranking_mode_effective': spgm_stats.get('ranking_mode_effective'),
             'spgm_accepted_view_count': spgm_stats.get('accepted_view_count'),
             'spgm_support_mean': spgm_stats.get('support_mean'),
             'spgm_support_p50': spgm_stats.get('support_p50'),
@@ -78,6 +90,9 @@ def build_iteration_gating_summary(
             'spgm_density_entropy': spgm_stats.get('density_entropy'),
             'spgm_importance_mean': spgm_stats.get('importance_mean'),
             'spgm_importance_p50': spgm_stats.get('importance_p50'),
+            'spgm_ranking_score_mean': spgm_stats.get('ranking_score_mean'),
+            'spgm_ranking_score_p50': spgm_stats.get('ranking_score_p50'),
+            'spgm_support_norm_mean': spgm_stats.get('support_norm_mean'),
             'spgm_weight_mean': spgm_stats.get('weight_mean'),
             'spgm_weight_p10': spgm_stats.get('weight_p10'),
             'spgm_weight_p50': spgm_stats.get('weight_p50'),
@@ -85,6 +100,9 @@ def build_iteration_gating_summary(
             'spgm_cluster_count_near': spgm_stats.get('cluster_count_near'),
             'spgm_cluster_count_mid': spgm_stats.get('cluster_count_mid'),
             'spgm_cluster_count_far': spgm_stats.get('cluster_count_far'),
+            'spgm_selected_count_near': spgm_stats.get('selected_count_near'),
+            'spgm_selected_count_mid': spgm_stats.get('selected_count_mid'),
+            'spgm_selected_count_far': spgm_stats.get('selected_count_far'),
             'spgm_density_mode_effective': spgm_stats.get('density_mode_effective'),
         })
     

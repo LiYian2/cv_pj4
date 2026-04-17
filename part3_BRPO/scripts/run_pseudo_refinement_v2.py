@@ -127,6 +127,13 @@ def parse_args():
     p.add_argument('--pseudo_local_gating_spgm_cluster_keep_near', type=float, default=1.0)
     p.add_argument('--pseudo_local_gating_spgm_cluster_keep_mid', type=float, default=0.8)
     p.add_argument('--pseudo_local_gating_spgm_cluster_keep_far', type=float, default=0.6)
+    p.add_argument('--pseudo_local_gating_spgm_policy_mode', choices=['dense_keep', 'selector_quantile'], default='dense_keep')
+    p.add_argument('--pseudo_local_gating_spgm_ranking_mode', choices=['v1', 'support_blend'], default='v1')
+    p.add_argument('--pseudo_local_gating_spgm_lambda_support_rank', type=float, default=0.0)
+    p.add_argument('--pseudo_local_gating_spgm_selector_keep_ratio_near', type=float, default=1.0)
+    p.add_argument('--pseudo_local_gating_spgm_selector_keep_ratio_mid', type=float, default=1.0)
+    p.add_argument('--pseudo_local_gating_spgm_selector_keep_ratio_far', type=float, default=1.0)
+    p.add_argument('--pseudo_local_gating_spgm_selector_min_keep', type=int, default=1)
     p.add_argument('--stageB_iters', type=int, default=120)
     p.add_argument('--stageB_post_switch_iter', type=int, default=0, help='If >0, apply post-switch StageB settings starting from this iteration + 1')
     p.add_argument('--stageB_post_lr_scale_xyz', type=float, default=1.0, help='Scale xyz lr by this factor after --stageB_post_switch_iter')
@@ -641,6 +648,13 @@ def build_pseudo_local_gating_cfg(args) -> PseudoLocalGatingConfig:
         spgm_cluster_keep_near=float(args.pseudo_local_gating_spgm_cluster_keep_near),
         spgm_cluster_keep_mid=float(args.pseudo_local_gating_spgm_cluster_keep_mid),
         spgm_cluster_keep_far=float(args.pseudo_local_gating_spgm_cluster_keep_far),
+        spgm_policy_mode=args.pseudo_local_gating_spgm_policy_mode,
+        spgm_ranking_mode=args.pseudo_local_gating_spgm_ranking_mode,
+        spgm_lambda_support_rank=float(args.pseudo_local_gating_spgm_lambda_support_rank),
+        spgm_selector_keep_ratio_near=float(args.pseudo_local_gating_spgm_selector_keep_ratio_near),
+        spgm_selector_keep_ratio_mid=float(args.pseudo_local_gating_spgm_selector_keep_ratio_mid),
+        spgm_selector_keep_ratio_far=float(args.pseudo_local_gating_spgm_selector_keep_ratio_far),
+        spgm_selector_min_keep=int(args.pseudo_local_gating_spgm_selector_min_keep),
     )
 
 
@@ -675,6 +689,9 @@ def _init_gating_history_lists(container: dict) -> None:
             'grad_norm_opacity_post_mask': [],
             # SPGM-specific fields
             'spgm_active_ratio': [],
+            'spgm_selected_ratio': [],
+            'spgm_policy_mode_effective': [],
+            'spgm_ranking_mode_effective': [],
             'spgm_accepted_view_count': [],
             'spgm_support_mean': [],
             'spgm_support_p50': [],
@@ -683,6 +700,9 @@ def _init_gating_history_lists(container: dict) -> None:
             'spgm_density_entropy': [],
             'spgm_importance_mean': [],
             'spgm_importance_p50': [],
+            'spgm_ranking_score_mean': [],
+            'spgm_ranking_score_p50': [],
+            'spgm_support_norm_mean': [],
             'spgm_weight_mean': [],
             'spgm_weight_p10': [],
             'spgm_weight_p50': [],
@@ -690,6 +710,9 @@ def _init_gating_history_lists(container: dict) -> None:
             'spgm_cluster_count_near': [],
             'spgm_cluster_count_mid': [],
             'spgm_cluster_count_far': [],
+            'spgm_selected_count_near': [],
+            'spgm_selected_count_mid': [],
+            'spgm_selected_count_far': [],
             'spgm_density_mode_effective': [],
         }
     )
@@ -719,6 +742,9 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'grad_norm_opacity_post_mask',
         # SPGM-specific fields
         'spgm_active_ratio',
+        'spgm_selected_ratio',
+        'spgm_policy_mode_effective',
+        'spgm_ranking_mode_effective',
         'spgm_accepted_view_count',
         'spgm_support_mean',
         'spgm_support_p50',
@@ -727,6 +753,9 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'spgm_density_entropy',
         'spgm_importance_mean',
         'spgm_importance_p50',
+        'spgm_ranking_score_mean',
+        'spgm_ranking_score_p50',
+        'spgm_support_norm_mean',
         'spgm_weight_mean',
         'spgm_weight_p10',
         'spgm_weight_p50',
@@ -734,6 +763,9 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'spgm_cluster_count_near',
         'spgm_cluster_count_mid',
         'spgm_cluster_count_far',
+        'spgm_selected_count_near',
+        'spgm_selected_count_mid',
+        'spgm_selected_count_far',
         'spgm_density_mode_effective',
     ]
     for key in keys:
@@ -802,13 +834,23 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
             support_eta=gating_cfg.spgm_support_eta,
             entropy_bins=gating_cfg.spgm_entropy_bins,
             density_mode=gating_cfg.spgm_density_mode,
+            ranking_mode=gating_cfg.spgm_ranking_mode,
+            lambda_support_rank=gating_cfg.spgm_lambda_support_rank,
         )
         spgm_policy = build_spgm_grad_weights(
-            importance_score=spgm_score['importance_score'],
+            weight_score=spgm_score['importance_score'],
+            ranking_score=spgm_score['ranking_score'],
             cluster_id=spgm_score['cluster_id'],
             active_mask=spgm_raw_stats['active_mask'],
             weight_floor=gating_cfg.spgm_weight_floor,
             cluster_keep=(gating_cfg.spgm_cluster_keep_near, gating_cfg.spgm_cluster_keep_mid, gating_cfg.spgm_cluster_keep_far),
+            policy_mode=gating_cfg.spgm_policy_mode,
+            selector_keep_ratio=(
+                gating_cfg.spgm_selector_keep_ratio_near,
+                gating_cfg.spgm_selector_keep_ratio_mid,
+                gating_cfg.spgm_selector_keep_ratio_far,
+            ),
+            selector_min_keep=gating_cfg.spgm_selector_min_keep,
         )
         grad_stats = apply_gaussian_grad_mask(
             gaussians=gaussians,
@@ -824,6 +866,9 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
         # Collect SPGM summary for history
         spgm_stats = {
             'active_ratio': spgm_raw_stats['active_ratio'],
+            'selected_ratio': spgm_policy['selected_ratio'],
+            'policy_mode_effective': spgm_policy['policy_mode_effective'],
+            'ranking_mode_effective': spgm_score['ranking_mode_effective'],
             'accepted_view_count': int(accepted_view_count),
             'support_mean': spgm_raw_stats['support_mean'],
             'support_p50': spgm_raw_stats['support_p50'],
@@ -832,6 +877,9 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
             'density_entropy': spgm_score['density_entropy'],
             'importance_mean': spgm_score['importance_mean'],
             'importance_p50': spgm_score['importance_p50'],
+            'ranking_score_mean': spgm_score['ranking_score_mean'],
+            'ranking_score_p50': spgm_score['ranking_score_p50'],
+            'support_norm_mean': spgm_score['support_norm_mean'],
             'weight_mean': spgm_policy['weight_mean'],
             'weight_p10': spgm_policy['weight_p10'],
             'weight_p50': spgm_policy['weight_p50'],
@@ -839,6 +887,9 @@ def maybe_apply_pseudo_local_gating(gaussians, sampled_views, render_packages, g
             'cluster_count_near': spgm_score['cluster_count_near'],
             'cluster_count_mid': spgm_score['cluster_count_mid'],
             'cluster_count_far': spgm_score['cluster_count_far'],
+            'selected_count_near': spgm_policy['selected_count_near'],
+            'selected_count_mid': spgm_policy['selected_count_mid'],
+            'selected_count_far': spgm_policy['selected_count_far'],
             'density_mode_effective': spgm_score['density_mode_effective'],
         }
     
@@ -1027,12 +1078,24 @@ def main():
                 f"abs_norm(rho={avg_stats['abs_pose_rho_norm']:.4f}, theta={avg_stats['abs_pose_theta_norm']:.4f}), scale={avg_stats['scene_scale_used']:.4f}, exp_reg={avg_stats['loss_exp_reg']:.4f}, pose_updates={num_pose_updates}"
             )
         if gaussian_optimizer is not None and pseudo_local_gating_cfg.enabled() and (it == 1 or it % max(1, int(pseudo_local_gating_cfg.log_interval)) == 0):
-            print(
-                f"    [local-gating] iter {it}: accepted={len(gating_summary['accepted_pseudo_sample_ids'])}/{len(sampled_ids)}, "
-                f"visible_union={float(gating_summary.get('visible_union_ratio') or 0.0):.4f}, "
-                f"keep_xyz={float(gating_summary.get('grad_keep_ratio_xyz') or 0.0):.4f}, "
-                f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
-            )
+            if pseudo_local_gating_cfg.uses_spgm():
+                print(
+                    f"    [StageA local-gating] iter {it}: accepted={gating_summary.get('accepted_visibility_count')}/{len(sampled_views)}, "
+                    f"policy={gating_summary.get('spgm_policy_mode_effective')}, "
+                    f"ranking={gating_summary.get('spgm_ranking_mode_effective')}, "
+                    f"active={float(gating_summary.get('spgm_active_ratio') or 0.0):.4f}, "
+                    f"selected={float(gating_summary.get('spgm_selected_ratio') or 0.0):.4f}, "
+                    f"rank_p50={float(gating_summary.get('spgm_ranking_score_p50') or 0.0):.4f}, "
+                    f"w_p50={float(gating_summary.get('spgm_weight_p50') or 0.0):.4f}, "
+                    f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
+                )
+            else:
+                print(
+                    f"    [local-gating] iter {it}: accepted={len(gating_summary['accepted_pseudo_sample_ids'])}/{len(sampled_ids)}, "
+                    f"visible_union={float(gating_summary.get('visible_union_ratio') or 0.0):.4f}, "
+                    f"keep_xyz={float(gating_summary.get('grad_keep_ratio_xyz') or 0.0):.4f}, "
+                    f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
+                )
 
     stageA_states = [export_view_state(v) for v in pseudo_views]
     save_json(output_dir / 'pseudo_camera_states_stageA.json', stageA_states)
@@ -1243,12 +1306,24 @@ def main():
             if it == 1 or it % 20 == 0:
                 print(f"  [StageB] iter {it}: total={stageB_history['loss_total'][-1]:.4f}, real={stageB_history['loss_real'][-1]:.4f}, pseudo={stageB_history['loss_pseudo'][-1]:.4f}, rgb={stageB_history['loss_rgb'][-1]:.4f}, depth={stageB_history['loss_depth'][-1]:.4f}")
             if pseudo_local_gating_cfg.enabled() and (it == 1 or it % max(1, int(pseudo_local_gating_cfg.log_interval)) == 0):
-                print(
-                    f"    [StageB local-gating] iter {it}: accepted={len(gating_summary['accepted_pseudo_sample_ids'])}/{len(sampled_pseudo_ids)}, "
-                    f"visible_union={float(gating_summary.get('visible_union_ratio') or 0.0):.4f}, "
-                    f"keep_xyz={float(gating_summary.get('grad_keep_ratio_xyz') or 0.0):.4f}, "
-                    f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
-                )
+                if pseudo_local_gating_cfg.uses_spgm():
+                    print(
+                        f"    [StageB local-gating] iter {it}: accepted={gating_summary.get('accepted_visibility_count')}/{len(sampled_pseudo_ids)}, "
+                        f"policy={gating_summary.get('spgm_policy_mode_effective')}, "
+                        f"ranking={gating_summary.get('spgm_ranking_mode_effective')}, "
+                        f"active={float(gating_summary.get('spgm_active_ratio') or 0.0):.4f}, "
+                        f"selected={float(gating_summary.get('spgm_selected_ratio') or 0.0):.4f}, "
+                        f"rank_p50={float(gating_summary.get('spgm_ranking_score_p50') or 0.0):.4f}, "
+                        f"w_p50={float(gating_summary.get('spgm_weight_p50') or 0.0):.4f}, "
+                        f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
+                    )
+                else:
+                    print(
+                        f"    [StageB local-gating] iter {it}: accepted={len(gating_summary['accepted_pseudo_sample_ids'])}/{len(sampled_pseudo_ids)}, "
+                        f"visible_union={float(gating_summary.get('visible_union_ratio') or 0.0):.4f}, "
+                        f"keep_xyz={float(gating_summary.get('grad_keep_ratio_xyz') or 0.0):.4f}, "
+                        f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
+                    )
 
         save_json(output_dir / 'stageB_history.json', stageB_history)
         final_states = [export_view_state(v) for v in pseudo_views]

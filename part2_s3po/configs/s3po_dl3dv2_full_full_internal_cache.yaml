@@ -1,0 +1,4 @@
+inherit_from: /home/bzhang512/CV_Project/part2_s3po/configs/s3po_dl3dv2_full_full.yaml
+Results:
+  save_dir: /data2/bzhang512/CV_Project/output/part2_s3po/dl3dv-2/s3po_dl3dv-2_full_internal_cache
+  export_internal_cache: true
