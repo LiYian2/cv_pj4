@@ -8,274 +8,147 @@
 
 ---
 
+## 2026-04-19
+
+### B3-R1：deterministic participation controller 接通 + first compare（weak-negative）
+- 按 B3 rewrite 方向，把 SPGM 的第一版动作从旧 `xyz_lr_scale` 的 post-backward grad probe，推进成 **pre-render deterministic participation control**：`manager_mode=deterministic_participation` 会在本轮统计 low-score candidate subset，并把 `participation_render_mask` 交给下一轮 pseudo render 消费。
+- 执行过程中暴露并修了两处真 wiring bug：1) `gaussian_renderer.render(mask=...)` 的 masked 分支返回值签名和 unmasked 分支不一致；2) masked 分支返回的 `visibility_filter` 还是子集长度，导致 SPGM stats 读 full-length mask 时尺寸不一致。
+- 先做 smoke，确认 `part_far≈0.875`、`drop_far` / `cand_far` history 已真实记录；随后在固定 `old A1 + new T1` 主线下完成 formal compare：`summary_only=24.185744 / 0.875419 / 0.080386`，`b3_det_participation=24.182511 / 0.875360 / 0.080516`。
+- 结论：B3 的**方法对象已经切对**，不再只是旧 grad scaler；但当前 keep 配置（near=1.0, mid=0.9, far=0.75）首轮 compare 仍是 weak-negative（约 `-0.00323 PSNR / -0.000059 SSIM / +0.000130 LPIPS`），因此当前判断是 **no-go for landing，下一轮应改成更保守的 participation keep**。
+
+## 2026-04-18
+
+### T1-R3：补齐 `old A1 + new T1`，完成 2×2 因子实验
+- 单独补跑 `old_a1_new_topology`，把 observation × topology 的 2×2 因子补齐：`old A1 + old T1`、`old A1 + new T1`、`new A1 + old T1`、`new A1 + new T1`。目的不再是验证单条臂，而是判断主效应究竟来自 A1 还是 T1。
+- 结果：`old A1 + new T1 = 24.185846 / 0.875423 / 0.080379`，不仅显著优于 `old A1 + old T1`（约 `+0.04843 PSNR / +0.00140 SSIM / -0.00076 LPIPS`），也优于 `new A1 + new T1`（约 `+0.05033 PSNR / +0.00009 SSIM / -0.00031 LPIPS`）。
+- 发现：这说明 T1 的 topology 收益是跨 observation 稳定存在的，而 new A1 目前并不是主收益来源；至少在当前实现下，old A1 仍然是更稳的 observation 选择。
+- 结论：当前最强候选主线从“new A1 + new T1”修正为“old A1 + new T1”。因此 B3 继续冻结——不是因为 B3 不重要，而是因为 observation/topology 主线刚刚收敛，现在再开新 B3 规划会让主因再次混淆。
+
+### T1-R2：new A1 + new T1 confirmation / landing check
+- 在独立运行根中补做三臂 confirmation：`old_a1_old_topology_ref`、`new_a1_old_topology`、`new_a1_new_topology`。目的不是再验证 T1 有没有效果，而是确认 `new A1 + new T1` 相对 old A1 强参考臂的 landing 是否已经足够稳定。
+- 结果：`old_a1_old_topology_ref=24.137415 / 0.874025 / 0.081137`，`new_a1_old_topology=24.098963 / 0.874209 / 0.080708`，`new_a1_new_topology=24.135512 / 0.875333 / 0.080065`。因此，new topology 相对 new A1 old topology 仍有稳定正增益（约 `+0.03655 PSNR / +0.00112 SSIM / -0.00064 LPIPS`），但相对 old A1 强参考臂则是 **PSNR 近乎打平但略低、SSIM/LPIPS 更优**。
+- 发现：这说明 T1 的 topology 收益已经被重复确认，但 `new A1 + new T1` 对 old A1 的接管结论还没有完全锁死；它更像“接近 landing，但仍处于 mixed confirmation”，而不是已经可以无条件宣布正式接管。
+- 结论：当前继续做 `new A1 + new T1` 的 confirmation / landing，而**不启动新的 B3 规划**。B3 下一次应建立在更稳定的新主 topology 之上，否则会重新把因果关系搅混。
+
+### T1-R1：old topology vs new topology apples-to-apples compare + orchestration landing
+- 新增 `scripts/run_t1_topology_compare.py`，在同一 new A1 observation、同一 bounded StageB protocol、同一 repair A dense_keep 下重跑两臂：old topology（`joint_topology_mode=off`）与 new topology（`joint_topology_mode=brpo_joint_v1`）；runner 同时把 StageA.5 的角色显式降级成 `legacy_mainline` vs `optional_warmup_or_control`。
+- 结果：old topology=`24.116956 / 0.874490 / 0.080566`，new topology=`24.149837 / 0.875580 / 0.079964`。new topology 相对 old topology 为 `+0.032881 PSNR / +0.001090 SSIM / -0.000601 LPIPS`；同时相对先前 old A1 winner 也有正增益（约 `+0.00736 PSNR / +0.00132 SSIM / -0.00112 LPIPS`）。
+- 发现：这轮 compare 说明在 new A1 observation 下，真正的收益点不只是 object semantics，还包括 optimizer topology 本身；`joint_topology_mode=brpo_joint_v1` 不是命名切换，而是有效的结构改动。与此同时，StageA.5 已经可以被工程化地描述成可选 warmup / 对照，而不是默认主线必经阶段。
+- 结论：当前 Re10k 最强候选从“old A1 support filter”推进到“new A1 + new T1”。下一步应做这条组合主线的 confirmation / landing，而不是回头继续补 old topology。
+
+### A1-R2：new A1 rewrite StageB formal compare（control / old A1 / new A1）
+- 按同一 canonical StageB protocol 重跑三臂：control=`RGB-first + depth-sidecar`，old A1=`joint_confidence_v2 + joint_depth_v2`，new A1=`pseudo_observation_mode=brpo_joint_v1`；三臂都接同一 StageA.5 handoff、同一 repair A dense_keep、同一 bounded schedule，并全部完成 replay eval。
+- 结果：control=`24.079436 / 0.872832 / 0.082186`，old A1=`24.142473 / 0.874256 / 0.081089`，new A1=`24.116298 / 0.874483 / 0.080569`。new A1 相对 control 为 `+0.036862 PSNR / +0.001651 SSIM / -0.001617 LPIPS`；相对 old A1 为 `-0.026175 PSNR / +0.000227 SSIM / -0.000519 LPIPS`。
+- 发现：new A1 的 consumer lock 是真实生效的，`pseudo_observation_mode_effective=brpo_joint_v1`，有效输入固定落到 `pseudo_confidence_joint_v1 / pseudo_depth_target_joint_v1 / pseudo_source_map_joint_v1`；因此这次不是旧 A1 换壳。与此同时，new A1 仍停留在约 2% 量级的 sparse supervision，没有单靠 observation rewrite 就压过 old A1 的 PSNR。
+- 结论：A1 rewrite 已经完成并给出 replay 级正信号——它明确优于 control，但在当前旧 topology 下还没有全面取代 old A1。下一步主线应切到 T1 joint topology rewrite，而不是继续在 A1 上补小规则。
+
+### A1-R：BRPO-style joint observation rewrite（builder + consumer lock）
+- 新增 `pseudo_branch/brpo_v2_signal/joint_observation.py`，在 `build_brpo_v2_signal_from_internal_cache.py` 中并行产出 `pseudo_*_joint_v1` observation bundle，并保留 old A1 artifacts 作为对照臂。
+- 在 `run_pseudo_refinement_v2.py` 增加 `--pseudo_observation_mode brpo_joint_v1`，并完成 consumer 锁定：该模式下统一读取 `pseudo_confidence_joint_v1` / `pseudo_depth_target_joint_v1` / `pseudo_source_map_joint_v1`，不再由旧 mask/target 旋钮主导。
+- 发现：第一版 candidate scoring 过宽会把 valid 区域误扩到全图，已回收为 support-seeded scoring；8-frame smoke 下 valid 覆盖回到 sparse support 区间，且 `old_min_rule_diff_ratio` 与 `new_depth_vs_old_like_diff_ratio` 均非零。
+- 结论：A1 已从“support filter 修补”切换到“observation object 重写”语义；下一步是同 protocol 的 StageB formal compare（control / old A1 / new A1）。
+
+### B3-2：repair A 40iter short compare + replay
+- 按 B3 文档建议，以 repair A 为锚点完成两臂 short compare：control=`summary_only`，study=`xyz_lr_scale`；随后按既有 Re10k internal replay 口径对两臂都做 replay eval。
+- 发现：机制上 `xyz_lr_scale` 确实真实生效（study 的 `_xyz` grad 更低），但 40iter compare 没形成训练侧正收益，而且 replay 相对 control 小幅退化（约 `-0.0129 PSNR / -0.00031 SSIM / +0.00018 LPIPS`）。
+- 结论：B3-1 当前参数设定判为 weak-negative / no-go；先不顺推 opacity decay，也不把当前 deterministic state action 升级为新默认方向。
+
+### B3-1：xyz deterministic lr scaling plumbing + smoke
+- 在 `manager.py` 中新增 `manager_mode=xyz_lr_scale`，把 B2 的 cluster-level diagnostics 变成真实 state action：在 `optimizer.step()` 前对 `_xyz.grad` 再乘一层温和的 per-Gaussian state scale；同时补了 config / history / logging。
+- 发现：repair A 1-iter smoke 下 action 已真实生效，`spgm_state_action_applied=true`，且 `state_grad_norm_xyz` 从 `0.1446` 下降到 `0.1336`；三层 cluster 的 effective scale 也已经拉开（near≈0.884 / mid≈0.865 / far≈0.826）。
+- 结论：B3 第一段 wiring 成立，SPGM 已经第一次真实影响 Gaussian state behavior；下一步应先做 repair A 锚点 short compare，再决定是否加 very mild opacity decay。
+
+### B2-2：cluster-level manager diagnostics + compatibility smoke
+- 在 `manager.py` 中把 B2 从“全局均值 diagnostics”补到 cluster-level：新增 near/mid/far 的 `state_score mean/p50` 与 summary-only `lr_scale candidate`，并让 candidate count 不再依赖 selector keep 差值。
+- 发现：repair A dense_keep 下 manager diagnostics 终于有了非平凡信号（例如 far cluster `state_score_p50≈0.452`、`lr_scale_far≈0.587`、`candidate_count_far=4591`）；同时 selector-first 1-iter smoke 仍保持 `selected_ratio < active_ratio`，说明旧 selector 路径没有被 B2 改坏。
+- 结论：B2 已从“分数接线”推进到“manager 可消费的 scene-aware diagnostics 完整版”；下一步可以进入 B3，把这些 diagnostics 变成 deterministic state action。
+
+### B2：scene-aware density proxy + state_score 第一版接线
+- 在 `stats.py` 中把统计从 accepted pseudo subset 扩到 current train window summary，引入 `population_support_count` / `struct_density_proxy`；在 `score.py` 中显式输出 `weight_score / ranking_score / state_score`。
+- 发现：repair A smoke 下 `state_score_p50` 与 `ranking_score_p50` 已经分离，不再只是 selector ranking 的别名；`struct_density` mode 的 1-iter smoke 也能真实跑通。
+- 结论：B2 第一版 diagnostics 已接通，后续可以继续往 B3 的 deterministic state action 推进，但当前还不启用真实 state edit。
+
+### B1：SPGM manager shell 落地
+- 新增 `spgm/manager.py`，并把 live call chain 从单层 `stats -> score -> grad weight -> step` 拆成 `stats -> score -> update policy -> state management -> step`。
+- 发现：StageB smoke 已经真实打印 `manager=summary_only`，history 中也能看到 `spgm_manager_mode_effective / spgm_state_*` 字段，而且 `state_action_applied=false`。
+- 结论：B1 结构层已经成立，默认行为保持 summary-only 兼容态，B2/B3 不必再继续把 manager 逻辑挤回 `run_pseudo_refinement_v2.py` 或 `policy.py`。
+
+### P2-T：selector-first confirmation / precision sweep
+- 固定 canonical StageB protocol 与 repair A control，只扫 far-only `0.88 / 0.90-repeat / 0.92 / 0.95` 微窗口。
+- 发现：selector-first 真实停留在 practical-parity 区，但没有稳定越过 repair A；值得保留的只剩 `0.90~0.92` 极窄窗口。
+- 结论：selector-first 保留为 near-parity 参考臂，不升级为新 anchor；主线从这一步正式转向 A1 [参见 `docs/P2T_selector_confirmation_precision_compare_20260418.md`]。
+
+### A1：unified RGB-D joint confidence StageB formal compare
+- 新增 `joint_confidence_v2 / joint_depth_v2` builder+consumer 路径，并补 generic depth path 对 `depth_confidence_mask` 的真实消费；基于现有 Re10k `signal_v2` sidecar 生成 A1 joint root。
+- 在 canonical StageB + repair A dense_keep 下，A1 joint arm 为 `24.031512 / 0.872048 / 0.081744`，control sidecar arm 为 `24.001931 / 0.871322 / 0.082440`。
+- 发现：A1 的 mask coverage 基本不变（约 `1.957%`），但 verified depth support 从约 `4.13%` 收缩到约 `1.96%`、render fallback 几乎归零；收益来自 unified trusted support，而不是更大 coverage。
+- 结论：A1 是 Re10k 上第一条明确优于 sidecar control、并在 PSNR / LPIPS 上超过 canonical baseline 的 observation 正信号；当前主线进入 A1 confirmation / landing，A2 退居后续 widening 步骤 [参见 `docs/A1_joint_confidence_stageb_compare_20260418.md`]。
+
+### A1+A2：geometry-constrained expand 三臂 compare
+- 新增 support_expand.py 模块，实现双侧 geometry-supported expansion；builder 支持 --use-a2-expand 开关。
+- 三臂 compare：control 24.106/0.8734/0.08145，A1 24.120/0.8736/0.08146，A1+A2 23.834/0.8683/0.08295。
+- 发现：coverage 从 1.96% 扩到 6.05%，但 A1+A2 相比 A1 下降 -0.286 PSNR。
+- 结论：A2 widening 策略失败，主线推进 B1/B2/B3 [参见 docs/A1_joint_confidence_stageb_compare_20260418.md section 8]。
+
+---
+
 ## 2026-04-17
 
 ### DL3DV：Phase G baseline + SPGM bring-up
-- 基于 canonical DL3DV chain（internal cache / signal-aware selection / canonical prepare root / signal_v2）完成首轮 StageA → StageA.5 → bounded StageB baseline → SPGM repair A，并统一 replay
-- 发现：当前 DL3DV pseudo_cache 不含 `target_depth_for_refine_v2`，所以首轮 refine 采用 `signal_pipeline=brpo_v2 + brpo_v2_raw`，depth target 回退到 canonical `target_depth_for_refine`；修正后链路可稳定跑通
-- 结论：DL3DV case bring-up 已完成，`canonical_baseline_post40_lr03_120` 首轮略优于 `spgm_repair_a_keep111_eta0_wf025`，selector-first 先不启动 [参见 `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260417_dl3dv_phaseg_baseline_spgm_e1/summary.json`]
+- 基于 canonical DL3DV chain（internal cache / signal-aware selection / canonical prepare root / signal_v2）完成首轮 StageA → StageA.5 → bounded StageB baseline → SPGM repair A，并统一 replay。
+- 发现：当前 DL3DV pseudo_cache 不含 `target_depth_for_refine_v2`，所以首轮 refine 采用 `signal_pipeline=brpo_v2 + brpo_v2_raw`，depth target 回退到 canonical `target_depth_for_refine`；修正后链路可稳定跑通。
+- 结论：DL3DV case bring-up 已完成，`canonical_baseline_post40_lr03_120` 首轮略优于 `spgm_repair_a_keep111_eta0_wf025`，selector-first 先不启动 [参见 `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260417_dl3dv_phaseg_baseline_spgm_e1/summary.json`]。
 
 ### P2-S：support_blend far-keep follow-up compare
-- 固定 ranking=`support_blend`，只扫 far keep ratio (`0.90/0.85/0.80`)
-- 发现：`far=0.90` 已逼近 repair A parity（`+0.000069 PSNR`）
-- 结论：下一步围绕 `0.90` 做窄范围确认，不回强 selector [参见 archived/2026-04-experiments/P2S_*.md]
+- 固定 ranking=`support_blend`，只扫 far keep ratio (`0.90/0.85/0.80`)。
+- 发现：`far=0.90` 已逼近 repair A parity（`+0.000069 PSNR`）。
+- 结论：下一步围绕 `0.90` 做窄范围确认，不回强 selector [参见 archived/2026-04-experiments/P2S_*.md]。
 
 ### P2-R：score/ranking repair compare
-- 拆分 `ranking_score` 与 `weighting_score`，新增 `support_blend` ranking
-- 发现：support-aware ranking 有小幅回升，但仍低于 repair A
-- 结论：ranking 方向有效，但不完全解决问题 [参见 archived/2026-04-experiments/P2R_*.md]
+- 拆分 `ranking_score` 与 `weighting_score`，新增 `support_blend` ranking。
+- 发现：support-aware ranking 有小幅回升，但仍低于 repair A。
+- 结论：ranking 方向有效，但不完全解决问题 [参见 archived/2026-04-experiments/P2R_*.md]。
 
 ### P2-O：selector-first formal compare
-- 以 repair A 为 control，比较 selector S1/S2
-- 发现：selector 越强 replay 越差（误删有用更新）
-- 结论：当前 ranking 下 selector 会伤 replay，需先修 ranking [参见 archived/2026-04-experiments/P2O_*.md]
+- 以 repair A 为 control，比较 selector S1/S2。
+- 发现：selector 越强 replay 越差（误删有用更新）。
+- 结论：当前 ranking 下 selector 会伤 replay，需先修 ranking [参见 archived/2026-04-experiments/P2O_*.md]。
 
 ### P2-N：selector-first plumbing smoke
-- 实现 `selector_quantile` policy，selector 真实生效
-- 发现：`selected_ratio < active_ratio`，Gaussian 子集被缩小
-- 结论：plumbing 完成，下一步正式 compare [参见 archived/2026-04-experiments/P2N_*.md]
+- 实现 `selector_quantile` policy，selector 真实生效。
+- 发现：`selected_ratio < active_ratio`，Gaussian 子集被缩小。
+- 结论：plumbing 完成，下一步正式 compare [参见 archived/2026-04-experiments/P2N_*.md]。
 
 ### P2-M：conservative deterministic repair compare
-- 更温和 suppress（A/B 两臂），grad weight回升
-- 发现：repair A 优于原始 SPGM，但仍低于 canonical baseline
-- 结论：suppress 过强是问题，但还需 selector-first [参见 archived/2026-04-experiments/P2M_*.md]
+- 更温和 suppress（A/B 两臂），grad weight回升。
+- 发现：repair A 优于原始 SPGM，但仍低于 canonical baseline。
+- 结论：suppress 过强是问题，但还需 selector-first [参见 archived/2026-04-experiments/P2M_*.md]。
 
 ### P2-L：canonical StageB formal compare
-- 对齐 protocol 后，SPGM 仍低于 baseline
-- 发现：两臂 rejection 一致，grad weight 下降是主变化
-- 结论：protocol drift 不是主解释，需进入 repair [参见 archived/2026-04-experiments/P2L_*.md]
+- 对齐 protocol 后，SPGM 仍低于 baseline。
+- 发现：两臂 rejection 一致，grad weight 下降是主变化。
+- 结论：protocol drift 不是主解释，需进入 repair [参见 archived/2026-04-experiments/P2L_*.md]。
 
 ### P2-K：forensic audit + code hygiene
-- 审查 SPGM v1 实现，发现 entropy 归一化问题
-- 修复：entropy 按 `log(B)` 归一化，density_mode 真实接通
-- 结论：wiring 正确，但原始 compare protocol 与 baseline 漂离 [参见 archived/2026-04-experiments/P2K_*.md]
+- 审查 SPGM v1 实现，发现 entropy 归一化问题。
+- 修复：entropy 按 `log(B)` 归一化，density_mode 真实接通。
+- 结论：wiring 正确，但原始 compare protocol 与 baseline 漂离 [参见 archived/2026-04-experiments/P2K_*.md]。
 
 ---
 
 ## 2026-04-16
 
 ### P2-J：bounded StageB schedule compare
-- 比较 `post40_lr03_120` / `post80_lr03_120` / `post80_lr03_real05_120`
-- 发现：`post40_lr03_120` 最佳，能把 120iter cliff 拉回
-- 结论：StageB 已有 bounded baseline，不再深调 schedule [参见 archived/2026-04-experiments/P2J_*.md]
+- 比较 `post40_lr03_120` / `post80_lr03_120` / `post80_lr03_real05_120`。
+- 发现：`post40_lr03_120` 最佳，能把 120iter cliff 拉回。
+- 结论：StageB 已有 bounded baseline，不再深调 schedule [参见 archived/2026-04-experiments/P2J_*.md]。
 
 ### P2-I：StageB 回落窗口定位
-- 固定 gated winner，扫 `20/40/80/120` iter
-- 发现：PSNR 最佳在 40iter，80→120 出现 cliff
-- 结论：StageB 不是完全没价值，但需 bounded schedule [参见 archived/2026-04-experiments/P2I_*.md]
+- 固定 gated winner，扫 `20/40/80/120` iter。
+- 发现：PSNR 最佳在 40iter，80→120 出现 cliff。
+- 结论：StageB 不是完全没价值，但需 bounded schedule [参见 archived/2026-04-experiments/P2I_*.md]。
 
 ### P2-H：RGB-only v2 StageB-120iter verify
-- gated 仍真实工作（96/120 rejection），但两臂都低于 baseline
-- 发现：gating 不能阻止 120iter regression
-- 结论：需先修 StageB 后段 schedule [参见 archived/2026-04-experiments/P2H_*.md]
-
-### P2-G：StageB real-branch short compare
-- `RGB-only v2 + gated_rgb0192` 在 StageB 优于 legacy
-- 发现：real branch 未被误伤，gated 小幅正向
-- 结论：主候选延续到 joint refine [参见 archived/2026-04-experiments/P2G_*.md]
-
-### P2-F：RGB-only v2 StageA.5 gated compare
-- `RGB-only v2` 明显优于 legacy，branch-specific gating 有小幅正增益
-- 发现：raw RGB 稀疏不影响 StageA.5 表现
-- 结论：gating 主线转到 RGB-only v2 [参见 archived/2026-04-experiments/P2F_*.md]
-
-### P2-E：legacy threshold calibration
-- `vr=0.02/0.03` 进入真实 reject 区，但 replay 改善极弱
-- 发现：threshold softness 不是 legacy 主瓶颈
-- 结论：转向 RGB-only v2 做 branch-specific calibration [参见 archived/2026-04-experiments/P2E_*.md]
-
-### P2-D：signal gate 阈值诊断
-- 默认阈值 `0.01/0.01/0.995` 对 legacy 过松，0 rejection 是结构必然
-- 发现：legacy 实际 range `verified 1.89%~5.17% / rgb 14.68%~22.05%`
-- 结论：需先标定 legacy threshold [参见 archived/2026-04-experiments/P2D_*.md]
-
-### SPGM v1 Phase 0-6 完成
-- Phase 0-3：plumbing/stats/score/policy 落地
-- Phase 4-6：StageA.5/StageB 接入 + 120iter compare
-- 发现：SPGM 真实调制 grad，但 120iter replay 低于 baseline
-- 结论：实现稳定，但需 repair / 超参调优 [参见 CHANGELOG 条目 P2-K~P2-S]
-
----
-
-## 2026-04-15
-
-### P2-C：StageB real-branch short compare
-- gated 不会误伤 real branch，但 replay/loss 与 ungated 重合
-- 发现：问题从"误伤风险"转为"gate 未产生 rejection"
-- 结论：需解释为什么 current threshold 下 0 rejection [参见 archived/2026-04-experiments/P2C_*.md]
-
-### P2-B：StageA.5 gated vs ungated
-- gated 只有极轻微 replay 优势，没有明显改善
-- 发现：`iters_with_rejection=0/80`，signal gate 未生效
-- 结论：转向 StageB 验证 real branch 误伤风险 [参见 archived/2026-04-experiments/P2B_*.md]
-
-### P2：local Gaussian gating 第一版实现
-- 新增 `pseudo_local_gating_*` CLI，StageA.5/StageB split backward
-- 发现：hard gating 骨架已落地，smoke 通过
-- 结论：进入 8-frame compare 验证收益 [参见 STATUS §6.2]
-
-### P1A：signal_v2 StageA-only compare
-- `legacy / v2-rgb-only / v2-full` 三臂对照
-- 发现：`v2-rgb-only` 可保留，`v2-full` 过窄（verified≈1.96%）
-- 结论：v2 分支保留 rgb-only，不直接接管 full depth [参见 STATUS §6.2]
-
-### P0：abs prior 标定 + StageA-only 性质确认
-- 固定背景：`lambda_abs_t=3.0, lambda_abs_r=0.1`
-- 发现：StageA 不更新 Gaussian，replay-on-PLY 只是 sanity check
-- 结论：replay compare 必须移到 StageA.5/StageB [参见 STATUS §6.2]
-
-### Fusion v1 + Signal v2 第一版落地
-- fusion 改为 `target↔reference overlap confidence`
-- 新增 `signal_v2/` 路径，fused RGB mask + depth supervision v2
-- 发现：wiring 通，但需 compare 证明优于 legacy [参见 STATUS §6.2]
-
----
-
-## 2026-04-14
-
-### E2：dual-pseudo allocation
-- `top2 per gap` 实际落成 `1/2+2/3`
-- 发现：E2 伪帧池扩大但短跑 loss 回落，次优样本稀释 supervision
-- 结论：default winner 保持 E1 `signal-aware-8` [参见 archived/2026-04-plans-landed/SIGNAL_ENHANCEMENT.md]
-
-### E1.5：support-aware selection 正式短对照
-- `signal-aware-8` 正式 verify/pack + StageA-20iter 对照
-- 发现：verified_ratio / continuous_confidence 有提升，densify coverage 上升
-- 结论：E1 收口，收益先传导到 densify [参见 archived/2026-04-plans-landed/SIGNAL_ENHANCEMENT.md]
-
-### E1：support-aware pseudo selection 第一轮
-- `signal-aware-8` 选出 `[23,57,92,127,162,196,225,260]`
-- 发现：`6/8` gap 改选，偏 2/3 位置
-- 结论：midpoint 不是稳定最优，E1 方向成立 [参见 archived/2026-04-plans-landed/SIGNAL_ENHANCEMENT.md]
-
-### S1.3：confidence-aware densify + 8-frame compare
-- retuned 阈值回调到可用区间
-- 发现：conf-aware 组仍高于 baseline loss
-- 结论：wiring 通但参数需继续回调 [参见 archived/2026-04-plans-landed/SIGNAL_SEMANTICS_AND_STABLE_REFINEMENT_PLAN_20260414.md]
-
-### S1.2：RGB/depth mask semantics split
-- consumer 显式分离 RGB/raw confidence 与 depth/train-mask
-- 发现：loss 侧支持不同 mask
-- 结论：语义分工 wiring 完成 [参见 STATUS §3.2]
-
-### S1.1：continuous confidence + agreement-aware support
-- 新增 raw continuous confidence 与 agreement-aware support
-- 发现：verify/pack 产物已更新
-- 结论：upstream semantics 完成 [参见 STATUS §3.2]
-
----
-
-## 2026-04-13
-
-### P1 bottleneck review：signal/scope mismatch
-- midpoint8 M5 有效 depth 仅约 3.49%
-- 发现：弱局 supervision 作用在全局 Gaussian，underconstrained
-- 结论：主线从参数扫描转为结构修正 [参见 STATUS §6.3]
-
-### P0 repair：stage handoff + reporting fix
-- 修复 handoff：StageA/A.5/B 相机状态顺序传递
-- 发现：修复后 A.5/B 略好，但仍负
-- 结论：handoff bug 是真问题，但不是唯一瓶颈 [参见 STATUS §12]
-
-### StageB Phase3：300iter long run
-- 120iter PASS，300iter FAIL（相对 A.5 baseline）
-- 发现：StageB 短程有效，长程退化
-- 结论：主问题是后段稳定性 [参见 STATUS §9]
-
-### A.5 midpoint 80iter + replay
-- `xyz+opacity` 优于 baseline（`+0.0213 PSNR`）
-- 发现：8 帧改动后有正向 replay 信号
-- 结论：A.5(xyz+opacity) 可作为微调候选 [参见 STATUS §7]
-
-### A+B：split abs prior + grad contrib 诊断
-- split+scaled abs prior 落地
-- 发现：rot/trans 主驱动来自 RGB/depth，abs prior 是稳定边界
-- 结论：StageA 参数化完成 [参见 STATUS §6.2]
-
----
-
-## 2026-04-12
-
-### M5-2：source-aware depth loss 接入
-- depth loss 按 source 拆分，fallback weight=0
-- 发现：loss_depth 接通但仍不下降
-- 结论：depth signal 弱但已真实进入 loss [参见 STATUS §6.2]
-
-### M5-1：densify depth correction field
-- densified coverage 从 ~1.56% 提到 ~14.21%
-- 发现：train-mask 内 non-fallback 提到 ~81.2%
-- 结论：upstream densify 可行 [参见 STATUS §6.2]
-
-### M5-0：depth signal diagnosis
-- verified depth 仅占 train-mask ~8%
-- 发现：fallback 占主导
-- 结论：需 densify correction field [参见 STATUS §6.2]
-
-### M4.5：StageA 长对照（blended vs render-only）
-- `blended_depth` 非零，`render_depth_only` ≈0
-- 发现：depth 已接入，但 StageA 利用偏弱
-- 结论：depth signal 弱有效 [参见 STATUS §6.2]
-
-### M4：StageA consumer 显式接入新 target
-- 显式 mask/depth mode，不再依赖隐式 fallback
-- 发现：consumer wiring 完成
-- 结论：upstream→consumer 链路打通 [参见 STATUS §6.2]
-
-### M3：blended target_depth_for_refine 落地
-- pseudo-view sparse verified depth + blended target
-- 发现：verified depth coverage ~1.5%
-- 结论：depth target 不再是占位符 [参见 STATUS §6.2]
-
-### M2.5：propagation 合理区间研究
-- 研究区间收敛到 10%~25% coverage
-- 发现：radius=1/2，tau_rel_depth=0.01~0.02 更合理
-- 结论：默认参数过宽，需收紧 [参见 STATUS §6.2]
-
-### M2：train mask propagation 第一版
-- seed_support → train_mask propagation 落地
-- 发现：默认参数 coverage ~70%，过宽
-- 结论：机制成立，参数需收紧 [参见 STATUS §6.2]
-
-### M1：fused-first verification + compatibility layer
-- `fused_first` mode 落地
-- 发现：单纯改 verification order 改善有限
-- 结论：需 M2 propagation [参见 STATUS §6.2]
-
-### Phase 6：schema solidification
-- fusion/verify/pack 真实产出新 schema
-- 发现：consumer smoke 通过
-- 结论：canonical schema 第一轮打通 [参见 STATUS §6.1]
-
-### Phase 5：auditability/provenance 修补
-- verification_meta、pack source_meta 增强
-- 发现：provenance 链可审计
-- 结论：链路完整性修复 [参见 STATUS §6.1]
-
-### Phase 4：mask-only ablation（legacy vs brpo）
-- 同 pseudo_cache、同 refine 配置，比较 mask 来源
-- 发现：brpo mask 在 v1 fixed-pose RGB-only refine 下不优于 legacy
-- 结论：mask 语义与 refine 消费方式不匹配 [参见 STATUS §6.1]
-
----
-
-## 2026-04-11
-
-### Phase 3：internal prepare → verify → pack
-- BRPO verification 接入 internal prepare 流程
-- 发现：3-frame prototype 通过
-- 结论：internal route 链路打通 [参见 STATUS §6.1]
-
-### Phase 2：same-ply replay consistency
-- internal after_opt replay 与官方 eval 对齐
-- 发现：replay 机制可用于 baseline/refined 比较
-- 结论：replay pipeline 可信 [参见 STATUS §6.1]
-
-### Phase 1：internal cache 导出
-- before_opt/after_opt PLY + render cache 导出
-- 发现：camera states 共享，PLY 各自保存
-- 结论：internal cache 结构确立 [参见 STATUS §2.1]
-
-### BRPO Phase B/C：verification 原型
-- left/right 单分支 + 双分支 fusion
-- 发现：verified support ratio ~0.8%~1.3%，非全空
-- 结论：verification 机制可行 [参见 STATUS §6.1]
+- gated 仍真实工作（96/120 rejection），但两臂都低于 baseline。
+- 发现：gating 不能阻止 120iter regression。
+- 结论：需先修 StageB 后段 schedule [参见 archived/2026-04-experiments/P2H_*.md]。

@@ -8,7 +8,7 @@ class PseudoLocalGatingConfig:
     # Core mode and params
     mode: str = 'off'
     params: str = 'xyz'
-    
+
     # Legacy gating thresholds
     min_verified_ratio: float = 0.01
     min_rgb_mask_ratio: float = 0.01
@@ -16,8 +16,8 @@ class PseudoLocalGatingConfig:
     min_correction: float = 0.0
     soft_power: float = 1.0
     log_interval: int = 20
-    
-    # SPGM-specific hyperparameters (Phase 0 plumbing - v1 defaults)
+
+    # SPGM-specific hyperparameters
     spgm_num_clusters: int = 3
     spgm_alpha_depth: float = 0.5
     spgm_beta_entropy: float = 0.5
@@ -37,20 +37,26 @@ class PseudoLocalGatingConfig:
     spgm_selector_keep_ratio_far: float = 1.0
     spgm_selector_min_keep: int = 1
 
+    # B3 deterministic manager controls
+    spgm_manager_mode: str = 'summary_only'
+    spgm_state_candidate_quantile: float = 0.5
+    spgm_state_base_scale_near: float = 1.0
+    spgm_state_base_scale_mid: float = 0.95
+    spgm_state_base_scale_far: float = 0.90
+    spgm_state_participation_keep_near: float = 1.0
+    spgm_state_participation_keep_mid: float = 0.9
+    spgm_state_participation_keep_far: float = 0.75
+
     def enabled(self) -> bool:
         return (self.mode or 'off') != 'off'
-    
+
     def uses_visibility_union(self) -> bool:
-        """Check if mode uses legacy visibility-union path."""
         return self.mode in {'hard_visible_union_signal', 'soft_visible_union_signal'}
 
     def uses_spgm(self) -> bool:
-        """Check if mode uses SPGM path."""
         return self.mode in {'spgm_keep', 'spgm_soft'}
 
     def is_soft(self) -> bool:
-        """Check if mode uses soft gating (for signal gate behavior)."""
-        # Covers both legacy soft_visible_union_signal and spgm_soft
         return self.mode in {'soft_visible_union_signal', 'spgm_soft'}
 
     def as_dict(self) -> dict:

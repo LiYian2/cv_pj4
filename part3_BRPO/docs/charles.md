@@ -1,70 +1,162 @@
 # charles.md
 
-> 记录时间：2026-04-12 15:20
-> 主题：Part3 当前已完成 M5 upstream、修回 Stage A 的 S3PO residual pose 闭环；现在进入“修复后效果是否足够强”的评估阶段。
+> 记录时间：2026-04-19 05:16
+> 主题：B3 已真正开始执行。第一版 deterministic participation controller 已接入主 loop 并完成首轮 formal compare，但当前是 weak-negative。下一次 session 的任务不是再证明 B3 能不能跑，而是沿着 **更保守 participation schedule** 做第二轮调整。
 
-## 当前到哪一步了
+## 这次 session 到底做成了什么
+这次不是只改文档，而是真把 B3 往 BRPO-style population manager 推了一步。
 
-当前主线仍然是 **Re10k-1 full internal route + mask-problem route**。
+### 1) 当前主线没有变
+A1/T1 主线仍然是：
+- observation：`old A1`（`joint_confidence_v2 + joint_depth_v2`）
+- topology：`new T1`（`joint_topology_mode=brpo_joint_v1`）
+- StageA.5：optional warmup / control
 
-已经完成：
-1. `part2 full rerun -> internal_eval_cache`
-2. same-ply `replay_internal_eval` 一致性验证
-3. `prepare_stage1_difix_dataset_s3po_internal.py` 打通 `select -> difix -> fusion -> verify -> pack`
-4. `M1 / M2 / M2.5`：`seed_support -> train_mask`，当前 `train_mask coverage ≈ 19.4%`
-5. `M3`：`projected_depth_*` + `target_depth_for_refine.npy`
-6. `M5-0 / M5-1`：depth signal diagnosis + `target_depth_for_refine_v2.npy` densify target
-7. `M5-2`：`run_pseudo_refinement_v2.py` 已支持 `blended_depth_m5 + source_aware depth loss`
-8. **关键修复已完成**：Stage A 现在会在每次 `optimizer.step()` 后执行 `apply_pose_residual_()`，把 `tau -> R/T` 折回，恢复 S3PO 原始 residual pose 闭环
+不要下一次又回去重新争 `new A1 + new T1`。
+当前默认候选主线仍然是：
 
-## 当前最重要的结论
+> **`old A1 + new T1`**
 
-1. **之前的“loss 不动”不只是 depth sparse，也有 Stage A pose 闭环断掉的问题。这个闭环现在已经修回。**
-2. 修复后，Stage A 不再是假优化：render 会随 pose 更新而变化，loss 也不再完全平。
-3. 但当前 **depth 只表现为弱下降**，还没有强到足以直接进入下一阶段。
-4. 当前新的结构问题是：**`pose_reg` 只约束 residual，本轮 step 后 residual 会清零，所以它不能约束累计 pose drift。**
-5. 现在不要直接进 Stage B。
+### 2) B3 第一版已经不再是旧 grad scaler
+这次已经把 B3 的第一版动作接成：
 
-## 下一次来先看什么
+```text
+iter t:
+  统计 state / candidate subset
+  生成 participation_render_mask
+iter t+1:
+  pseudo render 在 forward 前消费这个 mask
+```
 
-按顺序看：
-1. `/home/bzhang512/CV_Project/part3_BRPO/docs/CURRENT_MASK_PROBLEM.md`
-2. `/home/bzhang512/CV_Project/part3_BRPO/docs/STATUS.md`
-3. `/home/bzhang512/CV_Project/part3_BRPO/docs/DESIGN.md`
-4. `/home/bzhang512/CV_Project/part3_BRPO/docs/CHANGELOG.md`
+也就是说：
+- 旧 B3：post-backward `_xyz.grad` scale
+- 新 B3 v1：pre-render deterministic participation control
+
+这点已经成立，不要下次再把它说回“只是旧 B3 小修小补”。
+
+### 3) 首轮 compare 结果
+正式 compare 路径：
+`/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260419_b3_det_participation_compare_e1/compare_summary.json`
+
+结果：
+- `oldA1_newT1_summary_only = 24.185744 / 0.875419 / 0.080386`
+- `oldA1_newT1_b3_det_participation = 24.182511 / 0.875360 / 0.080516`
+- delta = `-0.003232 PSNR / -0.000059 SSIM / +0.000130 LPIPS`
+
+结论：
+- **B3 的方法对象已经接对**
+- 但 **第一版 keep 配置是 weak-negative / no-go for landing**
+
+所以，不要下次误判成“B3 没价值”。真正更准确的判断是：
+
+> **当前 action 位置已经对了，但 action 强度还过重。**
+
+---
+
+## 这次实际踩到的两个 wiring bug（下次别忘）
+这两个 bug 是这次真正把 participation control 接进主 loop 后才暴露的：
+
+1. `gaussian_renderer.render(mask=...)` 的 masked 分支返回值签名和 unmasked 分支不一致；
+2. masked 分支的 `visibility_filter` 是子集长度，不是 full-length Gaussian mask，导致 SPGM stats 报尺寸不一致。
+
+这两处都已经修过。下次如果你再沿着 B3 participation 路线改代码，先记得：
+
+> **renderer 的 masked branch contract 已经是 B3 的一部分，不是无关底层细节。**
+
+---
+
+## 下一次 session 必须先读的文档（严格按顺序）
+1. `/home/bzhang512/CV_Project/part3_BRPO/docs/STATUS.md`
+2. `/home/bzhang512/CV_Project/part3_BRPO/docs/DESIGN.md`
+3. `/home/bzhang512/CV_Project/part3_BRPO/docs/CHANGELOG.md`
+4. `/home/bzhang512/CV_Project/part3_BRPO/docs/B3_deterministic_state_management_engineering_plan.md`
 5. 这一份 `charles.md`
 
-## 关键路径
+如果需要重新进入代码事实，再看：
+6. `/home/bzhang512/CV_Project/part3_BRPO/scripts/run_pseudo_refinement_v2.py`
+7. `/home/bzhang512/CV_Project/part3_BRPO/pseudo_branch/spgm/manager.py`
+8. `/home/bzhang512/CV_Project/part3_BRPO/pseudo_branch/spgm/stats.py`
+9. `/home/bzhang512/CV_Project/third_party/S3PO-GS/gaussian_splatting/gaussian_renderer/__init__.py`
 
-### 当前 pseudo cache prototype
-- `/home/bzhang512/CV_Project/output/part2_s3po/re10k-1/s3po_re10k-1_full_internal_cache/Re10k-1_part2_s3po/2026-04-11-05-33-58/internal_prepare/re10k1__internal_afteropt__brpo_proto_v4_stage3/pseudo_cache/`
+记住：
+- 这次要跟进进度，**先看文档再看代码**；
+- 这次最重要的不是“B3 有没有开始做”，而是“B3 第一版为什么 weak-negative”。
 
-### M5-0 / M5-1 分析与 densify
-- `/home/bzhang512/CV_Project/output/part3_stage1_internal/re10k-1/full/2026-04-12_m50_m51_eval/analysis/`
+---
 
-### M5-2 source-aware loss 对照
-- `/home/bzhang512/CV_Project/output/part3_stage1_internal/re10k-1/full/2026-04-12_m52_stageA_loss_eval/`
+## 我对下一轮 B3 调整方案的分析
+### 结论先说
+**下一轮不要改动作位置，先改动作强度。**
 
-### pose 闭环最小修复 smoke
-- `/home/bzhang512/CV_Project/output/part3_stage1_internal/re10k-1/full/2026-04-12_m54_pose_fix_smoke/`
+动作位置已经对了：现在 B3 已经是 pre-render participation control。当前问题不是“做早了还是做晚了”，而是：
 
-### 修复后的 300-iter 参数/规模验证
-- `/home/bzhang512/CV_Project/output/part3_stage1_internal/re10k-1/full/2026-04-12_m55_pose_fix_scale_eval/`
-- 重点看：`analysis/m55_summary.json`
+> **第一次 keep 过猛，导致 low-score subset 被削得太多。**
 
-## 下一次优先做什么
+### 我现在的判断
+当前 first try 用的是：
+- near = `1.0`
+- mid = `0.9`
+- far = `0.75`
+- `state_candidate_quantile = 0.5`
 
-只做一件事：
+从 log 看，far cluster 一直稳定出现：
+- `part_far ≈ 0.875`
+- `drop_far` 在几百到一千级
+- `cand_far` 也一直很大
 
-**继续做修复后的 Stage A 结构评估，不进 Stage B。**
+这说明什么？
+不是代码没生效，而是：
+- candidate subset 很大；
+- far 侧长期持续 drop；
+- 对 pseudo supervision 来说，这个收缩强度已经足够大到开始伤 replay。
 
-优先方向：
-1. 给 Stage A 补一个 **absolute pose prior**（约束当前 `R/T` 相对初始 pose 的偏移，而不是只约束 residual）
-2. 在这个前提下重跑一轮对照：
-   - `default + absolute pose prior`
-   - `depth_heavy + absolute pose prior`
-3. 判断 depth 是否能从“弱下降”变成更明显的下降；如果仍然很弱，再看是否要继续调训练长度 / 权重 / densify 幅度
+### 所以下一轮该怎么调
+我倾向的顺序是：
+
+1. **先保守收缩 far keep**
+   - 从 `0.75` 提到 `0.9`，必要时再看 `0.95`
+   - 目的：先验证“轻度 participation attenuation”是否还能保留 B3 方向的好处，但不再伤主线
+
+2. **mid keep 也更保守**
+   - 可以先保持 `1.0` 或最多 `0.95`
+   - 当前没必要同时对 mid/far 都做明显 drop
+
+3. **candidate 先不大改**
+   - 暂时保留 `state_candidate_quantile=0.5`
+   - 因为这次已经能证明 action 对象是 low-score subset；当前优先问题是 action 强度，不是 candidate 口径
+
+4. **暂不进 stochastic masking**
+   - deterministic participation 还没转正之前，不该把随机性再加进来
+
+### 我建议的下一轮最小对照
+下次 session 直接做这个最小 compare：
+- `summary_only`
+- `det_participation_far090_mid100`
+- 如果有余力，再补：`det_participation_far095_mid100`
+
+也就是：
+- **先只收 far**
+- **mid 暂时不动或几乎不动**
+- 不要一上来又做三四个超参数联动 sweep
+
+### 为什么这样更合理
+因为现在我们已经知道：
+- B3 路径可跑；
+- participation control 已经真正接入；
+- 当前问题更像 **over-suppression**；
+- 所以下一步应该是 **减少 suppression**，而不是再扩 action 范围。
+
+---
+
+## 明确不要做什么
+1. 不要把当前 weak-negative 误读成 B3 方向失败；
+2. 不要回退到旧 `xyz_lr_scale` 当主线；
+3. 不要立刻跳 stochastic masking；
+4. 不要重新去争 old A1 / new A1 谁才是 observation 主线；
+5. 不要在下一次 session 一上来就做大 sweep，把因果又搅混。
+
+---
 
 ## 给下一个 Charles 的一句话
 
-**不要再回头找“假优化”的根因了，那个已经修掉了。现在的任务是：在修复后的真实闭环上，判断 M5 depth supervision 到底只是弱有效，还是通过补 absolute pose prior 之后能真正变强。**
+**你现在不需要再证明 B3 能不能接进主 loop，这件事已经做完了。下一步只做一件事：在 `old A1 + new T1` 主线上，把 deterministic participation 的 action 强度收窄，验证它能不能从 weak-negative 变成至少不伤 replay。**

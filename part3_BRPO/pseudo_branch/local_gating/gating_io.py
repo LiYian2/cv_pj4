@@ -21,7 +21,7 @@ def build_iteration_gating_summary(
         str(int(item['sample_id'])): dict(item.get('metrics', {}))
         for item in gate_results
     }
-    
+
     summary = {
         'pseudo_local_gating_mode': mode,
         'pseudo_local_gating_params': params,
@@ -45,8 +45,7 @@ def build_iteration_gating_summary(
         'grad_norm_opacity_pre_mask': grad_stats.get('grad_norm_opacity_pre_mask'),
         'grad_norm_opacity_post_mask': grad_stats.get('grad_norm_opacity_post_mask'),
     }
-    
-    # SPGM-specific fields (Phase 0 plumbing - will be None for legacy modes)
+
     spgm_fields = {
         'spgm_active_ratio': None,
         'spgm_selected_ratio': None,
@@ -74,8 +73,42 @@ def build_iteration_gating_summary(
         'spgm_selected_count_mid': None,
         'spgm_selected_count_far': None,
         'spgm_density_mode_effective': None,
+        'spgm_state_score_mean': None,
+        'spgm_state_score_p50': None,
+        'spgm_state_score_mean_near': None,
+        'spgm_state_score_mean_mid': None,
+        'spgm_state_score_mean_far': None,
+        'spgm_state_score_p50_near': None,
+        'spgm_state_score_p50_mid': None,
+        'spgm_state_score_p50_far': None,
+        'spgm_population_support_mean': None,
+        'spgm_struct_density_mean': None,
+        'spgm_manager_mode_effective': None,
+        'spgm_state_action_applied': None,
+        'spgm_state_xyz_scale_mean': None,
+        'spgm_state_xyz_scale_mean_near': None,
+        'spgm_state_xyz_scale_mean_mid': None,
+        'spgm_state_xyz_scale_mean_far': None,
+        'spgm_state_grad_norm_xyz_pre_state': None,
+        'spgm_state_grad_norm_xyz_post_state': None,
+        'spgm_state_lr_scale_near': None,
+        'spgm_state_lr_scale_mid': None,
+        'spgm_state_lr_scale_far': None,
+        'spgm_state_opacity_decay_near': None,
+        'spgm_state_opacity_decay_mid': None,
+        'spgm_state_opacity_decay_far': None,
+        'spgm_state_candidate_count_near': None,
+        'spgm_state_candidate_count_mid': None,
+        'spgm_state_candidate_count_far': None,
+        'spgm_state_participation_ratio': None,
+        'spgm_state_participation_ratio_near': None,
+        'spgm_state_participation_ratio_mid': None,
+        'spgm_state_participation_ratio_far': None,
+        'spgm_state_participation_drop_count_near': None,
+        'spgm_state_participation_drop_count_mid': None,
+        'spgm_state_participation_drop_count_far': None,
     }
-    
+
     if spgm_stats:
         spgm_fields.update({
             'spgm_active_ratio': spgm_stats.get('active_ratio'),
@@ -104,7 +137,41 @@ def build_iteration_gating_summary(
             'spgm_selected_count_mid': spgm_stats.get('selected_count_mid'),
             'spgm_selected_count_far': spgm_stats.get('selected_count_far'),
             'spgm_density_mode_effective': spgm_stats.get('density_mode_effective'),
+            'spgm_state_score_mean': spgm_stats.get('state_score_mean'),
+            'spgm_state_score_p50': spgm_stats.get('state_score_p50'),
+            'spgm_state_score_mean_near': spgm_stats.get('state_score_mean_near'),
+            'spgm_state_score_mean_mid': spgm_stats.get('state_score_mean_mid'),
+            'spgm_state_score_mean_far': spgm_stats.get('state_score_mean_far'),
+            'spgm_state_score_p50_near': spgm_stats.get('state_score_p50_near'),
+            'spgm_state_score_p50_mid': spgm_stats.get('state_score_p50_mid'),
+            'spgm_state_score_p50_far': spgm_stats.get('state_score_p50_far'),
+            'spgm_population_support_mean': spgm_stats.get('population_support_mean'),
+            'spgm_struct_density_mean': spgm_stats.get('struct_density_mean'),
+            'spgm_manager_mode_effective': spgm_stats.get('manager_mode_effective'),
+            'spgm_state_action_applied': spgm_stats.get('state_action_applied'),
+            'spgm_state_xyz_scale_mean': spgm_stats.get('state_xyz_scale_mean'),
+            'spgm_state_xyz_scale_mean_near': spgm_stats.get('state_xyz_scale_mean_near'),
+            'spgm_state_xyz_scale_mean_mid': spgm_stats.get('state_xyz_scale_mean_mid'),
+            'spgm_state_xyz_scale_mean_far': spgm_stats.get('state_xyz_scale_mean_far'),
+            'spgm_state_grad_norm_xyz_pre_state': spgm_stats.get('state_grad_norm_xyz_pre_state'),
+            'spgm_state_grad_norm_xyz_post_state': spgm_stats.get('state_grad_norm_xyz_post_state'),
+            'spgm_state_lr_scale_near': spgm_stats.get('state_lr_scale_near'),
+            'spgm_state_lr_scale_mid': spgm_stats.get('state_lr_scale_mid'),
+            'spgm_state_lr_scale_far': spgm_stats.get('state_lr_scale_far'),
+            'spgm_state_opacity_decay_near': spgm_stats.get('state_opacity_decay_near'),
+            'spgm_state_opacity_decay_mid': spgm_stats.get('state_opacity_decay_mid'),
+            'spgm_state_opacity_decay_far': spgm_stats.get('state_opacity_decay_far'),
+            'spgm_state_candidate_count_near': spgm_stats.get('state_candidate_count_near'),
+            'spgm_state_candidate_count_mid': spgm_stats.get('state_candidate_count_mid'),
+            'spgm_state_candidate_count_far': spgm_stats.get('state_candidate_count_far'),
+            'spgm_state_participation_ratio': spgm_stats.get('state_participation_ratio'),
+            'spgm_state_participation_ratio_near': spgm_stats.get('state_participation_ratio_near'),
+            'spgm_state_participation_ratio_mid': spgm_stats.get('state_participation_ratio_mid'),
+            'spgm_state_participation_ratio_far': spgm_stats.get('state_participation_ratio_far'),
+            'spgm_state_participation_drop_count_near': spgm_stats.get('state_participation_drop_count_near'),
+            'spgm_state_participation_drop_count_mid': spgm_stats.get('state_participation_drop_count_mid'),
+            'spgm_state_participation_drop_count_far': spgm_stats.get('state_participation_drop_count_far'),
         })
-    
+
     summary.update(spgm_fields)
     return summary

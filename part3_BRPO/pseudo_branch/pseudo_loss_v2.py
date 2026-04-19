@@ -252,14 +252,17 @@ def build_stageA_loss_source_aware(
     return_terms: bool = False,
     rgb_confidence_mask=None,
     depth_confidence_mask=None,
+    depth_seed_source_ids=SEED_SOURCE_IDS,
+    depth_dense_source_ids=(DENSE_SOURCE_ID,),
+    depth_fallback_source_ids=(FALLBACK_SOURCE_ID,),
 ):
     rgb_mask = confidence_mask if rgb_confidence_mask is None else rgb_confidence_mask
     depth_mask = rgb_mask if depth_confidence_mask is None else depth_confidence_mask
     l_rgb = masked_rgb_loss(render_rgb, target_rgb, rgb_mask, viewpoint)
     if use_depth:
-        l_depth_seed = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, SEED_SOURCE_IDS)
-        l_depth_dense = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, [DENSE_SOURCE_ID])
-        l_depth_fallback = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, [FALLBACK_SOURCE_ID])
+        l_depth_seed = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, depth_seed_source_ids)
+        l_depth_dense = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, depth_dense_source_ids)
+        l_depth_fallback = masked_depth_loss_by_source(render_depth, target_depth, depth_mask, depth_source_map, depth_fallback_source_ids)
         l_depth = (
             float(lambda_depth_seed) * l_depth_seed
             + float(lambda_depth_dense) * l_depth_dense
@@ -326,11 +329,14 @@ def build_stageA_loss(
     return_terms: bool = False,
     rgb_confidence_mask=None,
     depth_confidence_mask=None,
+    depth_seed_source_ids=SEED_SOURCE_IDS,
+    depth_dense_source_ids=(DENSE_SOURCE_ID,),
+    depth_fallback_source_ids=(FALLBACK_SOURCE_ID,),
 ):
     rgb_mask = confidence_mask if rgb_confidence_mask is None else rgb_confidence_mask
     depth_mask = rgb_mask if depth_confidence_mask is None else depth_confidence_mask
     l_rgb = masked_rgb_loss(render_rgb, target_rgb, rgb_mask, viewpoint)
-    l_depth = masked_depth_loss(render_depth, target_depth, confidence_mask) if use_depth else torch.zeros((), device=render_rgb.device)
+    l_depth = masked_depth_loss(render_depth, target_depth, depth_mask) if use_depth else torch.zeros((), device=render_rgb.device)
     l_pose = pose_reg_loss(viewpoint, trans_weight)
 
     if float(lambda_abs_t) != 0.0 or float(lambda_abs_r) != 0.0:
