@@ -2,9 +2,9 @@
 
 B1 split SPGM into update-policy vs state-management layers.
 B2 made manager diagnostics scene-aware.
-B3 now supports a first real population-participation controller: besides the
-legacy xyz-only grad scale probe, it can prepare a deterministic pseudo-render
-participation mask for the next iteration.
+B3 now supports two real pre-render population-control actors: the legacy
+boolean participation selector and a new deterministic opacity participation
+path that attenuates pseudo-branch opacity instead of hard dropping Gaussians.
 """
 
 from __future__ import annotations
@@ -94,29 +94,43 @@ def _build_xyz_state_scale(
     return xyz_state_scale
 
 
-def _build_state_candidate_mask(
+def _build_candidate_mask(
     cluster_id: torch.Tensor,
-    active_mask: torch.Tensor,
-    state_score: torch.Tensor | None,
-    state_candidate_quantile: float,
+    control_mask: torch.Tensor,
+    candidate_score: torch.Tensor | None,
+    candidate_quantile: float,
 ) -> tuple[torch.Tensor, dict[str, int]]:
-    candidate_mask = torch.zeros_like(active_mask, dtype=torch.bool)
+    candidate_mask = torch.zeros_like(control_mask, dtype=torch.bool)
     candidate_counts = {name: 0 for name in _CLUSTER_NAMES}
-    if state_score is None or not bool(active_mask.any()):
+    if candidate_score is None or not bool(control_mask.any()):
         return candidate_mask, candidate_counts
 
-    q = float(min(max(state_candidate_quantile, 0.0), 1.0))
+    q = float(min(max(candidate_quantile, 0.0), 1.0))
     for idx, name in enumerate(_CLUSTER_NAMES):
-        mask = _cluster_mask(cluster_id, active_mask, idx)
+        mask = _cluster_mask(cluster_id, control_mask, idx)
         if mask is None or not bool(mask.any()):
             continue
-        cluster_values = state_score[mask]
+        cluster_values = candidate_score[mask]
         threshold = float(torch.quantile(cluster_values, q=q).item())
         cur_mask = mask.clone()
         cur_mask[mask] = cluster_values <= threshold
         candidate_mask |= cur_mask
         candidate_counts[name] = int(cur_mask.sum().item())
     return candidate_mask, candidate_counts
+
+
+def _build_state_candidate_mask(
+    cluster_id: torch.Tensor,
+    active_mask: torch.Tensor,
+    state_score: torch.Tensor | None,
+    state_candidate_quantile: float,
+) -> tuple[torch.Tensor, dict[str, int]]:
+    return _build_candidate_mask(
+        cluster_id=cluster_id,
+        control_mask=active_mask,
+        candidate_score=state_score,
+        candidate_quantile=state_candidate_quantile,
+    )
 
 
 def _build_participation_render_mask(
@@ -177,6 +191,38 @@ def _build_participation_render_mask(
     return render_mask, candidate_mask, candidate_counts, drop_counts, part_ratios
 
 
+def _build_opacity_participation_scale(
+    cluster_id: torch.Tensor,
+    active_mask: torch.Tensor,
+    participation_score: torch.Tensor | None,
+    state_candidate_quantile: float,
+    opacity_floors: dict[str, float],
+) -> tuple[torch.Tensor, torch.Tensor, dict[str, int], dict[str, float]]:
+    device = active_mask.device
+    dtype = participation_score.dtype if participation_score is not None else torch.float32
+    participation_scale = torch.ones(active_mask.shape[0], dtype=dtype, device=device)
+    candidate_mask, candidate_counts = _build_candidate_mask(
+        cluster_id=cluster_id,
+        control_mask=active_mask,
+        candidate_score=participation_score,
+        candidate_quantile=state_candidate_quantile,
+    )
+    cluster_scale_means = {name: 1.0 for name in _CLUSTER_NAMES}
+    if participation_score is None or not bool(candidate_mask.any()):
+        return participation_scale, candidate_mask, candidate_counts, cluster_scale_means
+
+    for idx, name in enumerate(_CLUSTER_NAMES):
+        cluster_candidate = candidate_mask & (cluster_id == idx)
+        if bool(cluster_candidate.any()):
+            floor = min(max(float(opacity_floors[name]), 0.0), 1.0)
+            cluster_scores = torch.clamp(participation_score[cluster_candidate], 0.0, 1.0)
+            participation_scale[cluster_candidate] = floor + (1.0 - floor) * cluster_scores
+        mask = _cluster_mask(cluster_id, active_mask, idx)
+        cluster_scale_means[name] = _masked_mean(participation_scale, mask)
+
+    return participation_scale, candidate_mask, candidate_counts, cluster_scale_means
+
+
 def apply_spgm_state_management(
     gaussians,
     cluster_id: torch.Tensor,
@@ -184,6 +230,7 @@ def apply_spgm_state_management(
     update_policy: dict,
     manager_mode: str = 'summary_only',
     state_score: torch.Tensor | None = None,
+    participation_score: torch.Tensor | None = None,
     population_support_count: torch.Tensor | None = None,
     state_candidate_quantile: float = 0.5,
     state_base_scale_near: float = 1.0,
@@ -192,6 +239,9 @@ def apply_spgm_state_management(
     state_participation_keep_near: float = 1.0,
     state_participation_keep_mid: float = 0.9,
     state_participation_keep_far: float = 0.75,
+    state_opacity_floor_near: float = 1.0,
+    state_opacity_floor_mid: float = 0.98,
+    state_opacity_floor_far: float = 0.92,
 ) -> dict:
     """Return/apply deterministic state-management diagnostics.
 
@@ -199,12 +249,13 @@ def apply_spgm_state_management(
     - summary_only: diagnostics only, no state action
     - xyz_lr_scale: apply a mild per-Gaussian xyz grad scale before optimizer.step
     - deterministic_participation: prepare a deterministic pseudo-render participation mask
-      for the next iteration (pre-render / in-render control instead of post-backward scaling)
+    - deterministic_opacity_participation: prepare a deterministic per-Gaussian opacity scale
+      for next-step pseudo render (continuous attenuation instead of hard drop)
     """
     manager_mode_effective = str(manager_mode or 'summary_only').strip().lower()
-    if manager_mode_effective not in {'summary_only', 'xyz_lr_scale', 'deterministic_participation', 'off', 'disabled'}:
+    if manager_mode_effective not in {'summary_only', 'xyz_lr_scale', 'deterministic_participation', 'deterministic_opacity_participation', 'off', 'disabled'}:
         raise ValueError(
-            f"Unsupported SPGM manager_mode={manager_mode_effective!r}; supported values are 'summary_only', 'xyz_lr_scale', 'deterministic_participation', and 'off'"
+            f"Unsupported SPGM manager_mode={manager_mode_effective!r}; supported values are 'summary_only', 'xyz_lr_scale', 'deterministic_participation', 'deterministic_opacity_participation', and 'off'"
         )
     if manager_mode_effective in {'off', 'disabled'}:
         manager_mode_effective = 'disabled'
@@ -220,10 +271,17 @@ def apply_spgm_state_management(
         'mid': float(state_participation_keep_mid),
         'far': float(state_participation_keep_far),
     }
+    opacity_floors = {
+        'near': float(state_opacity_floor_near),
+        'mid': float(state_opacity_floor_mid),
+        'far': float(state_opacity_floor_far),
+    }
 
     active_counts = _cluster_counts(cluster_id, active_mask)
     cluster_state_mean = {}
     cluster_state_p50 = {}
+    cluster_participation_mean = {}
+    cluster_participation_p50 = {}
 
     candidate_mask, candidate_counts = _build_state_candidate_mask(
         cluster_id=cluster_id,
@@ -236,6 +294,8 @@ def apply_spgm_state_management(
         mask = _cluster_mask(cluster_id, active_mask, idx)
         cluster_state_mean[name] = _masked_mean(state_score, mask)
         cluster_state_p50[name] = _masked_p50(state_score, mask)
+        cluster_participation_mean[name] = _masked_mean(participation_score, mask)
+        cluster_participation_p50[name] = _masked_p50(participation_score, mask)
         if candidate_counts[name] <= 0:
             candidate_counts[name] = active_counts[name] if state_score is None else 0
 
@@ -254,8 +314,10 @@ def apply_spgm_state_management(
     grad_pre_state_xyz = 0.0
     grad_post_state_xyz = 0.0
     participation_render_mask = None
+    participation_opacity_scale = None
     participation_drop_counts = {name: 0 for name in _CLUSTER_NAMES}
     participation_ratios = {name: 1.0 for name in _CLUSTER_NAMES}
+    opacity_scale_means = {name: 1.0 for name in _CLUSTER_NAMES}
     state_action_applied = False
 
     if manager_mode_effective == 'xyz_lr_scale':
@@ -270,8 +332,21 @@ def apply_spgm_state_management(
             keep_ratios=keep_ratios,
         )
         state_action_applied = any(v > 0 for v in participation_drop_counts.values())
+    elif manager_mode_effective == 'deterministic_opacity_participation':
+        participation_opacity_scale, candidate_mask, candidate_counts, opacity_scale_means = _build_opacity_participation_scale(
+            cluster_id=cluster_id,
+            active_mask=active_mask,
+            participation_score=participation_score,
+            state_candidate_quantile=state_candidate_quantile,
+            opacity_floors=opacity_floors,
+        )
+        state_action_applied = bool(((participation_opacity_scale < 0.999999) & active_mask).any())
 
     state_participation_ratio = _masked_ratio(participation_render_mask, active_mask) if participation_render_mask is not None else 1.0
+    state_opacity_scale_mean = _masked_mean(participation_opacity_scale, active_mask) if participation_opacity_scale is not None else 1.0
+    state_opacity_scale_mean_near = opacity_scale_means['near']
+    state_opacity_scale_mean_mid = opacity_scale_means['mid']
+    state_opacity_scale_mean_far = opacity_scale_means['far']
 
     return {
         'manager_mode_effective': manager_mode_effective,
@@ -279,14 +354,20 @@ def apply_spgm_state_management(
         'state_lr_scale_near': xyz_scale_mean_near,
         'state_lr_scale_mid': xyz_scale_mean_mid,
         'state_lr_scale_far': xyz_scale_mean_far,
-        'state_opacity_decay_near': 0.0,
-        'state_opacity_decay_mid': 0.0,
-        'state_opacity_decay_far': 0.0,
+        'state_opacity_decay_near': max(0.0, 1.0 - state_opacity_scale_mean_near),
+        'state_opacity_decay_mid': max(0.0, 1.0 - state_opacity_scale_mean_mid),
+        'state_opacity_decay_far': max(0.0, 1.0 - state_opacity_scale_mean_far),
+        'state_opacity_scale_mean': state_opacity_scale_mean,
+        'state_opacity_scale_mean_near': state_opacity_scale_mean_near,
+        'state_opacity_scale_mean_mid': state_opacity_scale_mean_mid,
+        'state_opacity_scale_mean_far': state_opacity_scale_mean_far,
         'state_candidate_count_near': candidate_counts['near'],
         'state_candidate_count_mid': candidate_counts['mid'],
         'state_candidate_count_far': candidate_counts['far'],
         'state_score_mean': _masked_mean(state_score, active_mask),
         'state_score_p50': _masked_p50(state_score, active_mask),
+        'participation_score_mean': _masked_mean(participation_score, active_mask),
+        'participation_score_p50': _masked_p50(participation_score, active_mask),
         'population_support_mean': _masked_mean(population_support_count, active_mask),
         'state_score_mean_near': cluster_state_mean['near'],
         'state_score_mean_mid': cluster_state_mean['mid'],
@@ -294,6 +375,12 @@ def apply_spgm_state_management(
         'state_score_p50_near': cluster_state_p50['near'],
         'state_score_p50_mid': cluster_state_p50['mid'],
         'state_score_p50_far': cluster_state_p50['far'],
+        'participation_score_mean_near': cluster_participation_mean['near'],
+        'participation_score_mean_mid': cluster_participation_mean['mid'],
+        'participation_score_mean_far': cluster_participation_mean['far'],
+        'participation_score_p50_near': cluster_participation_p50['near'],
+        'participation_score_p50_mid': cluster_participation_p50['mid'],
+        'participation_score_p50_far': cluster_participation_p50['far'],
         'state_xyz_scale_mean': xyz_scale_mean,
         'state_xyz_scale_mean_near': xyz_scale_mean_near,
         'state_xyz_scale_mean_mid': xyz_scale_mean_mid,
@@ -308,4 +395,5 @@ def apply_spgm_state_management(
         'state_participation_drop_count_mid': participation_drop_counts['mid'],
         'state_participation_drop_count_far': participation_drop_counts['far'],
         'participation_render_mask': participation_render_mask,
+        'participation_opacity_scale': participation_opacity_scale,
     }

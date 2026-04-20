@@ -28,6 +28,14 @@ from pseudo_branch.brpo_v2_signal.joint_observation import (
     build_joint_observation_from_candidates,
     write_joint_observation_outputs,
 )
+from pseudo_branch.brpo_v2_signal.pseudo_observation_brpo_style import (
+    build_brpo_direct_observation,
+    build_brpo_style_observation,
+    build_brpo_style_observation_v2,
+    write_brpo_direct_observation_outputs,
+    write_brpo_style_observation_outputs,
+    write_brpo_style_observation_outputs_v2,
+)
 from pseudo_branch.brpo_v2_signal.support_expand import (
     build_support_expand_from_a1,
     write_support_expand_outputs,
@@ -132,6 +140,8 @@ def main():
             fused_root / "fusion_weight_right.npy",
             fused_root / "overlap_mask_left.npy",
             fused_root / "overlap_mask_right.npy",
+            fused_root / "overlap_conf_left.npy",
+            fused_root / "overlap_conf_right.npy",
         ]
         for p in required_fusion:
             if not p.exists():
@@ -162,6 +172,8 @@ def main():
         fusion_weight_right = np.load(fused_root / "fusion_weight_right.npy").astype(np.float32)
         overlap_mask_left = np.load(fused_root / "overlap_mask_left.npy").astype(np.float32)
         overlap_mask_right = np.load(fused_root / "overlap_mask_right.npy").astype(np.float32)
+        overlap_conf_left = np.load(fused_root / "overlap_conf_left.npy").astype(np.float32)
+        overlap_conf_right = np.load(fused_root / "overlap_conf_right.npy").astype(np.float32)
 
         depth_result = build_depth_supervision_v2(
             render_depth=render_depth,
@@ -257,6 +269,121 @@ def main():
         }
         write_joint_observation_outputs(frame_out, joint_observation_result, joint_observation_meta)
 
+        brpo_style_result = build_brpo_style_observation(
+            support_left=rgb_result['support_left'],
+            support_right=rgb_result['support_right'],
+            projected_depth_left=projected_depth_left,
+            projected_depth_right=projected_depth_right,
+            fusion_weight_left=fusion_weight_left,
+            fusion_weight_right=fusion_weight_right,
+            overlap_mask_left=overlap_mask_left,
+            overlap_mask_right=overlap_mask_right,
+        )
+        brpo_style_meta = {
+            "frame_id": frame_id,
+            "image_name": image_name,
+            "summary": brpo_style_result["summary"],
+            "inputs": {
+                "target_rgb_fused_path": str(fused_rgb_path),
+                "rgb_support_left_path": str(frame_out / 'rgb_support_left_v2.npy'),
+                "rgb_support_right_path": str(frame_out / 'rgb_support_right_v2.npy'),
+                "projected_depth_left_path": str(fused_root / 'projected_depth_left.npy'),
+                "projected_depth_right_path": str(fused_root / 'projected_depth_right.npy'),
+                "fusion_weight_left_path": str(fused_root / 'fusion_weight_left.npy'),
+                "fusion_weight_right_path": str(fused_root / 'fusion_weight_right.npy'),
+                "overlap_mask_left_path": str(fused_root / 'overlap_mask_left.npy'),
+                "overlap_mask_right_path": str(fused_root / 'overlap_mask_right.npy'),
+            },
+            "signal_pipeline": "brpo_style_v1",
+            "consumer_contract": {
+                "pseudo_observation_mode": "brpo_style_v1",
+                "shared_confidence": "pseudo_confidence_brpo_style_v1",
+                "depth_target": "pseudo_depth_target_brpo_style_v1",
+                "source_map": "pseudo_source_map_brpo_style_v1",
+            },
+        }
+        write_brpo_style_observation_outputs(frame_out, brpo_style_result, brpo_style_meta)
+
+        brpo_style_result_v2 = build_brpo_style_observation_v2(
+            support_left=rgb_result['support_left'],
+            support_right=rgb_result['support_right'],
+            support_conf_left=rgb_result['raw_rgb_confidence_left_cont_v2'],
+            support_conf_right=rgb_result['raw_rgb_confidence_right_cont_v2'],
+            raw_rgb_confidence_cont=rgb_result['raw_rgb_confidence_cont_v2'],
+            projected_depth_left=projected_depth_left,
+            projected_depth_right=projected_depth_right,
+            fusion_weight_left=fusion_weight_left,
+            fusion_weight_right=fusion_weight_right,
+            overlap_mask_left=overlap_mask_left,
+            overlap_mask_right=overlap_mask_right,
+            stable_depth_target=depth_result['target_depth_for_refine_v2_brpo'],
+            render_depth=render_depth,
+        )
+        brpo_style_meta_v2 = {
+            "frame_id": frame_id,
+            "image_name": image_name,
+            "summary": brpo_style_result_v2["summary"],
+            "inputs": {
+                "target_rgb_fused_path": str(fused_rgb_path),
+                "rgb_support_left_path": str(frame_out / 'rgb_support_left_v2.npy'),
+                "rgb_support_right_path": str(frame_out / 'rgb_support_right_v2.npy'),
+                "rgb_support_left_cont_path": str(frame_out / 'raw_rgb_confidence_left_cont_v2.npy'),
+                "rgb_support_right_cont_path": str(frame_out / 'raw_rgb_confidence_right_cont_v2.npy'),
+                "raw_rgb_confidence_cont_v2_path": str(frame_out / 'raw_rgb_confidence_cont_v2.npy'),
+                "projected_depth_left_path": str(fused_root / 'projected_depth_left.npy'),
+                "projected_depth_right_path": str(fused_root / 'projected_depth_right.npy'),
+                "fusion_weight_left_path": str(fused_root / 'fusion_weight_left.npy'),
+                "fusion_weight_right_path": str(fused_root / 'fusion_weight_right.npy'),
+                "overlap_mask_left_path": str(fused_root / 'overlap_mask_left.npy'),
+                "overlap_mask_right_path": str(fused_root / 'overlap_mask_right.npy'),
+                "stable_depth_target_path": str(frame_out / 'target_depth_for_refine_v2_brpo.npy'),
+                "render_depth_path": str(render_depth_path),
+            },
+            "signal_pipeline": "brpo_style_v2",
+            "consumer_contract": {
+                "pseudo_observation_mode": "brpo_style_v2",
+                "shared_confidence": "pseudo_confidence_brpo_style_v2",
+                "depth_target": "pseudo_depth_target_brpo_style_v2",
+                "source_map": "pseudo_source_map_brpo_style_v2",
+            },
+        }
+        write_brpo_style_observation_outputs_v2(frame_out, brpo_style_result_v2, brpo_style_meta_v2)
+
+        brpo_direct_result = build_brpo_direct_observation(
+            support_left=rgb_result['support_left'],
+            support_right=rgb_result['support_right'],
+            projected_depth_left=projected_depth_left,
+            projected_depth_right=projected_depth_right,
+            overlap_mask_left=overlap_mask_left,
+            overlap_mask_right=overlap_mask_right,
+            overlap_conf_left=overlap_conf_left,
+            overlap_conf_right=overlap_conf_right,
+        )
+        brpo_direct_meta = {
+            "frame_id": frame_id,
+            "image_name": image_name,
+            "summary": brpo_direct_result["summary"],
+            "inputs": {
+                "target_rgb_fused_path": str(fused_rgb_path),
+                "rgb_support_left_path": str(frame_out / 'rgb_support_left_v2.npy'),
+                "rgb_support_right_path": str(frame_out / 'rgb_support_right_v2.npy'),
+                "projected_depth_left_path": str(fused_root / 'projected_depth_left.npy'),
+                "projected_depth_right_path": str(fused_root / 'projected_depth_right.npy'),
+                "overlap_mask_left_path": str(fused_root / 'overlap_mask_left.npy'),
+                "overlap_mask_right_path": str(fused_root / 'overlap_mask_right.npy'),
+                "overlap_conf_left_path": str(fused_root / 'overlap_conf_left.npy'),
+                "overlap_conf_right_path": str(fused_root / 'overlap_conf_right.npy'),
+            },
+            "signal_pipeline": "brpo_direct_v1",
+            "consumer_contract": {
+                "pseudo_observation_mode": "brpo_direct_v1",
+                "shared_confidence": "pseudo_confidence_brpo_direct_v1",
+                "depth_target": "pseudo_depth_target_brpo_direct_v1",
+                "source_map": "pseudo_source_map_brpo_direct_v1",
+            },
+        }
+        write_brpo_direct_observation_outputs(frame_out, brpo_direct_result, brpo_direct_meta)
+
         # A2: geometry-constrained support expansion (optional)
         expand_result = None
         expand_meta = None
@@ -288,6 +415,9 @@ def main():
             "depth_summary": depth_result["summary"],
             "joint_summary": joint_result["summary"],
             "joint_observation_summary": joint_observation_result["summary"],
+            "brpo_style_observation_summary": brpo_style_result["summary"],
+            "brpo_style_observation_v2_summary": brpo_style_result_v2["summary"],
+            "brpo_direct_observation_summary": brpo_direct_result["summary"],
         }
         if expand_meta:
             frame_summary["expand_summary"] = expand_meta["final_summary"]
@@ -307,6 +437,9 @@ def main():
         "use_continuous_depth_reweight": not args.disable_continuous_depth_reweight,
         "joint_signal_version": "brpo_joint_support_filter_v1",
         "joint_observation_version": "brpo_joint_v1",
+        "brpo_style_observation_version": "brpo_style_v1",
+        "brpo_style_observation_v2_version": "brpo_style_v2",
+        "brpo_direct_observation_version": "brpo_direct_v1",
         "num_frames": len(summary),
     }
     if args.use_a2_expand:

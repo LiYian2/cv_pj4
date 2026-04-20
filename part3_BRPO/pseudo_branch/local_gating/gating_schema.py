@@ -46,6 +46,9 @@ class PseudoLocalGatingConfig:
     spgm_state_participation_keep_near: float = 1.0
     spgm_state_participation_keep_mid: float = 0.9
     spgm_state_participation_keep_far: float = 0.75
+    spgm_state_opacity_floor_near: float = 1.0
+    spgm_state_opacity_floor_mid: float = 0.98
+    spgm_state_opacity_floor_far: float = 0.92
 
     def enabled(self) -> bool:
         return (self.mode or 'off') != 'off'

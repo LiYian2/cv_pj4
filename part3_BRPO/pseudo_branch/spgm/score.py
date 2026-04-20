@@ -4,6 +4,7 @@ Phase B2 keeps selector behavior backward compatible while introducing:
 - explicit `weight_score`
 - explicit `ranking_score`
 - explicit `state_score`
+- explicit `participation_score`
 - `struct_density` as an optional density-side proxy
 """
 
@@ -124,7 +125,7 @@ def build_spgm_importance_score(
     population_support_count: torch.Tensor | None = None,
     struct_density_proxy: torch.Tensor | None = None,
 ) -> dict:
-    """Build weighting / ranking / state scores from SPGM statistics."""
+    """Build weighting / ranking / state / participation scores from SPGM statistics."""
     N = depth_value.shape[0]
     device = depth_value.device
     dtype = depth_value.dtype
@@ -160,6 +161,7 @@ def build_spgm_importance_score(
     weight_score = torch.zeros(N, dtype=dtype, device=device)
     ranking_score = torch.zeros(N, dtype=dtype, device=device)
     state_score = torch.zeros(N, dtype=dtype, device=device)
+    participation_score = torch.zeros(N, dtype=dtype, device=device)
     ranking_mode_effective = str(ranking_mode or 'v1').strip().lower()
     lambda_support_rank = min(max(float(lambda_support_rank), 0.0), 1.0)
 
@@ -188,10 +190,15 @@ def build_spgm_importance_score(
             + 0.35 * population_support_norm[active_mask]
             + 0.20 * depth_score[active_mask]
         )
+        participation_score[active_mask] = (
+            0.80 * importance_raw[active_mask]
+            + 0.20 * population_support_norm[active_mask]
+        )
 
         weight_score = torch.clamp(weight_score, 0.0, 1.0)
         ranking_score = torch.clamp(ranking_score, 0.0, 1.0)
         state_score = torch.clamp(state_score, 0.0, 1.0)
+        participation_score = torch.clamp(participation_score, 0.0, 1.0)
 
     cluster_counts = {
         'near': int((cluster_id == 0).sum().item()),
@@ -203,6 +210,7 @@ def build_spgm_importance_score(
         active_weight = weight_score[active_mask]
         active_ranking = ranking_score[active_mask]
         active_state = state_score[active_mask]
+        active_participation = participation_score[active_mask]
         active_support_norm = support_norm[active_mask]
         active_population_support = population_support_count[active_mask]
         active_struct_density = struct_density_proxy[active_mask]
@@ -212,6 +220,8 @@ def build_spgm_importance_score(
         ranking_score_p50 = float(active_ranking.median().item())
         state_score_mean = float(active_state.mean().item())
         state_score_p50 = float(active_state.median().item())
+        participation_score_mean = float(active_participation.mean().item())
+        participation_score_p50 = float(active_participation.median().item())
         support_norm_mean = float(active_support_norm.mean().item())
         population_support_mean = float(active_population_support.mean().item())
         struct_density_mean = float(active_struct_density.mean().item())
@@ -222,6 +232,8 @@ def build_spgm_importance_score(
         ranking_score_p50 = 0.0
         state_score_mean = 0.0
         state_score_p50 = 0.0
+        participation_score_mean = 0.0
+        participation_score_p50 = 0.0
         support_norm_mean = 0.0
         population_support_mean = 0.0
         struct_density_mean = 0.0
@@ -238,6 +250,7 @@ def build_spgm_importance_score(
         'weight_score': weight_score,
         'ranking_score': ranking_score,
         'state_score': state_score,
+        'participation_score': participation_score,
         'cluster_count_near': cluster_counts['near'],
         'cluster_count_mid': cluster_counts['mid'],
         'cluster_count_far': cluster_counts['far'],
@@ -247,6 +260,8 @@ def build_spgm_importance_score(
         'ranking_score_p50': ranking_score_p50,
         'state_score_mean': state_score_mean,
         'state_score_p50': state_score_p50,
+        'participation_score_mean': participation_score_mean,
+        'participation_score_p50': participation_score_p50,
         'support_norm_mean': support_norm_mean,
         'population_support_mean': population_support_mean,
         'struct_density_mean': struct_density_mean,

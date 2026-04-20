@@ -63,7 +63,7 @@ def parse_args():
     p.add_argument('--brpo_mask_root', default=None)
     p.add_argument('--signal_pipeline', choices=['legacy', 'brpo_v2'], default='legacy')
     p.add_argument('--signal_v2_root', default=None, help='Optional root containing signal_v2/frame_<id> artifacts; defaults to <prepare_root>/signal_v2 or <prepare_root>/signal_v2_* when discoverable.')
-    p.add_argument('--pseudo_observation_mode', choices=['off', 'brpo_joint_v1'], default='off')
+    p.add_argument('--pseudo_observation_mode', choices=['off', 'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1'], default='off')
     p.add_argument('--stage_mode', choices=['stageA', 'stageA5', 'stageB'], default='stageA')
     p.add_argument('--joint_topology_mode', choices=['off', 'brpo_joint_v1'], default='off')
     p.add_argument('--stageA_iters', type=int, default=300)
@@ -137,7 +137,7 @@ def parse_args():
     p.add_argument('--pseudo_local_gating_spgm_selector_keep_ratio_mid', type=float, default=1.0)
     p.add_argument('--pseudo_local_gating_spgm_selector_keep_ratio_far', type=float, default=1.0)
     p.add_argument('--pseudo_local_gating_spgm_selector_min_keep', type=int, default=1)
-    p.add_argument('--pseudo_local_gating_spgm_manager_mode', choices=['summary_only', 'xyz_lr_scale', 'deterministic_participation'], default='summary_only')
+    p.add_argument('--pseudo_local_gating_spgm_manager_mode', choices=['summary_only', 'xyz_lr_scale', 'deterministic_participation', 'deterministic_opacity_participation'], default='summary_only')
     p.add_argument('--pseudo_local_gating_spgm_state_candidate_quantile', type=float, default=0.5)
     p.add_argument('--pseudo_local_gating_spgm_state_base_scale_near', type=float, default=1.0)
     p.add_argument('--pseudo_local_gating_spgm_state_base_scale_mid', type=float, default=0.95)
@@ -145,6 +145,9 @@ def parse_args():
     p.add_argument('--pseudo_local_gating_spgm_state_participation_keep_near', type=float, default=1.0)
     p.add_argument('--pseudo_local_gating_spgm_state_participation_keep_mid', type=float, default=0.9)
     p.add_argument('--pseudo_local_gating_spgm_state_participation_keep_far', type=float, default=0.75)
+    p.add_argument('--pseudo_local_gating_spgm_state_opacity_floor_near', type=float, default=1.0)
+    p.add_argument('--pseudo_local_gating_spgm_state_opacity_floor_mid', type=float, default=0.98)
+    p.add_argument('--pseudo_local_gating_spgm_state_opacity_floor_far', type=float, default=0.92)
     p.add_argument('--stageB_iters', type=int, default=120)
     p.add_argument('--stageB_post_switch_iter', type=int, default=0, help='If >0, apply post-switch StageB settings starting from this iteration + 1')
     p.add_argument('--stageB_post_lr_scale_xyz', type=float, default=1.0, help='Scale xyz lr by this factor after --stageB_post_switch_iter')
@@ -431,6 +434,39 @@ def _load_joint_observation_bundle(frame_dir: Path):
     }
 
 
+def _load_verify_observation_bundle(frame_dir: Path):
+    return {
+        'confidence_verify': np.load(frame_dir / 'pseudo_confidence_verify_v1.npy').astype(np.float32),
+        'depth_target': np.load(frame_dir / 'pseudo_depth_target_joint_v1.npy').astype(np.float32),
+        'source_map': np.load(frame_dir / 'pseudo_source_map_joint_v1.npy'),
+        'valid_mask': np.load(frame_dir / 'pseudo_valid_mask_verify_v1.npy').astype(np.float32),
+        'meta_path': frame_dir / 'pseudo_verify_meta_v1.json',
+    }
+
+
+def _load_brpo_style_observation_bundle(frame_dir: Path, version: str = 'v1'):
+    if version not in {'v1', 'v2'}:
+        raise ValueError(f'Unsupported BRPO-style observation bundle version={version}')
+    suffix = f'brpo_style_{version}'
+    return {
+        'confidence_joint': np.load(frame_dir / f'pseudo_confidence_{suffix}.npy').astype(np.float32),
+        'depth_target': np.load(frame_dir / f'pseudo_depth_target_{suffix}.npy').astype(np.float32),
+        'source_map': np.load(frame_dir / f'pseudo_source_map_{suffix}.npy'),
+        'valid_mask': np.load(frame_dir / f'pseudo_valid_mask_{suffix}.npy').astype(np.float32),
+        'meta_path': frame_dir / f'brpo_style_observation_meta_{version}.json',
+    }
+
+
+def _load_brpo_direct_observation_bundle(frame_dir: Path):
+    return {
+        'confidence_joint': np.load(frame_dir / 'pseudo_confidence_brpo_direct_v1.npy').astype(np.float32),
+        'depth_target': np.load(frame_dir / 'pseudo_depth_target_brpo_direct_v1.npy').astype(np.float32),
+        'source_map': np.load(frame_dir / 'pseudo_source_map_brpo_direct_v1.npy'),
+        'valid_mask': np.load(frame_dir / 'pseudo_valid_mask_brpo_direct_v1.npy').astype(np.float32),
+        'meta_path': frame_dir / 'brpo_direct_observation_meta_v1.json',
+    }
+
+
 def compute_stageA_scene_scale(sample_dir: Path, conf_arr: np.ndarray, scale_source: str, fixed_scale: float):
     if scale_source == 'fixed':
         return max(float(fixed_scale), 1e-6), 'fixed'
@@ -584,29 +620,74 @@ def load_stageA_pseudo_views(args):
             if depth_target_mode in {'auto', 'blended_depth', 'blended_depth_m5'}:
                 depth_target_mode = 'brpo_v2'
 
-        if pseudo_observation_mode == 'brpo_joint_v1':
+        if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1'}:
             if signal_v2_frame_dir is None:
                 raise FileNotFoundError(f'No signal_v2 frame dir found for frame_id={frame_id} under sample_dir={sample_dir}')
-            bundle = _load_joint_observation_bundle(signal_v2_frame_dir)
-            rgb_conf = bundle['confidence_joint']
-            depth_conf = bundle['confidence_joint']
-            rgb_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_joint_v1.npy')
-            depth_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_joint_v1.npy')
-            rgb_conf_kind = 'joint_observation::pseudo_confidence_joint_v1.npy'
-            depth_conf_kind = 'joint_observation::pseudo_confidence_joint_v1.npy'
-            rgb_conf_mode = 'pseudo_observation::brpo_joint_v1'
-            depth_conf_mode = 'pseudo_observation::brpo_joint_v1'
+            if pseudo_observation_mode == 'brpo_joint_v1':
+                bundle = _load_joint_observation_bundle(signal_v2_frame_dir)
+                rgb_conf = bundle['confidence_joint']
+                depth_conf = bundle['confidence_joint']
+                rgb_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_joint_v1.npy')
+                depth_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_joint_v1.npy')
+                rgb_conf_kind = 'joint_observation::pseudo_confidence_joint_v1.npy'
+                depth_conf_kind = 'joint_observation::pseudo_confidence_joint_v1.npy'
+                rgb_conf_mode = 'pseudo_observation::brpo_joint_v1'
+                depth_conf_mode = 'pseudo_observation::brpo_joint_v1'
+                depth_meta_path = bundle['meta_path']
+                depth_kind = 'joint_depth_target_joint_v1'
+                depth_for_refine = signal_v2_frame_dir / 'pseudo_depth_target_joint_v1.npy'
+                source_map_path = signal_v2_frame_dir / 'pseudo_source_map_joint_v1.npy'
+            elif pseudo_observation_mode == 'brpo_verify_v1':
+                bundle = _load_verify_observation_bundle(signal_v2_frame_dir)
+                rgb_conf = bundle['confidence_verify']
+                depth_conf = bundle['confidence_verify']
+                rgb_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_verify_v1.npy')
+                depth_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_verify_v1.npy')
+                rgb_conf_kind = 'joint_observation::pseudo_confidence_verify_v1.npy'
+                depth_conf_kind = 'joint_observation::pseudo_confidence_verify_v1.npy'
+                rgb_conf_mode = 'pseudo_observation::brpo_verify_v1'
+                depth_conf_mode = 'pseudo_observation::brpo_verify_v1'
+                depth_meta_path = bundle['meta_path']
+                depth_kind = 'joint_depth_target_joint_v1'
+                depth_for_refine = signal_v2_frame_dir / 'pseudo_depth_target_joint_v1.npy'
+                source_map_path = signal_v2_frame_dir / 'pseudo_source_map_joint_v1.npy'
+            elif pseudo_observation_mode in {'brpo_style_v1', 'brpo_style_v2'}:
+                brpo_style_version = 'v2' if pseudo_observation_mode == 'brpo_style_v2' else 'v1'
+                bundle = _load_brpo_style_observation_bundle(signal_v2_frame_dir, version=brpo_style_version)
+                suffix = f'brpo_style_{brpo_style_version}'
+                rgb_conf = bundle['confidence_joint']
+                depth_conf = bundle['confidence_joint']
+                rgb_conf_path = str(signal_v2_frame_dir / f'pseudo_confidence_{suffix}.npy')
+                depth_conf_path = str(signal_v2_frame_dir / f'pseudo_confidence_{suffix}.npy')
+                rgb_conf_kind = f'joint_observation::pseudo_confidence_{suffix}.npy'
+                depth_conf_kind = f'joint_observation::pseudo_confidence_{suffix}.npy'
+                rgb_conf_mode = f'pseudo_observation::{suffix}'
+                depth_conf_mode = f'pseudo_observation::{suffix}'
+                depth_meta_path = bundle['meta_path']
+                depth_kind = f'joint_depth_target_{suffix}'
+                depth_for_refine = signal_v2_frame_dir / f'pseudo_depth_target_{suffix}.npy'
+                source_map_path = signal_v2_frame_dir / f'pseudo_source_map_{suffix}.npy'
+            else:
+                bundle = _load_brpo_direct_observation_bundle(signal_v2_frame_dir)
+                rgb_conf = bundle['confidence_joint']
+                depth_conf = bundle['confidence_joint']
+                rgb_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_brpo_direct_v1.npy')
+                depth_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_brpo_direct_v1.npy')
+                rgb_conf_kind = 'joint_observation::pseudo_confidence_brpo_direct_v1.npy'
+                depth_conf_kind = 'joint_observation::pseudo_confidence_brpo_direct_v1.npy'
+                rgb_conf_mode = 'pseudo_observation::brpo_direct_v1'
+                depth_conf_mode = 'pseudo_observation::brpo_direct_v1'
+                depth_meta_path = bundle['meta_path']
+                depth_kind = 'joint_depth_target_brpo_direct_v1'
+                depth_for_refine = signal_v2_frame_dir / 'pseudo_depth_target_brpo_direct_v1.npy'
+                source_map_path = signal_v2_frame_dir / 'pseudo_source_map_brpo_direct_v1.npy'
             rgb_conf_variant = 'continuous'
             depth_conf_variant = 'continuous'
-            depth_kind = 'joint_depth_target_joint_v1'
-            depth_for_refine = signal_v2_frame_dir / 'pseudo_depth_target_joint_v1.npy'
-            source_map_path = signal_v2_frame_dir / 'pseudo_source_map_joint_v1.npy'
             depth_arr = bundle['depth_target']
-            depth_meta_path = bundle['meta_path']
             depth_meta = json.load(open(depth_meta_path)) if depth_meta_path.exists() else {}
             source_map = bundle['source_map']
             source_summary = _summarize_source_map(source_map, kind=depth_kind)
-            view['pseudo_observation_mode_effective'] = 'brpo_joint_v1'
+            view['pseudo_observation_mode_effective'] = pseudo_observation_mode
             view['pseudo_observation_meta_path'] = str(depth_meta_path)
             view['depth_source_id_groups'] = {'seed': [1, 2, 3], 'dense': [], 'fallback': [0, 4]}
         else:
@@ -663,7 +744,7 @@ def load_stageA_pseudo_views(args):
         view['source_meta'] = source_meta
         view['depth_meta'] = depth_meta
         view['target_depth_for_refine_kind'] = depth_kind
-        view['stageA_target_depth_mode_effective'] = 'joint_depth_v1' if pseudo_observation_mode == 'brpo_joint_v1' else _resolve_depth_mode_alias(depth_target_mode)
+        view['stageA_target_depth_mode_effective'] = ('joint_depth_v1' if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1'} else (pseudo_observation_mode if pseudo_observation_mode in {'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1'} else _resolve_depth_mode_alias(depth_target_mode)))
         view['target_depth_for_refine_path'] = str(depth_for_refine)
         view['target_depth_for_refine_source_map_path'] = str(source_map_path) if source_map_path is not None and Path(source_map_path).exists() else None
         view['target_depth_source_map'] = source_map
@@ -759,6 +840,9 @@ def build_pseudo_local_gating_cfg(args) -> PseudoLocalGatingConfig:
         spgm_state_participation_keep_near=float(args.pseudo_local_gating_spgm_state_participation_keep_near),
         spgm_state_participation_keep_mid=float(args.pseudo_local_gating_spgm_state_participation_keep_mid),
         spgm_state_participation_keep_far=float(args.pseudo_local_gating_spgm_state_participation_keep_far),
+        spgm_state_opacity_floor_near=float(args.pseudo_local_gating_spgm_state_opacity_floor_near),
+        spgm_state_opacity_floor_mid=float(args.pseudo_local_gating_spgm_state_opacity_floor_mid),
+        spgm_state_opacity_floor_far=float(args.pseudo_local_gating_spgm_state_opacity_floor_far),
     )
 
 
@@ -766,6 +850,73 @@ def _grad_norm_from_param(param) -> float:
     if param is None or getattr(param, 'grad', None) is None:
         return 0.0
     return float(torch.norm(param.grad).detach().cpu().item())
+
+
+def _build_spgm_candidate_mask(cluster_id: torch.Tensor, control_mask: torch.Tensor, score: torch.Tensor | None, quantile: float) -> torch.Tensor:
+    candidate_mask = torch.zeros_like(control_mask, dtype=torch.bool)
+    if score is None or not bool(control_mask.any()):
+        return candidate_mask
+    q = float(min(max(quantile, 0.0), 1.0))
+    active_cluster_ids = torch.unique(cluster_id[control_mask])
+    for raw_cluster in active_cluster_ids.tolist():
+        cid = int(raw_cluster)
+        mask = control_mask & (cluster_id == cid)
+        if not bool(mask.any()):
+            continue
+        values = score[mask]
+        threshold = float(torch.quantile(values, q=q).item())
+        cur = mask.clone()
+        cur[mask] = values <= threshold
+        candidate_mask |= cur
+    return candidate_mask
+
+
+def _masked_mean_tensor(values: torch.Tensor | None, mask: torch.Tensor) -> float:
+    if values is None or not bool(mask.any()):
+        return 0.0
+    return float(values[mask].float().mean().item())
+
+
+def _masked_cluster_ratio(cluster_id: torch.Tensor, mask: torch.Tensor, cid: int) -> float:
+    if not bool(mask.any()):
+        return 0.0
+    return float((cluster_id[mask] == int(cid)).float().mean().item())
+
+
+def _build_spgm_c0_partition_stats(spgm_score: dict, active_mask: torch.Tensor, candidate_quantile: float) -> dict:
+    cluster_id = spgm_score['cluster_id']
+    state_score = spgm_score['state_score']
+    participation_score = spgm_score['participation_score']
+    ranking_score = spgm_score['ranking_score']
+    support_norm = spgm_score['support_norm']
+    population_support_norm = spgm_score['population_support_norm']
+    depth_score = spgm_score['depth_score']
+
+    state_candidate = _build_spgm_candidate_mask(cluster_id, active_mask, state_score, candidate_quantile)
+    part_candidate = _build_spgm_candidate_mask(cluster_id, active_mask, participation_score, candidate_quantile)
+
+    partitions = {
+        'state_only': state_candidate & ~part_candidate,
+        'part_only': part_candidate & ~state_candidate,
+        'both': state_candidate & part_candidate,
+        'neither': active_mask & ~(state_candidate | part_candidate),
+    }
+
+    active_count = int(active_mask.sum().item())
+    out = {}
+    for name, mask in partitions.items():
+        ratio = float(mask.sum().item() / active_count) if active_count > 0 else 0.0
+        out[f'c0_{name}_ratio'] = ratio
+        out[f'c0_{name}_ranking_mean'] = _masked_mean_tensor(ranking_score, mask)
+        out[f'c0_{name}_state_mean'] = _masked_mean_tensor(state_score, mask)
+        out[f'c0_{name}_participation_mean'] = _masked_mean_tensor(participation_score, mask)
+        out[f'c0_{name}_support_norm_mean'] = _masked_mean_tensor(support_norm, mask)
+        out[f'c0_{name}_population_support_norm_mean'] = _masked_mean_tensor(population_support_norm, mask)
+        out[f'c0_{name}_depth_score_mean'] = _masked_mean_tensor(depth_score, mask)
+        out[f'c0_{name}_near_ratio'] = _masked_cluster_ratio(cluster_id, mask, 0)
+        out[f'c0_{name}_mid_ratio'] = _masked_cluster_ratio(cluster_id, mask, 1)
+        out[f'c0_{name}_far_ratio'] = _masked_cluster_ratio(cluster_id, mask, 2)
+    return out
 
 
 def _init_gating_history_lists(container: dict) -> None:
@@ -820,12 +971,20 @@ def _init_gating_history_lists(container: dict) -> None:
             'spgm_density_mode_effective': [],
             'spgm_state_score_mean': [],
             'spgm_state_score_p50': [],
+            'spgm_participation_score_mean': [],
+            'spgm_participation_score_p50': [],
             'spgm_state_score_mean_near': [],
             'spgm_state_score_mean_mid': [],
             'spgm_state_score_mean_far': [],
             'spgm_state_score_p50_near': [],
             'spgm_state_score_p50_mid': [],
             'spgm_state_score_p50_far': [],
+            'spgm_participation_score_mean_near': [],
+            'spgm_participation_score_mean_mid': [],
+            'spgm_participation_score_mean_far': [],
+            'spgm_participation_score_p50_near': [],
+            'spgm_participation_score_p50_mid': [],
+            'spgm_participation_score_p50_far': [],
             'spgm_population_support_mean': [],
             'spgm_struct_density_mean': [],
             'spgm_manager_mode_effective': [],
@@ -842,6 +1001,10 @@ def _init_gating_history_lists(container: dict) -> None:
             'spgm_state_opacity_decay_near': [],
             'spgm_state_opacity_decay_mid': [],
             'spgm_state_opacity_decay_far': [],
+            'spgm_state_opacity_scale_mean': [],
+            'spgm_state_opacity_scale_mean_near': [],
+            'spgm_state_opacity_scale_mean_mid': [],
+            'spgm_state_opacity_scale_mean_far': [],
             'spgm_state_candidate_count_near': [],
             'spgm_state_candidate_count_mid': [],
             'spgm_state_candidate_count_far': [],
@@ -852,6 +1015,46 @@ def _init_gating_history_lists(container: dict) -> None:
             'spgm_state_participation_drop_count_near': [],
             'spgm_state_participation_drop_count_mid': [],
             'spgm_state_participation_drop_count_far': [],
+            'spgm_c0_state_only_ratio': [],
+            'spgm_c0_state_only_ranking_mean': [],
+            'spgm_c0_state_only_state_mean': [],
+            'spgm_c0_state_only_participation_mean': [],
+            'spgm_c0_state_only_support_norm_mean': [],
+            'spgm_c0_state_only_population_support_norm_mean': [],
+            'spgm_c0_state_only_depth_score_mean': [],
+            'spgm_c0_state_only_near_ratio': [],
+            'spgm_c0_state_only_mid_ratio': [],
+            'spgm_c0_state_only_far_ratio': [],
+            'spgm_c0_part_only_ratio': [],
+            'spgm_c0_part_only_ranking_mean': [],
+            'spgm_c0_part_only_state_mean': [],
+            'spgm_c0_part_only_participation_mean': [],
+            'spgm_c0_part_only_support_norm_mean': [],
+            'spgm_c0_part_only_population_support_norm_mean': [],
+            'spgm_c0_part_only_depth_score_mean': [],
+            'spgm_c0_part_only_near_ratio': [],
+            'spgm_c0_part_only_mid_ratio': [],
+            'spgm_c0_part_only_far_ratio': [],
+            'spgm_c0_both_ratio': [],
+            'spgm_c0_both_ranking_mean': [],
+            'spgm_c0_both_state_mean': [],
+            'spgm_c0_both_participation_mean': [],
+            'spgm_c0_both_support_norm_mean': [],
+            'spgm_c0_both_population_support_norm_mean': [],
+            'spgm_c0_both_depth_score_mean': [],
+            'spgm_c0_both_near_ratio': [],
+            'spgm_c0_both_mid_ratio': [],
+            'spgm_c0_both_far_ratio': [],
+            'spgm_c0_neither_ratio': [],
+            'spgm_c0_neither_ranking_mean': [],
+            'spgm_c0_neither_state_mean': [],
+            'spgm_c0_neither_participation_mean': [],
+            'spgm_c0_neither_support_norm_mean': [],
+            'spgm_c0_neither_population_support_norm_mean': [],
+            'spgm_c0_neither_depth_score_mean': [],
+            'spgm_c0_neither_near_ratio': [],
+            'spgm_c0_neither_mid_ratio': [],
+            'spgm_c0_neither_far_ratio': [],
         }
     )
 
@@ -907,12 +1110,20 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'spgm_density_mode_effective',
         'spgm_state_score_mean',
         'spgm_state_score_p50',
+        'spgm_participation_score_mean',
+        'spgm_participation_score_p50',
         'spgm_state_score_mean_near',
         'spgm_state_score_mean_mid',
         'spgm_state_score_mean_far',
         'spgm_state_score_p50_near',
         'spgm_state_score_p50_mid',
         'spgm_state_score_p50_far',
+        'spgm_participation_score_mean_near',
+        'spgm_participation_score_mean_mid',
+        'spgm_participation_score_mean_far',
+        'spgm_participation_score_p50_near',
+        'spgm_participation_score_p50_mid',
+        'spgm_participation_score_p50_far',
         'spgm_population_support_mean',
         'spgm_struct_density_mean',
         'spgm_manager_mode_effective',
@@ -929,6 +1140,10 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'spgm_state_opacity_decay_near',
         'spgm_state_opacity_decay_mid',
         'spgm_state_opacity_decay_far',
+        'spgm_state_opacity_scale_mean',
+        'spgm_state_opacity_scale_mean_near',
+        'spgm_state_opacity_scale_mean_mid',
+        'spgm_state_opacity_scale_mean_far',
         'spgm_state_candidate_count_near',
         'spgm_state_candidate_count_mid',
         'spgm_state_candidate_count_far',
@@ -939,6 +1154,46 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         'spgm_state_participation_drop_count_near',
         'spgm_state_participation_drop_count_mid',
         'spgm_state_participation_drop_count_far',
+        'spgm_c0_state_only_ratio',
+        'spgm_c0_state_only_ranking_mean',
+        'spgm_c0_state_only_state_mean',
+        'spgm_c0_state_only_participation_mean',
+        'spgm_c0_state_only_support_norm_mean',
+        'spgm_c0_state_only_population_support_norm_mean',
+        'spgm_c0_state_only_depth_score_mean',
+        'spgm_c0_state_only_near_ratio',
+        'spgm_c0_state_only_mid_ratio',
+        'spgm_c0_state_only_far_ratio',
+        'spgm_c0_part_only_ratio',
+        'spgm_c0_part_only_ranking_mean',
+        'spgm_c0_part_only_state_mean',
+        'spgm_c0_part_only_participation_mean',
+        'spgm_c0_part_only_support_norm_mean',
+        'spgm_c0_part_only_population_support_norm_mean',
+        'spgm_c0_part_only_depth_score_mean',
+        'spgm_c0_part_only_near_ratio',
+        'spgm_c0_part_only_mid_ratio',
+        'spgm_c0_part_only_far_ratio',
+        'spgm_c0_both_ratio',
+        'spgm_c0_both_ranking_mean',
+        'spgm_c0_both_state_mean',
+        'spgm_c0_both_participation_mean',
+        'spgm_c0_both_support_norm_mean',
+        'spgm_c0_both_population_support_norm_mean',
+        'spgm_c0_both_depth_score_mean',
+        'spgm_c0_both_near_ratio',
+        'spgm_c0_both_mid_ratio',
+        'spgm_c0_both_far_ratio',
+        'spgm_c0_neither_ratio',
+        'spgm_c0_neither_ranking_mean',
+        'spgm_c0_neither_state_mean',
+        'spgm_c0_neither_participation_mean',
+        'spgm_c0_neither_support_norm_mean',
+        'spgm_c0_neither_population_support_norm_mean',
+        'spgm_c0_neither_depth_score_mean',
+        'spgm_c0_neither_near_ratio',
+        'spgm_c0_neither_mid_ratio',
+        'spgm_c0_neither_far_ratio',
     ]
     for key in keys:
         container[key].append(summary.get(key))
@@ -974,12 +1229,20 @@ def _build_spgm_summary_payload(spgm_raw_stats, spgm_score, spgm_update_policy, 
         'density_mode_effective': spgm_score['density_mode_effective'],
         'state_score_mean': spgm_score['state_score_mean'],
         'state_score_p50': spgm_score['state_score_p50'],
+        'participation_score_mean': spgm_score['participation_score_mean'],
+        'participation_score_p50': spgm_score['participation_score_p50'],
         'state_score_mean_near': spgm_manager['state_score_mean_near'],
         'state_score_mean_mid': spgm_manager['state_score_mean_mid'],
         'state_score_mean_far': spgm_manager['state_score_mean_far'],
         'state_score_p50_near': spgm_manager['state_score_p50_near'],
         'state_score_p50_mid': spgm_manager['state_score_p50_mid'],
         'state_score_p50_far': spgm_manager['state_score_p50_far'],
+        'participation_score_mean_near': spgm_manager['participation_score_mean_near'],
+        'participation_score_mean_mid': spgm_manager['participation_score_mean_mid'],
+        'participation_score_mean_far': spgm_manager['participation_score_mean_far'],
+        'participation_score_p50_near': spgm_manager['participation_score_p50_near'],
+        'participation_score_p50_mid': spgm_manager['participation_score_p50_mid'],
+        'participation_score_p50_far': spgm_manager['participation_score_p50_far'],
         'population_support_mean': spgm_score['population_support_mean'],
         'struct_density_mean': spgm_score['struct_density_mean'],
         'manager_mode_effective': spgm_manager['manager_mode_effective'],
@@ -996,6 +1259,10 @@ def _build_spgm_summary_payload(spgm_raw_stats, spgm_score, spgm_update_policy, 
         'state_opacity_decay_near': spgm_manager['state_opacity_decay_near'],
         'state_opacity_decay_mid': spgm_manager['state_opacity_decay_mid'],
         'state_opacity_decay_far': spgm_manager['state_opacity_decay_far'],
+        'state_opacity_scale_mean': spgm_manager['state_opacity_scale_mean'],
+        'state_opacity_scale_mean_near': spgm_manager['state_opacity_scale_mean_near'],
+        'state_opacity_scale_mean_mid': spgm_manager['state_opacity_scale_mean_mid'],
+        'state_opacity_scale_mean_far': spgm_manager['state_opacity_scale_mean_far'],
         'state_candidate_count_near': spgm_manager['state_candidate_count_near'],
         'state_candidate_count_mid': spgm_manager['state_candidate_count_mid'],
         'state_candidate_count_far': spgm_manager['state_candidate_count_far'],
@@ -1023,6 +1290,7 @@ def maybe_apply_pseudo_local_gating(
 
     spgm_stats = None
     spgm_render_mask = None
+    spgm_opacity_scale = None
 
     if not gating_cfg.enabled():
         grad_xyz = _grad_norm_from_param(getattr(gaussians, '_xyz', None))
@@ -1112,6 +1380,7 @@ def maybe_apply_pseudo_local_gating(
             update_policy=spgm_update_policy,
             manager_mode=gating_cfg.spgm_manager_mode,
             state_score=spgm_score['state_score'],
+            participation_score=spgm_score['participation_score'],
             population_support_count=spgm_raw_stats['population_support_count'],
             state_candidate_quantile=gating_cfg.spgm_state_candidate_quantile,
             state_base_scale_near=gating_cfg.spgm_state_base_scale_near,
@@ -1120,6 +1389,9 @@ def maybe_apply_pseudo_local_gating(
             state_participation_keep_near=gating_cfg.spgm_state_participation_keep_near,
             state_participation_keep_mid=gating_cfg.spgm_state_participation_keep_mid,
             state_participation_keep_far=gating_cfg.spgm_state_participation_keep_far,
+            state_opacity_floor_near=gating_cfg.spgm_state_opacity_floor_near,
+            state_opacity_floor_mid=gating_cfg.spgm_state_opacity_floor_mid,
+            state_opacity_floor_far=gating_cfg.spgm_state_opacity_floor_far,
         )
         visibility_stats = {
             'visible_union_ratio': None,
@@ -1133,7 +1405,14 @@ def maybe_apply_pseudo_local_gating(
             spgm_manager=spgm_manager,
             accepted_view_count=int(accepted_view_count),
         )
+        spgm_partition_stats = _build_spgm_c0_partition_stats(
+            spgm_score=spgm_score,
+            active_mask=spgm_raw_stats['active_mask'],
+            candidate_quantile=gating_cfg.spgm_state_candidate_quantile,
+        )
+        spgm_stats.update(spgm_partition_stats)
         spgm_render_mask = spgm_manager.get('participation_render_mask')
+        spgm_opacity_scale = spgm_manager.get('participation_opacity_scale')
 
     else:
         raise ValueError(f'Unknown gating mode: {gating_cfg.mode}')
@@ -1147,8 +1426,14 @@ def maybe_apply_pseudo_local_gating(
         grad_stats=grad_stats,
         spgm_stats=spgm_stats,
     )
+    if spgm_stats is not None:
+        for key, value in spgm_stats.items():
+            if key.startswith('c0_'):
+                summary[f'spgm_{key}'] = value
     if spgm_render_mask is not None:
         summary['_spgm_participation_render_mask'] = spgm_render_mask.detach()
+    if spgm_opacity_scale is not None:
+        summary['_spgm_participation_opacity_scale'] = spgm_opacity_scale.detach()
     return summary
 
 
@@ -1459,6 +1744,7 @@ def main():
         cfg_real = {'Training': {'lambda_pseudo': 1.0, 'rgb_boundary_threshold': 0.01, 'monocular': False}}
         post_switch_state = {'applied': False}
         stageB_spgm_participation_render_mask = None
+        stageB_spgm_participation_opacity_scale = None
 
         stageB_loop_desc = 'StageB BRPO joint topology' if str(getattr(args, 'joint_topology_mode', 'off') or 'off') == 'brpo_joint_v1' else 'StageB conservative joint'
         for it in tqdm(range(1, int(args.stageB_iters) + 1), desc=stageB_loop_desc):
@@ -1500,11 +1786,15 @@ def main():
             sampled_pseudo_views = []
             pseudo_render_packages = []
             current_pseudo_render_mask = stageB_spgm_participation_render_mask if (pseudo_local_gating_cfg.uses_spgm() and pseudo_local_gating_cfg.spgm_manager_mode == 'deterministic_participation') else None
+            current_pseudo_opacity_scale = stageB_spgm_participation_opacity_scale if (pseudo_local_gating_cfg.uses_spgm() and pseudo_local_gating_cfg.spgm_manager_mode == 'deterministic_opacity_participation') else None
             for pidx in pseudo_indices:
                 view = pseudo_views[pidx]
                 sampled_pseudo_ids.append(int(view['sample_id']))
                 sampled_pseudo_views.append(view)
-                pkg = render(view['vp'], gaussians, pipeline_params, bg, mask=current_pseudo_render_mask) if current_pseudo_render_mask is not None else render(view['vp'], gaussians, pipeline_params, bg)
+                if current_pseudo_render_mask is not None or current_pseudo_opacity_scale is not None:
+                    pkg = render(view['vp'], gaussians, pipeline_params, bg, mask=current_pseudo_render_mask, opacity_scale=current_pseudo_opacity_scale)
+                else:
+                    pkg = render(view['vp'], gaussians, pipeline_params, bg)
                 pseudo_render_packages.append(pkg)
                 if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                     loss, stats = build_stageA_loss_source_aware(
@@ -1539,6 +1829,10 @@ def main():
                 next_render_mask = gating_summary.pop('_spgm_participation_render_mask', None)
                 if next_render_mask is not None:
                     stageB_spgm_participation_render_mask = next_render_mask
+            elif pseudo_local_gating_cfg.uses_spgm() and pseudo_local_gating_cfg.spgm_manager_mode == 'deterministic_opacity_participation':
+                next_opacity_scale = gating_summary.pop('_spgm_participation_opacity_scale', None)
+                if next_opacity_scale is not None:
+                    stageB_spgm_participation_opacity_scale = next_opacity_scale
             _append_gating_history(stageB_history, gating_summary)
             if joint_topology_mode_effective != 'brpo_joint_v1' and has_real_branch:
                 real_backward = cur_lambda_real * real_loss_tensor
@@ -1580,22 +1874,38 @@ def main():
                 print(f"  [StageB] iter {it}: total={stageB_history['loss_total'][-1]:.4f}, real={stageB_history['loss_real'][-1]:.4f}, pseudo={stageB_history['loss_pseudo'][-1]:.4f}, rgb={stageB_history['loss_rgb'][-1]:.4f}, depth={stageB_history['loss_depth'][-1]:.4f}")
             if pseudo_local_gating_cfg.enabled() and (it == 1 or it % max(1, int(pseudo_local_gating_cfg.log_interval)) == 0):
                 if pseudo_local_gating_cfg.uses_spgm():
-                    print(
-                        f"    [StageB local-gating] iter {it}: accepted={gating_summary.get('accepted_visibility_count')}/{len(sampled_pseudo_ids)}, "
-                        f"policy={gating_summary.get('spgm_policy_mode_effective')}, "
-                        f"ranking={gating_summary.get('spgm_ranking_mode_effective')}, "
-                        f"active={float(gating_summary.get('spgm_active_ratio') or 0.0):.4f}, "
-                        f"selected={float(gating_summary.get('spgm_selected_ratio') or 0.0):.4f}, "
-                        f"rank_p50={float(gating_summary.get('spgm_ranking_score_p50') or 0.0):.4f}, "
-                        f"state_p50={float(gating_summary.get('spgm_state_score_p50') or 0.0):.4f}, "
-                        f"state_far={float(gating_summary.get('spgm_state_score_p50_far') or 0.0):.4f}, "
-                        f"w_p50={float(gating_summary.get('spgm_weight_p50') or 0.0):.4f}, "
-                        f"manager={gating_summary.get('spgm_manager_mode_effective')}, "
-                        f"part_far={float(gating_summary.get('spgm_state_participation_ratio_far') or 1.0):.3f}, "
-                        f"drop_far={int(gating_summary.get('spgm_state_participation_drop_count_far') or 0)}, "
-                        f"cand_far={int(gating_summary.get('spgm_state_candidate_count_far') or 0)}, "
-                        f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
-                    )
+                    manager_mode = gating_summary.get('spgm_manager_mode_effective')
+                    if manager_mode == 'deterministic_opacity_participation':
+                        print(
+                            f"    [StageB local-gating] iter {it}: accepted={gating_summary.get('accepted_visibility_count')}/{len(sampled_pseudo_ids)}, "
+                            f"policy={gating_summary.get('spgm_policy_mode_effective')}, "
+                            f"ranking={gating_summary.get('spgm_ranking_mode_effective')}, "
+                            f"active={float(gating_summary.get('spgm_active_ratio') or 0.0):.4f}, "
+                            f"selected={float(gating_summary.get('spgm_selected_ratio') or 0.0):.4f}, "
+                            f"part_p50={float(gating_summary.get('spgm_participation_score_p50') or 0.0):.4f}, "
+                            f"part_far={float(gating_summary.get('spgm_participation_score_p50_far') or 0.0):.4f}, "
+                            f"opacity_far={float(gating_summary.get('spgm_state_opacity_scale_mean_far') or 1.0):.4f}, "
+                            f"opacity_all={float(gating_summary.get('spgm_state_opacity_scale_mean') or 1.0):.4f}, "
+                            f"cand_far={int(gating_summary.get('spgm_state_candidate_count_far') or 0)}, "
+                            f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
+                        )
+                    else:
+                        print(
+                            f"    [StageB local-gating] iter {it}: accepted={gating_summary.get('accepted_visibility_count')}/{len(sampled_pseudo_ids)}, "
+                            f"policy={gating_summary.get('spgm_policy_mode_effective')}, "
+                            f"ranking={gating_summary.get('spgm_ranking_mode_effective')}, "
+                            f"active={float(gating_summary.get('spgm_active_ratio') or 0.0):.4f}, "
+                            f"selected={float(gating_summary.get('spgm_selected_ratio') or 0.0):.4f}, "
+                            f"rank_p50={float(gating_summary.get('spgm_ranking_score_p50') or 0.0):.4f}, "
+                            f"state_p50={float(gating_summary.get('spgm_state_score_p50') or 0.0):.4f}, "
+                            f"state_far={float(gating_summary.get('spgm_state_score_p50_far') or 0.0):.4f}, "
+                            f"w_p50={float(gating_summary.get('spgm_weight_p50') or 0.0):.4f}, "
+                            f"manager={gating_summary.get('spgm_manager_mode_effective')}, "
+                            f"part_far={float(gating_summary.get('spgm_state_participation_ratio_far') or 1.0):.3f}, "
+                            f"drop_far={int(gating_summary.get('spgm_state_participation_drop_count_far') or 0)}, "
+                            f"cand_far={int(gating_summary.get('spgm_state_candidate_count_far') or 0)}, "
+                            f"xyz_grad={float(gating_summary.get('grad_norm_xyz_pre_mask') or 0.0):.3e}->{float(gating_summary.get('grad_norm_xyz_post_mask') or 0.0):.3e}"
+                        )
                 else:
                     print(
                         f"    [StageB local-gating] iter {it}: accepted={len(gating_summary['accepted_pseudo_sample_ids'])}/{len(sampled_pseudo_ids)}, "

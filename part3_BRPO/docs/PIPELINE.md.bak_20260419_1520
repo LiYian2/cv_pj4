@@ -1,0 +1,954 @@
+# PIPELINE.md
+
+> Purpose: a compact source-of-truth for drawing the current Part3 BRPO system.
+> Scope: all pipeline branches as of 2026-04-19, including current mainline, alternate branches, and deprecated/landed branches.
+> Update: 2026-04-19 — 模块详解重写，基于代码级深入分析，包含数学原理与实现细节。
+
+## 1. One-sentence view
+
+当前默认候选主线：**old A1 + new T1**，即 joint_confidence_v2 + joint_depth_v2 observation + brpo_joint_v1 topology + repair A dense_keep + bounded StageB。
+
+主数据流：part2 S3PO full rerun - internal_eval_cache - internal prepare (select / Difix / fusion / verify / pack) - signal branch - refine - replay eval
+
+---
+
+## 2. 全链路总览图
+
+```
++---------------------------------------------------------------------+
+|               Part3 BRPO 全链路总览 (2026-04-19)                     |
++---------------------------------------------------------------------+
+
+                       [ Dataset split ]
+                              |
+                              v
+                  [ Part2 S3PO full rerun ]
+                              |
+                              v
+              [ internal_eval_cache: before/after_opt PLY ]
+                              |
+                              v
++----------------------------------------------------------+
+|                  Internal Prepare                        |
+|  select -> Difix(left/right) -> fusion -> verify -> pack |
++----------------------------------------------------------+
+                              |
+                              v
++----------------------------------------------------------+
+|                    Signal Branch                         |
+|                                                          |
+|  [ Legacy ]      [ signal_v2 ]     [ A1 joint_v2 ]       |
+|  depth mask      RGB-only         joint_confidence_v2    |
+|  [废弃]         [对照]           [当前主线old A1]        |
+|                                                          |
+|                  [ new A1 joint_v1 ]                     |
+|                  pseudo_*_joint_v1                       |
+|                  [已实现暂不landing]                     |
+|                                                          |
+|                  [ A2 geometry expand ]                  |
+|                  [废弃 widening失败]                     |
++----------------------------------------------------------+
+                              |
+                              v
++----------------------------------------------------------+
+|                    Refine Stage                          |
+|                                                          |
+|  [ StageA ] pose/exposure only, 不更新Gaussian [闭环]   |
+|       |                                                  |
+|       v                                                  |
+|  [ StageA.5 ] local micro [降级为optional warmup]       |
+|       |                                                  |
+|       v                                                  |
+|  [ StageB ]                                              |
+|    |-- old topology (两阶段串联) [对照]                  |
+|    |-- new topology (T1: brpo_joint_v1) [当前拓扑主线]   |
++----------------------------------------------------------+
+                              |
+                              v
++----------------------------------------------------------+
+|            Gradient Management / SPGM                    |
+|                                                          |
+|  [ No extra manage ] baseline [对照]                    |
+|  [ Local gating ] view-conditioned gate [可用]          |
+|  [ SPGM repair A ] dense_keep [当前anchor]              |
+|  [ selector-first ] support_blend far=0.90 [near-parity]|
+|  [ B1/B2 shell ] manager shell + diagnostics [已接通]   |
+|  [ B3旧版 ] xyz_lr_scale [降级为probe]                  |
+|  [ B3新版 ] deterministic_participation [已接入weak负]  |
++----------------------------------------------------------+
+                              |
+                              v
+              [ Replay Eval: PSNR/SSIM/LPIPS ]
+```
+
+---
+
+## 3. 上游信号链路详解（基于代码实现）
+
+### 3.1 Link-1: Legacy depth-first branch [废弃]
+
+状态: 废弃，仅作历史对照
+
+实现位置: 早期  等旧版文件
+
+方法概述: depth 做 mask 和 depth target，RGB supervision 来自 propagated train-mask semantics
+
+废弃原因: 被 signal_v2 取代，depth verified 过窄(约2%)
+
+---
+
+### 3.2 Link-2: signal_v2 RGB-only branch [对照]
+
+状态: 对照臂，不再作为主线
+
+**代码位置**:  + 
+
+#### RGB Confidence 构建
+
+**输入**: fused_rgb, left_ref_rgb, right_ref_rgb, matcher (feature matching)
+
+**算法步骤**:
+
+1. **Feature Matching + Correspondence Accumulation**
+   ```python
+   pts_fused_left, pts_left_ref, conf_left = matcher.match_pair(fused, left_ref, size=512)
+   pts_fused_right, pts_right_ref, conf_right = matcher.match_pair(fused, right_ref, size=512)
+   ```
+
+2. **Pixel-level Support Map**
+   对每个匹配点 (x, y)，累积到 support_mask 和 conf_map：
+   ```python
+   support[yi, xi] = 1.0      # 该像素有匹配支持
+   density[yi, xi] += 1.0     # 匹配密度计数
+   conf_map[yi, xi] = max(conf_map[yi, xi], ci)  # 取最大 confidence
+   ```
+
+3. **Dual-Branch Support Classification**
+   ```python
+   support_left = left_map['support_mask'] > 0.5
+   support_right = right_map['support_mask'] > 0.5
+   support_both = support_left & support_right      # 双边验证 → 最高可信
+   support_single = support_left ^ support_right    # 单边验证 → 中等可信
+   support_none = ~(support_left | support_right)   # 无验证 → 不可信
+   ```
+
+4. **Discrete Confidence Assignment**
+   ```python
+   discrete = np.full((h, w), value_none)    # 默认 0.0
+   discrete[support_single] = value_single  # 0.5
+   discrete[support_both] = value_both      # 1.0
+   ```
+
+   **数学定义**:
+   381835C_{rgb}(p) = \begin{cases} 1.0 & \text{if } p \in \text{support\_both} \ 0.5 & \text{if } p \in \text{support\_single} \ 0.0 & \text{otherwise} \end{cases}381835
+
+5. **Continuous Confidence Fusion**
+   ```python
+   # 双边区域：几何平均（严格融合）
+   cont_fused[support_both] = np.sqrt(cont_left[support_both] * cont_right[support_both])
+   # 单边区域：直接继承
+   cont_fused[left_only] = cont_left[left_only]
+   cont_fused[right_only] = cont_right[right_only]
+   ```
+
+   **数学公式**:
+   381835C_{rgb}^{cont}(p) = \begin{cases} \sqrt{C_L(p) \cdot C_R(p)} & \text{if } p \in \text{support\_both} \ C_{branch}(p) & \text{if } p \in \text{support\_single} \ 0 & \text{otherwise} \end{cases}381835
+
+   **原理**: 几何平均确保双边置信度需同时高才能得到高融合值，实现更严格的质量控制。
+
+#### Depth Target 构建
+
+**输入**: render_depth, projected_depth_left/right, fusion_weight_left/right, raw_rgb_confidence
+
+**算法步骤**:
+
+1. **Geometry Tier Classification**
+   ```python
+   rgb_active = raw_rgb_confidence >= min_rgb_conf_for_depth  # 默认 0.5
+   both = rgb_active & valid_left & valid_right
+   left_only = rgb_active & valid_left & (~valid_right)
+   right_only = rgb_active & valid_right & (~valid_left)
+   fallback = rgb_active & (~valid_left) & (~valid_right)
+   ```
+
+2. **Depth Target Fusion（双边加权）**
+   ```python
+   both_w_sum = fusion_weight_left + fusion_weight_right
+   both_left = fusion_weight_left / both_w_sum
+   both_right = fusion_weight_right / both_w_sum
+   target[both] = both_left * projected_depth_left + both_right * projected_depth_right
+   ```
+
+   **数学公式**:
+   381835D_{target}(p) = \frac{w_L(p) \cdot D_L(p) + w_R(p) \cdot D_R(p)}{w_L(p) + w_R(p)}381835
+
+   fusion_weight 来自 stereo fusion 的质量评估（视差一致性等）。
+
+3. **Single-Branch Assignment**
+   ```python
+   target[left_only] = projected_depth_left[left_only]
+   target[right_only] = projected_depth_right[right_only]
+   ```
+
+4. **Fallback Handling**
+   ```python
+   if fallback_mode == 'render_depth':
+       target[fallback] = render_depth[fallback]  # 用当前渲染深度作为 fallback
+       source_map[fallback] = SOURCE_RENDER_FALLBACK  # 标记为 4
+   ```
+
+5. **Source Map 输出**
+   - : 双边加权融合（最高质量）
+   -  / : 单边投影
+   - : 无投影，用渲染深度（最低质量）
+   - : 无监督
+
+6. **Depth Mask Construction**
+   ```python
+   depth_mask = rgb_active.astype(np.float32)  # 只在 RGB 有 confidence 的地方启用深度监督
+   ```
+
+   **关键设计**: RGB confidence 作为深度监督的前提条件——避免在没有 appearance evidence 的地方使用几何投影。
+
+**输出文件**: 
+-  / 
+-  / 
+
+**角色**: canonical control arm，用于 compare
+
+---
+
+### 3.3 Link-3: old A1 (joint_confidence_v2) [当前observation主线]
+
+状态: 当前 observation 主线
+
+**代码位置**: 
+
+#### 核心算法
+
+1. **Geometry Tier 数值化**
+   ```python
+   JOINT_SINGLE = 0.5
+   JOINT_BOTH = 1.0
+   
+   geom_both = depth_source_map == SOURCE_BOTH_WEIGHTED  # 来自 depth supervision
+   geom_single = depth_source_map in [SOURCE_LEFT, SOURCE_RIGHT]
+   
+   geometry_tier = np.zeros_like(raw_rgb_confidence)
+   geometry_tier[geom_single] = JOINT_SINGLE
+   geometry_tier[geom_both] = JOINT_BOTH
+   ```
+
+   **数学定义**:
+   381835C_{geom}(p) = \begin{cases} 1.0 & \text{if } p \in \text{both\_weighted} \ 0.5 & \text{if } p \in \text{single} \ 0.0 & \text{otherwise} \end{cases}381835
+
+2. **Joint Confidence（最小值规则）**
+   ```python
+   joint_confidence = np.minimum(np.clip(raw_rgb_confidence, 0.0, 1.0), geometry_tier)
+   ```
+
+   **数学公式**:
+   381835C_{joint}(p) = \min(C_{rgb}(p), C_{geom}(p))381835
+
+   **原理**: joint confidence 要求 appearance 和 geometry **同时**可信。任一不可信则整体不可信——这是保守的 intersection semantics。
+
+3. **Continuous Version**
+   ```python
+   joint_confidence_cont = raw_rgb_confidence_cont * geometry_tier
+   ```
+
+   **数学公式**:
+   381835C_{joint}^{cont}(p) = C_{rgb}^{cont}(p) \cdot C_{geom}(p)381835
+
+4. **Joint Depth Target（直接复用）**
+   ```python
+   def build_joint_depth_target(target_depth_for_refine_v2_brpo):
+       return target_depth_for_refine_v2_brpo.copy()  # 不重新生成，直接复用
+   ```
+
+   **关键问题**: depth target 不是 joint builder 重新生成的，而是直接复用 。
+
+**输出文件**: 
+-  / 
+- 
+
+**coverage**: 约 1.96%
+
+**设计定位**: joint support filter / unified consumer semantics——统一了 RGB 和 depth 的下游消费域，但没有统一上游 observation construction。
+
+**关键发现**: A1 是 Re10k 上第一条明确优于 sidecar control 的 observation 正信号。
+
+---
+
+### 3.4 Link-4: new A1 (brpo_joint_v1) [已实现暂不landing]
+
+状态: builder + consumer lock 已完成，但首轮 compare 不占优
+
+**代码位置**: 
+
+#### 核心算法（候选竞争 + Softmax 融合）
+
+这是 A1 的**重写版本**，核心变化：从几何最小值规则改为候选竞争 + softmax 融合。
+
+1. **候选集合定义**
+   ```python
+   CANDIDATE_NAMES = ('left', 'right', 'both_weighted', 'render_prior')
+   SOURCE_PRIOR = {
+       'left': 0.82,
+       'right': 0.82,
+       'both_weighted': 1.00,
+       'render_prior': 0.22,
+   }
+   ```
+
+   四种候选：左投影、右投影、双边融合、渲染先验。每种有先验权重。
+
+2. **Candidate Collection**
+   ```python
+   valid_left = (projected_depth_left > 1e-6) & (overlap_mask_left > 0.5)
+   valid_right = (projected_depth_right > 1e-6) & (overlap_mask_right > 0.5)
+   valid_both = valid_left & valid_right
+   
+   # 双边融合深度
+   both_depth = (fusion_weight_left * projected_depth_left + fusion_weight_right * projected_depth_right) / fusion_sum
+   ```
+
+3. **Candidate Scoring（多因素加权）**
+   ```python
+   score = (
+       w_appearance * appearance_scores[name]   # 0.35
+       + w_geometry * geometry_scores[name]     # 0.35
+       + w_support * support_scores[name]       # 0.20
+       + w_prior * SOURCE_PRIOR[name]           # 0.10
+   )
+   ```
+
+   各因素计算：
+   
+   - **appearance_score**: 来自 RGB matching confidence
+   - **geometry_score**: 深度一致性 + overlap 质量
+     ```python
+     both_consistency = 1.0 - |left_depth - right_depth| / max(|left|, |right|, 1e-6)  # tol=0.08
+     geometry_scores['both_weighted'] = 0.65 + 0.35 * both_consistency
+     ```
+   - **support_score**: 几何支持覆盖度
+   - **prior**: 候选类型的先验偏好（both_weighted 最高）
+
+4. **Best Candidate Selection**
+   ```python
+   best_idx = np.argmax(score_stack, axis=0)  # 选择分数最高的候选
+   best_depth = np.take_along_axis(depth_stack, best_idx[None, ...], axis=0)[0]
+   ```
+
+5. **Softmax Fusion（候选混合）**
+   ```python
+   score_shift = score_stack - np.max(score_stack, axis=0, keepdims=True)  # 数值稳定
+   score_exp = np.exp(score_shift / 0.12) * depth_valid_stack  # temperature=0.12
+   score_prob = score_exp / score_sum  # 归一化
+   fused_depth = (score_prob * depth_stack).sum(axis=0)  # 加权融合
+   ```
+
+   **数学公式**:
+   381835P_k(p) = \frac{\exp(s_k(p) / \tau) \cdot \mathbb{1}_{valid_k}(p)}{\sum_{k'} \exp(s_{k'}(p) / \tau) \cdot \mathbb{1}_{valid_{k'}}(p)}381835
+   
+   381835D_{fused}(p) = \sum_k P_k(p) \cdot D_k(p)381835
+
+   其中 temperature $\tau = 0.12$ 控制选择性锐度（越小越接近 hard selection）。
+
+6. **Joint Confidence（sqrt 规则）**
+   ```python
+   confidence_rgb = appearance_evidence
+   confidence_depth = best_score
+   confidence_joint = np.sqrt(confidence_rgb * confidence_depth)
+   ```
+
+   **数学原理**: 几何平均确保 RGB 和 depth 证据同时高才能得到高 joint confidence。
+
+**输出文件**:
+- （重新生成，不是复用）
+- 
+-  / 
+-  / 
+
+**与 old A1 的本质差异**:
+- old A1: 统一 support 语义，depth target 直接复用旧 target
+- new A1: 统一 observation object，depth target 重新生成（candidate competition + softmax fusion）
+
+首轮 compare 结果: new A1 + new T1 = 24.135512 vs old A1 + new T1 = 24.185846
+结论: old A1 仍优于 new A1（但方法对象已正确对齐 BRPO）
+
+---
+
+### 3.5 Link-5: A2 geometry-constrained expand [废弃]
+
+状态: widening 方案失败，不作为主线
+
+**代码位置**: 
+
+#### 核心算法（Geometry-Constrained Region Grow）
+
+1. **Seed Extraction**
+   ```python
+   seed_mask = (joint_conf >= seed_threshold) & (joint_cont >= seed_threshold * 0.8)  # threshold=0.7
+   ```
+
+   种子区域：A1 中置信度 ≥ 0.7 的像素。
+
+2. **Geometry Masks Preparation**
+   ```python
+   proj_left_valid = np.isfinite(projected_depth_left) & (overlap_mask_left > 0.5)
+   proj_right_valid = np.isfinite(projected_depth_right) & (overlap_mask_right > 0.5)
+   fusion_left_good = fusion_weight_left >= fusion_weight_threshold  # 0.3
+   fusion_right_good = fusion_weight_right >= fusion_weight_threshold
+   
+   both_valid = proj_left_valid & proj_right_valid & fusion_left_good & fusion_right_good
+   left_only = proj_left_valid & fusion_left_good & ~proj_right_valid
+   right_only = proj_right_valid & fusion_right_good & ~proj_left_valid
+   ```
+
+3. **Iterative Region Grow（关键循环）**
+   ```python
+   for iteration in range(max_expand_iterations):  # 默认 3
+       dilated = ndimage.binary_dilation(current_frontier, iterations=1)  # 8-邻域扩展
+       new_candidates = dilated & ~current_frontier & ~seed_mask
+       
+       for y, x in zip(*np.where(new_candidates)):
+           # 检查候选像素的深度一致性
+           ref_depth = np.nanmedian(local_seed_depth[local_seed_mask])  # 邻域种子深度中值
+           cand_depth = ...  # 根据几何类型选择投影深度
+           
+           depth_diff = abs(cand_depth - ref_depth) / max(ref_depth, 1e-6)
+           if depth_diff > depth_diff_threshold:  # > 5% 则拒绝
+               continue
+           
+           # 根据几何支持类型标记
+           if both_valid[y, x]:
+               source_map[y, x] = SOURCE_EXPANDED_BOTH
+               expanded_conf[y, x] = 0.8
+           elif left_only[y, x]:
+               source_map[y, x] = SOURCE_EXPANDED_LEFT_ONLY
+               expanded_conf[y, x] = 0.6
+   ```
+
+   **数学约束**:
+   381835\frac{|D_{candidate}(p) - D_{seed\_neighbor}(p)|}{D_{seed\_neighbor}(p)} < \epsilon_{depth}381835
+
+   深度相对差异需小于阈值（默认 5%）。
+
+4. **Confidence Assignment**
+   ```python
+   expanded_conf[expanded_both] = 0.8   # 双边扩展置信度较高
+   expanded_conf[expanded_left] = 0.6   # 单边扩展置信度较低
+   ```
+
+   扩展区域的置信度低于种子（保证质量梯度）。
+
+**输出文件**: , 
+
+**compare 结果**: A1+A2 相比 A1 下降 -0.286 PSNR（coverage 从 1.96% 扩到 6.05%）
+
+**废弃原因**: 扩张策略带来过多低质量像素，导致负收益。虽然满足深度一致性约束，但这些扩展像素本身缺乏足够的 appearance evidence，在 optimization 中贡献低质量 supervision。
+
+---
+
+## 4. Refine Stage 链路详解（基于代码实现）
+
+### 4.1 StageA [闭环可用]
+
+**代码位置**:  — 
+
+职责: pose/exposure only，不更新 Gaussian
+
+#### Loss 函数
+
+```python
+total = (
+    beta_rgb * l_rgb           # RGB reconstruction loss
+    + (1 - beta_rgb) * l_depth # Depth reconstruction loss
+    + lambda_pose * l_pose     # Pose regularization
+    + l_abs_pose               # Absolute pose prior
+    + lambda_exp * l_exp       # Exposure regularization
+)
+```
+
+#### Absolute Pose Prior（关键）
+
+```python
+def absolute_pose_prior_loss_scaled(viewpoint, scene_scale, lambda_abs_t, lambda_abs_r):
+    # SE(3) log map
+    delta = current_w2c(viewpoint) @ torch.linalg.inv(w2c0)
+    tau = SE3_log(delta)  # 6-vector: [rho, theta]
+    
+    rho_vec = tau[:3]      # translation component
+    theta_vec = tau[3:]    # rotation component
+    
+    rho_scaled_norm = torch.norm(rho_vec) / scene_scale  # translation scaled by scene size
+    
+    l_abs_t = lambda_abs_t * robust_penalty(rho_scaled_norm)  # lambda_abs_t = 3.0
+    l_abs_r = lambda_abs_r * robust_penalty(theta_norm)       # lambda_abs_r = 0.1
+```
+
+**数学公式**:
+381835\tau = \log_{SE(3)}(T_{current} \cdot T_0^{-1})381835
+
+381835L_{abs\_t} = \lambda_t \cdot \rho\left(\frac{||\tau_{trans}||}{s_{scene}}\right)381835
+
+381835L_{abs\_r} = \lambda_r \cdot \rho(||\tau_{rot}||)381835
+
+其中 $\rho(x)$ 是 Charbonnier penalty: $\sqrt{x^2 + \epsilon}$。
+
+**关键参数**: , 
+
+**pose residual fold-back**: 已补回，StageA 结束后 pose delta 被正确写入 viewpoint。
+
+**设计判断**: StageA-only replay 不是判优指标（pose 优化本身不是最终目标）。
+
+---
+
+### 4.2 StageA.5 [已降级]
+
+状态: 降级为 optional warmup / control，不再是主线必经阶段
+
+**旧职责**: local Gaussian micro-tune，pseudo-only backward
+
+**降级原因**: T1 joint topology 已证明 pseudo + real 在同一 loop 内更稳定
+
+**当前角色**: orchestration anchor / 对照臂
+
+---
+
+### 4.3 StageB old topology [对照]
+
+状态: 对照臂，不再作为主线
+
+**结构**: StageA → StageA.5 → StageB 两阶段串联
+
+**问题**: 弱 pseudo signal 在 StageA.5 难以积累，StageB 继承后仍易被稀释。pseudo-only 阶段的 gradient 更新量小，到 joint 阶段容易被 real anchor 的 regularization 抹平。
+
+---
+
+### 4.4 StageB new topology (T1: brpo_joint_v1) [当前拓扑主线]
+
+状态: 当前 topology 主线
+
+**代码位置**:  — joint_topology_mode
+
+**方法**: joint loop，pseudo + real 在同一 iteration 内共同作用
+
+```python
+# 每轮 joint loop
+sample real views
+sample pseudo views
+forward real branch
+forward pseudo branch
+apply pseudo local gating / SPGM scope control
+assemble joint loss: L_total = λ_r * L_real + λ_p * L_pseudo
+backward once
+optimizer.step once
+```
+
+**关键配置**: 
+
+**compare 结果**: new topology = 24.149837 vs old topology = 24.116956 (+0.032881 PSNR)
+
+**关键发现**: T1 的 topology 收益是跨 observation 稳定存在的——pseudo 和 real 在同一 loop 内相互约束，避免了弱信号被单独阶段稀释。
+
+**当前最强候选**: old A1 + new T1 = 24.185846
+
+---
+
+## 5. Gradient Management / SPGM 链路详解（基于代码实现）
+
+### 5.1 No extra Gaussian management [对照]
+
+方法: plain refine baseline，不做额外的 gradient modulation 或 population control。
+
+---
+
+### 5.2 Local gating [可用]
+
+**代码位置**: 
+
+**方法**: view-conditioned gate，pseudo-view signal quality 决定哪些 pseudo views 应贡献
+
+#### Hard Gate（阈值检验）
+
+```python
+if verified_ratio < cfg.min_verified_ratio:      # 阈值检验
+    reasons.append('verified_ratio')
+if rgb_mask_ratio < cfg.min_rgb_mask_ratio:
+    reasons.append('rgb_mask_ratio')
+if fallback_ratio > cfg.max_fallback_ratio:
+    reasons.append('fallback_ratio')
+if min_correction < cfg.min_correction:
+    reasons.append('min_correction')
+
+accepted = len(reasons) == 0
+weight = 1.0 if accepted else 0.0
+```
+
+#### Soft Gate（连续评分）
+
+```python
+components = [
+    soft_component_positive(verified_ratio, cfg.min_verified_ratio),  # 线性 ramp
+    soft_component_positive(rgb_mask_ratio, cfg.min_rgb_mask_ratio),
+    soft_component_negative(fallback_ratio, cfg.max_fallback_ratio),
+]
+base_score = sum(components) / len(components)
+weight = base_score ** cfg.soft_power  # 衰减放大
+```
+
+**数学公式**:
+381835w = \left( \frac{c_1 + c_2 + c_3}{3} \right)^\gamma381835
+
+其中 $ 是各指标的 soft component（线性 ramp）。
+
+**modes**:  /  / 
+
+**角色**: pseudo branch scope controller——决定哪些 pseudo views 应参与当前 iteration。
+
+---
+
+### 5.3 SPGM repair A (dense_keep) [当前anchor]
+
+**代码位置**:  — 
+
+状态: 当前最稳 SPGM policy
+
+#### 核心算法
+
+```python
+if policy_mode == 'dense_keep':
+    selected_mask = active_mask.clone()  # 所有 active Gaussian 保留
+    weights[selected_mask] = base_keep[selected_mask] * cluster_factor
+```
+
+**数学公式**:
+381835w_i = (w_{floor} + (1 - w_{floor}) \cdot s_i^{weight}) \cdot f_{cluster(i)}381835
+
+其中：
+- {floor} = 0.25$: 最小权重下界，防止完全抑制
+- ^{weight}$: 来自 score.py 的 importance score
+- {cluster(i)}$: cluster_factor，, , 
+
+**关键参数**:  (所有 cluster 都 keep), , 
+
+**原理**: keep the active set, weaken over-suppression via soft weighting。所有 active Gaussian 都参与 update，但权重由 importance score + cluster factor 决定。
+
+---
+
+### 5.4 SPGM selector-first [near-parity]
+
+**代码位置**:  — 
+
+状态: near-parity 参考臂，不升级为 anchor
+
+#### 核心算法
+
+```python
+if policy_mode == 'selector_quantile':
+    # 按 cluster 选择 top-k Gaussian
+    for cid in [0, 1, 2]:
+        cluster_mask = active_mask & (cluster_id == cid)
+        cluster_scores = ranking_score[cluster_mask]
+        keep_count = ceil(count * keep_ratio[cid])
+        topk = torch.topk(cluster_scores, k=keep_count, largest=True)
+        selected_mask[cluster_indices[topk.indices]] = True
+    
+    # 对 selected Gaussian 应用权重
+    weights[selected_mask] = base_keep[selected_mask] * cluster_factor
+```
+
+**数学含义**:
+381835\text{Selected}_k = \{i \in C_k : s_i^{ranking} \in \text{top}_{r_k \cdot |C_k|}\}381835
+
+每个 cluster 只保留 top ranking_score 的 Gaussian（selector-first）。
+
+**配置**: , 
+
+**问题**: ranking 质量不足导致误删有用 Gaussian，伤 replay
+
+**保留原因**: 极窄窗口(0.90~0.92)接近 parity，待 ranking 改进后可再探索
+
+---
+
+### 5.5 B1/B2 [已接通]
+
+**代码位置**:  +  + 
+
+状态: manager shell + diagnostics 已接通，不直接改 Gaussian state
+
+#### B1: SPGM 结构拆分
+
+把 SPGM 拆成  两层：
+- **update policy**: 决定 gradient weights（policy.py）
+- **state management**: 决定 population action（manager.py）
+
+新增 ，history 字段包含  / 。
+
+#### B2: Scene-aware Density Proxy + Decoupled Scores
+
+**stats.py 关键输出**:
+
+1. **Support Count Accumulation**
+   ```python
+   support_count = torch.zeros(N, device=device)
+   for view, gate, pkg in zip(sampled_views, gate_results, render_packages):
+       view_weight = float(gate.get('weight', 0.0))
+       vis = pkg.get('visibility_filter')
+       support_count[vis] += view_weight
+   ```
+
+   **数学含义**:
+   381835S_i = \sum_{v \in \text{accepted\_views}} w_v \cdot \mathbb{1}_{visible_v}(i)381835
+
+2. **Weighted Median Depth（向量化实现）**
+   ```python
+   # 按 depth 排序
+   sorted_indices = torch.argsort(depth_masked, dim=0)
+   sorted_weights = ...
+   # cumsum 找中位数位置
+   cum_weights = torch.cumsum(sorted_weights, dim=0)
+   median_indices = torch.argmax(cum_weights >= half_weights)
+   ```
+
+   **数学公式**:
+   381835D_i^{median} = D_k \text{ where } \sum_{j<k} w_j < 0.5 \cdot W_{total} \leq \sum_{j\leq k} w_j381835
+
+   **加速**: 向量化实现 ≈1s/iter，比 Python loop（>5min/iter）快 230x。
+
+3. **Density Proxy**
+   ```python
+   density_proxy = opacity_normalized * support_normalized
+   ```
+
+   **数学含义**:
+   381835\rho_i = \hat{\alpha}_i \cdot \hat{S}_i381835
+
+4. **Struct Density Proxy**
+   ```python
+   gaussian_volume = scaling.prod(dim=1)  # 3D 椭球体积估计
+   struct_density_proxy = (opacity / gaussian_volume) * (1.0 + population_support_norm)
+   ```
+
+   **数学含义**:
+   381835\rho_i^{struct} = \frac{\alpha_i}{V_i} \cdot (1 + \hat{S}_i^{pop})381835
+
+**score.py 关键输出**:
+
+1. **Depth Partition（聚类）**
+   ```python
+   depth_score = 1.0 - (active_depths - z_min) / (z_max - z_min)  # 距离归一化
+   # 按 depth quantile 分成 near/mid/far 三簇
+   ```
+
+   **数学含义**:
+   381835s_i^{depth} = 1 - \frac{D_i - D_{min}}{D_{max} - D_{min}}381835
+
+   near Gaussian 得到更高的 depth_score（通常重建质量更好）。
+
+2. **Density Entropy**
+   ```python
+   entropy = -torch.sum(probs * torch.log(probs + eps))
+   normalized_entropy = entropy / math.log(float(bins))
+   ```
+
+   **数学公式**:
+   381835H_{density} = -\sum_{b=1}^{B} p_b \log p_b / \log B381835
+
+   高熵意味着密度分布均匀（缺乏明显结构）；低熵意味着密度集中（有明确结构）。
+
+3. **Three Decoupled Scores**
+   
+   - **weight_score**: gradient weighting
+     ```python
+     importance_raw = alpha_depth * depth_score + (1 - alpha_depth) * density_score
+     weight_score = importance_raw * support_norm.pow(support_eta)
+     ```
+     
+     **数学公式**:
+     381835s_i^{weight} = (\alpha \cdot s_i^{depth} + (1-\alpha) \cdot s_i^{density}) \cdot \hat{S}_i^\eta381835
+
+   - **ranking_score**: selector ordering（ or ）
+     ```python
+     if ranking_mode == 'support_blend':
+         ranking_score = (1 - λ) * importance_raw + λ * support_norm
+     ```
+     
+   - **state_score**: manager lr scale / opacity attenuation
+     ```python
+     state_score = 0.45 * struct_density_norm + 0.35 * population_support_norm + 0.20 * depth_score
+     ```
+     
+     **数学公式**:
+     381835s_i^{state} = 0.45 \cdot \hat{\rho}_i^{struct} + 0.35 \cdot \hat{S}_i^{pop} + 0.20 \cdot s_i^{depth}381835
+
+---
+
+### 5.6 B3 旧版 (xyz_lr_scale) [降级为diagnostic probe]
+
+**代码位置**:  — 
+
+状态: 降级，不再当主线
+
+#### 核心算法
+
+```python
+xyz_state_scale = _build_xyz_state_scale(cluster_id, active_mask, state_score, base_scales)
+# base_scales = {'near': 1.0, 'mid': 0.95, 'far': 0.90}
+
+mild_state_factor = 0.85 + 0.15 * state_score[mask]
+xyz_state_scale[mask] = base * mild_state_factor  # clamp to [0.75, 1.0]
+
+# Action: 乘到 _xyz.grad
+grad.mul_(xyz_state_scale.unsqueeze(-1))  # post-backward
+```
+
+**数学公式**:
+381835w_i^{xyz} = f_{cluster(i)} \cdot (0.85 + 0.15 \cdot s_i^{state})381835
+
+381835g_i^{xyz} \leftarrow g_i^{xyz} \cdot w_i^{xyz}381835
+
+**问题**:
+- **action 太晚**: 发生在 backward 之后，render participation 已经发生
+- **只改 gradient**: 不改 opacity participation
+- **不是 population manager**: 只是 post-backward grad modulator
+
+**compare 结果**: 40iter compare 为 weak-negative
+
+---
+
+### 5.7 B3 新版 (deterministic_participation) [已接入首轮weak-negative]
+
+**代码位置**:  — 
+
+状态: 已接入 pseudo render 前参与控制，但首轮 compare weak-negative
+
+#### 核心算法
+
+```python
+def _build_participation_render_mask(cluster_id, active_mask, state_score, state_candidate_quantile, keep_ratios):
+    # 1. 构建 candidate mask（低 state_score 的 Gaussian）
+    for cid in [0, 1, 2]:
+        cluster_values = state_score[mask]
+        threshold = torch.quantile(cluster_values, q=state_candidate_quantile)  # q=0.5
+        candidate_mask[mask] = cluster_values <= threshold
+    
+    # 2. 对 candidate subset 按 state_score 保留 top-k
+    for cid in [0, 1, 2]:
+        cluster_candidate = candidate_mask & (cluster_id == cid)
+        keep_ratio = keep_ratios[name]  # near=1.0, mid=0.9, far=0.75
+        keep_count = ceil(count * keep_ratio)
+        topk = torch.topk(state_score[cluster_indices], k=keep_count, largest=True)
+        
+        # 未保留的 Gaussian 设置为 False
+        drop_indices = cluster_indices[~in_keep_set]
+        render_mask[drop_indices] = False
+```
+
+**数学含义**:
+381835\text{Candidate}_k = \{i \in C_k : s_i^{state} \leq Q_{0.5}(s^{state}|C_k)\}381835
+
+381835\text{Drop}_k = \text{Candidate}_k \setminus \text{top}_{r_k \cdot |\text{Candidate}_k|}(s^{state})381835
+
+**输出**: ，用于下一轮 pseudo render 前临时屏蔽低 state_score 的 Gaussian。
+
+**关键差异**:
+- **action 位置**: pre-render（先于 pseudo forward），不是 post-backward
+- **action 对象**: candidate subset（低 state_score），不是全 active set 平均缩放
+- **action 内容**: effective opacity / participation mask，不是 gradient scaling
+
+首轮参数: , , 
+
+compare 结果:  vs  (-0.00323 PSNR)
+
+当前判断: 方法对象已正确切对，但 action 强度需收缩
+
+下一步: 更保守的 participation keep（更小的 drop ratio）
+
+---
+
+## 6. 当前推荐主线配置
+
+### 6.1 固定参照线
+RGB-only v2 + gated_rgb0192 + post40_lr03_120
+
+### 6.2 当前默认候选主线
+old A1 (joint_confidence_v2 + joint_depth_v2)
++ new T1 (joint_topology_mode=brpo_joint_v1)
++ repair A dense_keep
++ bounded StageB (post40_lr03_120)
+
+Re10k 最佳结果: PSNR 24.185846 / SSIM 0.875423 / LPIPS 0.080379
+
+---
+
+## 7. 废弃/降级链路汇总
+
+| 链路 | 状态 | 废弃/降级原因 |
+|------|------|---------------|
+| Legacy depth-first | 废弃 | 被 signal_v2 取代 |
+| full v2 depth branch | 废弃 | verified 约 2%，过窄 |
+| A2 geometry expand | 废弃 | widening 策略失败，-0.286 PSNR |
+| StageA.5 as mainline | 降级 | T1 joint topology 更稳 |
+| old topology | 对照 | new topology 有稳定正增益 |
+| new A1 (joint v1) | 暂不landing | old A1 + new T1 更优 |
+| B3 xyz_lr_scale | 降级 | diagnostic probe，weak-negative |
+| selector-first | near-parity | 极窄窗口接近 parity，不升级 |
+
+---
+
+## 8. 数据集 case 状态
+
+| 数据集 | 当前状态 | 当前主线 |
+|--------|----------|----------|
+| Re10k-1 | A1/T1 收敛，B3 第一版 compare 已完成 | old A1 + new T1 |
+| DL3DV-2 | canonical baseline + repair A 已打通 | 暂未平移新 topology |
+
+---
+
+## 9. 实验历史关键节点
+
+| 日期 | 里程碑 | 结果 |
+|------|--------|------|
+| 2026-04-16 | P2-J bounded StageB schedule | post40_lr03_120 最佳 |
+| 2026-04-17 | P2-S support_blend far-keep | far=0.90 接近 parity |
+| 2026-04-17 | A1 joint confidence compare | A1 优于 control |
+| 2026-04-17 | A1+A2 geometry expand | widening 失败 |
+| 2026-04-18 | B1/B2 manager shell | 已接通 |
+| 2026-04-18 | T1 topology compare | new topology +0.033 PSNR |
+| 2026-04-18 | T1-R3 2x2 factor experiment | old A1 + new T1 最优 |
+| 2026-04-19 | B3-R1 deterministic participation | 已接入，weak-negative |
+
+---
+
+## 10. 参考文档
+
+- 当前状态: docs/STATUS.md
+- 设计原则: docs/DESIGN.md
+- 过程记录: docs/CHANGELOG.md
+- 总规划: docs/BRPO_alignment_unified_RGBD_and_scene_SPGM_plan.md
+- A1 计划: docs/A1_unified_rgbd_joint_confidence_engineering_plan.md
+- T1 计划: docs/T1_brpo_joint_optimization_topology_engineering_plan.md
+- B3 计划: docs/B3_deterministic_state_management_engineering_plan.md
+- archived: docs/archived/
+
+---
+
+## 11. 关键数学方法汇总表
+
+| 模块 | 数学方法 | 公式 | 代码位置 |
+|------|----------|------|----------|
+| RGB Confidence | 几何平均融合 | {rgb} = \sqrt{C_L \cdot C_R}$ | rgb_mask_inference.py |
+| Depth Target | 加权融合 |  = \frac{w_L D_L + w_R D_R}{w_L + w_R}$ | depth_supervision_v2.py |
+| Old A1 Joint | 最小值规则 | {joint} = \min(C_{rgb}, C_{geom})$ | joint_confidence.py |
+| New A1 Joint | 候选竞争 + softmax |  = \frac{e^{s_k/\tau}}{\sum e^{s_{k'}/\tau}}$ | joint_observation.py |
+| A2 Expand | 深度一致性约束 | $|D - D_{seed}|/D_{seed} < \epsilon$ | support_expand.py |
+| StageA Abs Pose | SE(3) log + scaled penalty |  = \lambda_t \rho(||\tau_{trans}||/s) + \lambda_r \rho(||\tau_{rot}||)$ | pseudo_loss_v2.py |
+| SPGM Weight Score | 加权组合 | ^{weight} = (\alpha s^{depth} + (1-\alpha)s^{density}) \cdot \hat{S}^\eta$ | score.py |
+| SPGM State Score | 三因素加权 | ^{state} = 0.45\hat{\rho}^{struct} + 0.35\hat{S}^{pop} + 0.20s^{depth}$ | score.py |
+| SPGM dense_keep | 软权重保留 |  = (w_{floor} + (1-w_{floor})s_i^{weight}) \cdot f_{cluster}$ | policy.py |
+| B3 xyz_lr_scale | 梯度缩放 |  \leftarrow g \cdot f_{cluster} \cdot (0.85 + 0.15s^{state})$ | manager.py |
+| B3 participation | 候选筛选 | Candidate = low state_score, Drop = Candidate \ top_k | manager.py |
+| Local Gating | Soft gate |  = (\bar{c})^\gamma$ | signal_gate.py |

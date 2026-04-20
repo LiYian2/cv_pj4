@@ -2,12 +2,13 @@
 
 > Purpose: a compact source-of-truth for drawing the current Part3 BRPO system.
 > Scope: all pipeline branches as of 2026-04-19, including current mainline, alternate branches, and deprecated/landed branches.
+> Update: 2026-04-19 — 模块详解重写，基于代码级实现与数学原理。
 
 ## 1. One-sentence view
 
-当前默认候选主线：**old A1 + new T1**，即 joint_confidence_v2 + joint_depth_v2 observation + brpo_joint_v1 topology + repair A dense_keep + bounded StageB。
+当前默认候选主线：**old A1 + new T1**，即 `joint_confidence_v2 + joint_depth_v2` observation + `brpo_joint_v1` topology + repair A `dense_keep` + bounded StageB。
 
-主数据流：part2 S3PO full rerun - internal_eval_cache - internal prepare (select / Difix / fusion / verify / pack) - signal branch - refine - replay eval
+主数据流：part2 S3PO full rerun → internal_eval_cache → internal prepare(select / Difix / fusion / verify / pack) → signal branch → refine → replay eval
 
 ---
 
@@ -82,196 +83,336 @@
 
 ---
 
-## 3. 上游信号链路详解
+## 3. 上游信号链路详解（按代码实现）
 
 ### 3.1 Link-1: Legacy depth-first branch [废弃]
-状态: 废弃，仅作历史对照
+状态: 废弃，仅作历史对照。
 
-方法: depth 做 mask 和 depth target，RGB supervision 来自 propagated train-mask semantics
+实现位置: 早期 `pseudo_branch/brpo_depth_target.py` 等旧链路。
 
-废弃原因: 被 signal_v2 取代，depth verified 过窄(约2%)
+方法: depth 先行构 mask/target，RGB supervision 用 propagated semantics。
+
+废弃原因: 被 signal_v2 取代，verified coverage 过窄（~2%）。
 
 ---
 
 ### 3.2 Link-2: signal_v2 RGB-only branch [对照]
-状态: 对照臂，不再作为主线
+状态: 对照臂，不再作为主线。
 
-方法:
-- raw_rgb_confidence_v2: RGB correspondence confidence
-- target_depth_for_refine_v2_brpo: depth target(sidecar)
-- depth verified coverage 约 2%，过窄
+代码位置: `pseudo_branch/brpo_v2_signal/rgb_mask_inference.py` + `depth_supervision_v2.py`
 
-角色: canonical control arm，用于 compare
+#### (A) RGB confidence 构建
+1) 双分支匹配：fused→left/ref, fused→right/ref。  
+2) 把 match 映射到像素，构建 `support_mask/conf_map/match_density`。  
+3) support 分类：
+- `support_both = support_left & support_right`
+- `support_single = support_left ^ support_right`
+
+离散置信度：
+\[
+C_{rgb}(p)=
+\begin{cases}
+1.0,& p\in support_{both}\\
+0.5,& p\in support_{single}\\
+0,& otherwise
+\end{cases}
+\]
+
+连续置信度（双边几何平均）：
+\[
+C^{cont}_{rgb}(p)=\sqrt{C_L(p)\cdot C_R(p)}\quad (p\in support_{both})
+\]
+单边区域直接继承对应分支 confidence。
+
+#### (B) depth target 构建
+`rgb_active = raw_rgb_confidence >= min_rgb_conf_for_depth`（默认 0.5）
+
+双边有效时加权融合：
+\[
+D_{target}(p)=\frac{w_L(p)D_L(p)+w_R(p)D_R(p)}{w_L(p)+w_R(p)}
+\]
+
+单边有效时直接取对应投影深度；双边都无效且 fallback=`render_depth` 时，取 `render_depth(p)`。
+
+source_map 编码：
+- `SOURCE_LEFT=1`
+- `SOURCE_RIGHT=2`
+- `SOURCE_BOTH_WEIGHTED=3`
+- `SOURCE_RENDER_FALLBACK=4`
+- `SOURCE_NONE=0`
+
+输出: `raw_rgb_confidence_v2(.npy/.png)`, `target_depth_for_refine_v2_brpo`, `target_depth_source_map_v2_brpo`。
+
+角色: canonical control arm。
 
 ---
 
-### 3.3 Link-3: old A1 (joint_confidence_v2) [当前observation主线]
-状态: 当前 observation 主线
+### 3.3 Link-3: old A1 (joint_confidence_v2) [当前 observation 主线]
+状态: 当前 observation 主线。
 
-方法: unified RGB-D joint support filter
-- joint_confidence_v2 = min(raw_rgb_confidence, geometry_tier)
-- joint_depth_target_v2 = target_depth_for_refine_v2_brpo(直接复用)
-- mask coverage 约 1.96%
+代码位置: `pseudo_branch/brpo_v2_signal/joint_confidence.py`
 
-设计定位: joint support filter / unified consumer semantics
+先把 geometry source 转成 tier：
+\[
+C_{geom}(p)=
+\begin{cases}
+1.0,& source=both\\
+0.5,& source=left/right\\
+0,& else
+\end{cases}
+\]
 
-关键发现: A1 是 Re10k 上第一条明确优于 sidecar control 的 observation 正信号
+核心 joint 规则：
+\[
+C_{joint}(p)=\min(C_{rgb}(p), C_{geom}(p))
+\]
+
+连续版：
+\[
+C^{cont}_{joint}(p)=C^{cont}_{rgb}(p)\cdot C_{geom}(p)
+\]
+
+`joint_depth_target_v2` 目前直接复用 `target_depth_for_refine_v2_brpo`（不重建）。
+
+定位: **joint support filter**（统一消费域），而不是完整 observation rewrite。  
+覆盖率约 1.96%，但在 Re10k 明确优于 sidecar control。
 
 ---
 
 ### 3.4 Link-4: new A1 (brpo_joint_v1) [已实现暂不landing]
-状态: builder + consumer lock 已完成，但首轮 compare 不占优
+状态: builder + consumer lock 完成；首轮 compare 不占优。
 
-方法: BRPO-style joint observation rewrite
-- pseudo_depth_target_joint_v1: 由 joint candidate competition/fusion 重新生成
-- pseudo_confidence_joint_v1: joint builder 内部定义
-- pseudo_source_map_joint_v1 / pseudo_uncertainty_joint_v1
+代码位置: `pseudo_branch/brpo_v2_signal/joint_observation.py`
 
-与 old A1 的本质差异:
-- old A1: 统一 support 语义，depth target 直接复用旧 target
-- new A1: 统一 observation object，depth target 重新生成
+#### 核心思想
+不是 min-rule，而是「候选竞争 + 软融合」：
+候选集合 `k ∈ {left, right, both_weighted, render_prior}`。
 
-首轮 compare 结果: new A1 + new T1 = 24.135512 vs old A1 + new T1 = 24.185846
-结论: old A1 仍优于 new A1
+每候选 score：
+\[
+s_k(p)=w_aA_k(p)+w_gG_k(p)+w_sS_k(p)+w_pP_k
+\]
+默认权重：`w_a=0.35, w_g=0.35, w_s=0.20, w_p=0.10`。
+
+其中：
+- `A_k`: appearance evidence（来自 `raw_rgb_confidence_cont`）
+- `G_k`: geometry consistency（如 left-right 相对一致性）
+- `S_k`: support strength（both > single > prior）
+- `P_k`: source prior（both_weighted 高，render_prior 低）
+
+softmax 融合深度（温度 τ=0.12）：
+\[
+\pi_k(p)=\frac{\exp(s_k(p)/\tau)\cdot\mathbb{1}_{valid_k(p)}}{\sum_j\exp(s_j(p)/\tau)\cdot\mathbb{1}_{valid_j(p)}}
+\]
+\[
+D_{joint}(p)=\sum_k \pi_k(p) D_k(p)
+\]
+
+joint confidence：
+\[
+C_{joint}(p)=\sqrt{C_{rgb}(p)\cdot C_{depth}(p)}
+\]
+其中 `C_depth` 由 best candidate score 给出。
+
+输出 bundle：
+- `pseudo_depth_target_joint_v1`
+- `pseudo_confidence_joint_v1`
+- `pseudo_confidence_rgb_joint_v1`
+- `pseudo_confidence_depth_joint_v1`
+- `pseudo_uncertainty_joint_v1 = 1 - C_joint`
+- `pseudo_source_map_joint_v1`
+
+与 old A1 差异：old A1 是 support filter；new A1 是 observation object rewrite。
+
+首轮结果：`new A1 + new T1 = 24.135512` vs `old A1 + new T1 = 24.185846`。
 
 ---
 
 ### 3.5 Link-5: A2 geometry-constrained expand [废弃]
-状态: widening 方案失败，不作为主线
+状态: widening 方案失败，不作为主线。
 
-方法: support_expand.py，双侧 geometry-supported expansion
+代码位置: `pseudo_branch/brpo_v2_signal/support_expand.py`
 
-compare 结果: A1+A2 相比 A1 下降 -0.286 PSNR(coverage 从 1.96% 扩到 6.05%)
+步骤：
+1) 从 A1 提取高置信 seed（默认阈值 0.7）。
+2) 迭代膨胀（binary dilation）找候选邻域。
+3) 几何一致性判定：
+\[
+\frac{|D_{cand}(p)-D_{seed-near}(p)|}{\max(D_{seed-near}(p),\epsilon)} < \delta
+\]
+默认 `δ=0.05`。
+4) 按来源赋扩张置信度：both=0.8, single=0.6。
 
-废弃原因: 扩张策略带来过多低质量像素，导致负收益
+结果：coverage 1.96% → 6.05%，但 PSNR 下降 -0.286。  
+结论：扩张引入了过多低质量像素 supervision，负收益。
 
 ---
 
-## 4. Refine Stage 链路详解
+## 4. Refine Stage 链路详解（按代码实现）
 
 ### 4.1 StageA [闭环可用]
-职责: pose/exposure only，不更新 Gaussian
+代码位置: `pseudo_branch/pseudo_loss_v2.py`
 
-关键参数: lambda_abs_t = 3.0 / lambda_abs_r = 0.1，pose residual fold-back 已补回
+总损失（StageA）：
+\[
+L = \beta L_{rgb} + (1-\beta)L_{depth} + \lambda_{pose}L_{pose} + L_{abs} + \lambda_{exp}L_{exp}
+\]
 
-设计判断: StageA-only replay 不是判优指标
+其中：
+- `L_rgb`: masked L1（先做 exposure 校正）
+- `L_depth`: masked L1（可 source-aware 分解）
+- `L_pose`: `||cam_rot_delta|| + t_w ||cam_trans_delta||`
+- `L_exp`: `|exposure_a| + |exposure_b|`
+
+Absolute pose prior（SE(3)）:
+\[
+\Delta T = T_{current}T_0^{-1},\quad \tau=\log_{SE(3)}(\Delta T)=[\rho,\theta]
+\]
+\[
+L_{abs}=\lambda_t\,\rho_{robust}(\|\rho\|/s_{scene}) + \lambda_r\,\rho_{robust}(\|\theta\|)
+\]
+默认参数：`lambda_abs_t=3.0`, `lambda_abs_r=0.1`。
+
+StageA 作用是 pose/exposure 收敛闭环，不是最终 replay 判优主战场。
 
 ---
 
 ### 4.2 StageA.5 [已降级]
-状态: 降级为 optional warmup / control，不再是主线必经阶段
+状态: optional warmup / control。
 
-旧职责: local Gaussian micro-tune，pseudo-only backward
-
-降级原因: T1 joint topology 已证明 pseudo + real 在同一 loop 内更稳定
-
-当前角色: orchestration anchor / 对照臂
+旧职责: pseudo-only local micro-tune。  
+降级原因: 新 topology（T1）中 pseudo+real 同 loop 更稳定，不再依赖 StageA.5 先单独蓄能。
 
 ---
 
 ### 4.3 StageB old topology [对照]
-状态: 对照臂，不再作为主线
+结构: `StageA -> StageA.5 -> StageB`。
 
-结构: StageA - StageA.5 - StageB 两阶段串联
-
-问题: 弱 pseudo signal 在 StageA.5 难以积累，StageB 继承后仍易被稀释
+问题: 弱 pseudo 信号在 StageA.5 难积累；进入 StageB 后易被 real anchor 稀释。
 
 ---
 
 ### 4.4 StageB new topology (T1: brpo_joint_v1) [当前拓扑主线]
-状态: 当前 topology 主线
+方法: joint loop 中同迭代融合 pseudo + real。
 
-方法: joint loop，pseudo + real 在同一 iteration 内共同作用
-- joint_topology_mode=brpo_joint_v1
-- 每轮: sample real/pseudo - forward - apply gating/SPGM - assemble joint loss - backward once - step once
+每轮语义：
+1) sample real/pseudo views  
+2) forward real + pseudo  
+3) apply gating/SPGM（仅控制 pseudo scope）  
+4) assemble joint loss  
+5) backward once + step once
 
-compare 结果: new topology = 24.149837 vs old topology = 24.116956 (+0.032881 PSNR)
+比较：`new topology=24.149837` vs `old topology=24.116956`（+0.032881 PSNR）。
 
-关键发现: T1 的 topology 收益是跨 observation 稳定存在的
-
-当前最强候选: old A1 + new T1 = 24.185846
+关键结论: topology 收益跨 observation 稳定存在。
 
 ---
 
-## 5. Gradient Management / SPGM 链路详解
+## 5. Gradient Management / SPGM 链路详解（按代码实现）
 
 ### 5.1 No extra Gaussian management [对照]
-方法: plain refine baseline
+方法: plain refine baseline。
 
 ---
 
 ### 5.2 Local gating [可用]
-方法: view-conditioned gate，pseudo-view signal quality 决定哪些 pseudo views 应贡献
+代码位置: `pseudo_branch/local_gating/signal_gate.py`
 
-modes: off / hard_visible_union_signal / soft_visible_union_signal
+硬门控（hard）：按阈值筛 view：
+- `verified_ratio >= min_verified_ratio`
+- `rgb_mask_ratio >= min_rgb_mask_ratio`
+- `fallback_ratio <= max_fallback_ratio`
+- `min_correction >= min_correction`
 
-角色: pseudo branch scope controller
+软门控（soft）：
+\[
+w = \left(\frac{c_1+c_2+c_3(+c_4)}{N}\right)^{\gamma}
+\]
+其中 `c_i` 是各指标归一化分量，`γ=soft_power`。
+
+角色: pseudo-view scope controller。
 
 ---
 
 ### 5.3 SPGM repair A (dense_keep) [当前anchor]
-状态: 当前最稳 SPGM policy
+代码位置: `pseudo_branch/spgm/policy.py`
 
-参数: keep = (1,1,1) / eta = 0 / weight_floor = 0.25
+`policy_mode=dense_keep`：所有 active Gaussian 保留，只做软加权。
 
-方法: keep the active set, weaken over-suppression via soft weighting
+\[
+w_i = (w_{floor} + (1-w_{floor})s_i^{weight})\cdot f_{cluster(i)}
+\]
+
+默认 anchor: `weight_floor=0.25`, `keep=(1,1,1)`。
 
 ---
 
 ### 5.4 SPGM selector-first [near-parity]
-状态: near-parity 参考臂，不升级为 anchor
+代码位置: `policy.py` 的 `selector_quantile`
 
-方法: selector_quantile + ranking_mode=support_blend + far_keep 约 0.90
+cluster 内按 `ranking_score` 取 top-k：
+\[
+Selected_k = TopK\big(r_k\cdot |C_k|,\ s^{ranking}|_{C_k}\big)
+\]
 
-问题: ranking 质量不足导致误删有用 Gaussian，伤 replay
-
-保留原因: 极窄窗口(0.90~0.92)接近 parity，待 ranking 改进后可再探索
+当前 near-parity（far_keep≈0.90），但 ranking 误删风险仍在。
 
 ---
 
 ### 5.5 B1/B2 [已接通]
-状态: manager shell + diagnostics 已接通，不直接改 Gaussian state
+代码位置: `spgm/stats.py`, `spgm/score.py`, `spgm/manager.py`
 
-B1: SPGM 结构拆成 update policy + state management 两层
-- 新增 manager.py
-- history 字段: spgm_manager_mode_effective / spgm_state_*
+B1：结构拆分为 `stats -> score -> policy -> manager`。  
+B2：引入 scene-aware proxy 与三分数解耦：
+- `weight_score`（权重）
+- `ranking_score`（排序）
+- `state_score`（状态管理）
 
-B2: scene-aware density proxy + decoupled scores
-- ranking_score: selector ordering
-- weight_score: soft weighting
-- state_score: manager lr scale / opacity attenuation
+#### 关键统计量
+- `support_count`: accepted pseudo support
+- `population_support_count`: current window support
+- `depth_value`: weighted median camera depth（向量化实现）
+- `density_proxy = opacity_norm * support_norm`
+- `struct_density_proxy = (opacity/volume) * (1 + population_support_norm)`
+
+`state_score`（当前实现）:
+\[
+s_i^{state}=0.45\hat\rho_i^{struct}+0.35\hat S_i^{pop}+0.20s_i^{depth}
+\]
 
 ---
 
 ### 5.6 B3 旧版 (xyz_lr_scale) [降级为diagnostic probe]
-状态: 降级，不再当主线
+代码位置: `spgm/manager.py`, `manager_mode=xyz_lr_scale`
 
-方法: post-backward deterministic grad scaling
-- 对 _xyz.grad 再乘一层 state-dependent scale
-- action 发生在 backward 之后，不改变 render participation
+post-backward 动作：
+\[
+g_i^{xyz}\leftarrow g_i^{xyz}\cdot f_{cluster(i)}\cdot(0.85+0.15s_i^{state})
+\]
 
-问题: 方法对象没换，仍是 post-backward grad modulator，不是 population controller
-
-compare 结果: 40iter compare 为 weak-negative
+问题：动作发生在 backward 后，不改变 render participation，本质仍是 grad modulator。
 
 ---
 
 ### 5.7 B3 新版 (deterministic_participation) [已接入首轮weak-negative]
-状态: 已接入 pseudo render 前参与控制，但首轮 compare weak-negative
+代码位置: `spgm/manager.py`, `manager_mode=deterministic_participation`
 
-方法: pre-render participation control
-- manager_mode=deterministic_participation
-- 统计 low-score candidate subset
-- 生成 participation_render_mask 供下一轮 pseudo render 消费
-- action 先于 pseudo render，不是 backward 后救火
+两步：
+1) 每 cluster 选低分候选（state_score 低于分位数阈值）。
+2) 候选中再按 keep ratio 保留 top state_score，其余 drop，形成 `participation_render_mask`。
 
-首轮参数: near=1.0 / mid=0.9 / far=0.75
+形式化：
+\[
+Candidate_k = \{i\in C_k\mid s_i^{state}\le Q_q(s^{state}|C_k)\}
+\]
+\[
+Drop_k = Candidate_k \setminus TopK(r_k\cdot|Candidate_k|, s^{state}|_{Candidate_k})
+\]
 
-compare 结果: b3_det_participation = 24.182511 vs summary_only = 24.185744 (-0.00323 PSNR)
+首轮参数：`near=1.0, mid=0.9, far=0.75`。  
+结果：`24.182511 vs 24.185744`（-0.00323 PSNR）。
 
-当前判断: 方法对象已正确切对，但 action 强度需收缩
-
-下一步: 更保守的 participation keep
+判断：方法对象已切到 pre-render participation control，但当前强度略大，需收缩。
 
 ---
 
@@ -281,12 +422,12 @@ compare 结果: b3_det_participation = 24.182511 vs summary_only = 24.185744 (-0
 RGB-only v2 + gated_rgb0192 + post40_lr03_120
 
 ### 6.2 当前默认候选主线
-old A1 (joint_confidence_v2 + joint_depth_v2)
-+ new T1 (joint_topology_mode=brpo_joint_v1)
-+ repair A dense_keep
-+ bounded StageB (post40_lr03_120)
+old A1 (`joint_confidence_v2 + joint_depth_v2`)
++ new T1 (`joint_topology_mode=brpo_joint_v1`)
++ repair A `dense_keep`
++ bounded StageB (`post40_lr03_120`)
 
-Re10k 最佳结果: PSNR 24.185846 / SSIM 0.875423 / LPIPS 0.080379
+Re10k 最佳结果: `PSNR 24.185846 / SSIM 0.875423 / LPIPS 0.080379`
 
 ---
 
@@ -331,11 +472,27 @@ Re10k 最佳结果: PSNR 24.185846 / SSIM 0.875423 / LPIPS 0.080379
 
 ## 10. 参考文档
 
-- 当前状态: docs/STATUS.md
-- 设计原则: docs/DESIGN.md
-- 过程记录: docs/CHANGELOG.md
-- 总规划: docs/BRPO_alignment_unified_RGBD_and_scene_SPGM_plan.md
-- A1 计划: docs/A1_unified_rgbd_joint_confidence_engineering_plan.md
-- T1 计划: docs/T1_brpo_joint_optimization_topology_engineering_plan.md
-- B3 计划: docs/B3_deterministic_state_management_engineering_plan.md
-- archived: docs/archived/
+- 当前状态: `docs/STATUS.md`
+- 设计原则: `docs/DESIGN.md`
+- 过程记录: `docs/CHANGELOG.md`
+- 总规划: `docs/BRPO_alignment_unified_RGBD_and_scene_SPGM_plan.md`
+- A1 计划: `docs/A1_unified_rgbd_joint_confidence_engineering_plan.md`
+- T1 计划: `docs/T1_brpo_joint_optimization_topology_engineering_plan.md`
+- B3 计划: `docs/B3_deterministic_state_management_engineering_plan.md`
+- archived: `docs/archived/`
+
+---
+
+## 11. 关键数学方法速查
+
+| 模块 | 核心公式 | 代码位置 |
+|------|----------|----------|
+| RGB continuous confidence | $\sqrt{C_L\cdot C_R}$ | `rgb_mask_inference.py` |
+| Depth weighted fusion | $\frac{w_LD_L+w_RD_R}{w_L+w_R}$ | `depth_supervision_v2.py` |
+| old A1 joint | $\min(C_{rgb},C_{geom})$ | `joint_confidence.py` |
+| new A1 depth fusion | $D=\sum_k\pi_k D_k$ | `joint_observation.py` |
+| StageA abs pose prior | $\lambda_t\rho(\|\rho\|/s)+\lambda_r\rho(\|\theta\|)$ | `pseudo_loss_v2.py` |
+| SPGM weight score | $(\alpha s^{depth}+(1-\alpha)s^{density})\hat S^\eta$ | `score.py` |
+| SPGM state score | $0.45\hat\rho^{struct}+0.35\hat S^{pop}+0.20s^{depth}$ | `score.py` |
+| B3 old | $g\leftarrow g\cdot f_{cluster}(0.85+0.15s^{state})$ | `manager.py` |
+| B3 new | candidate quantile + keep-ratio top-k | `manager.py` |
