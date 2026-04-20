@@ -32,9 +32,17 @@ from pseudo_branch.brpo_v2_signal.pseudo_observation_brpo_style import (
     build_brpo_direct_observation,
     build_brpo_style_observation,
     build_brpo_style_observation_v2,
+    build_exact_brpo_cm_hybrid_target_observation,
+    build_exact_brpo_cm_old_target_observation,
+    build_exact_brpo_cm_stable_target_observation,
+    build_exact_brpo_full_target_observation,
     write_brpo_direct_observation_outputs,
     write_brpo_style_observation_outputs,
     write_brpo_style_observation_outputs_v2,
+    write_exact_brpo_cm_hybrid_target_observation_outputs,
+    write_exact_brpo_cm_old_target_observation_outputs,
+    write_exact_brpo_cm_stable_target_observation_outputs,
+    write_exact_brpo_full_target_observation_outputs,
 )
 from pseudo_branch.brpo_v2_signal.support_expand import (
     build_support_expand_from_a1,
@@ -384,6 +392,123 @@ def main():
         }
         write_brpo_direct_observation_outputs(frame_out, brpo_direct_result, brpo_direct_meta)
 
+        exact_brpo_cm_old_target_result = build_exact_brpo_cm_old_target_observation(
+            support_left=rgb_result['support_left'],
+            support_right=rgb_result['support_right'],
+            target_depth_for_refine_v2_brpo=depth_result['target_depth_for_refine_v2_brpo'],
+            target_depth_source_map_v2_brpo=depth_result['target_depth_source_map_v2_brpo'],
+        )
+        exact_brpo_cm_old_target_meta = {
+            "frame_id": frame_id,
+            "image_name": image_name,
+            "summary": exact_brpo_cm_old_target_result["summary"],
+            "inputs": {
+                "target_rgb_fused_path": str(fused_rgb_path),
+                "rgb_support_left_path": str(frame_out / 'rgb_support_left_v2.npy'),
+                "rgb_support_right_path": str(frame_out / 'rgb_support_right_v2.npy'),
+                "target_depth_for_refine_v2_brpo_path": str(frame_out / 'target_depth_for_refine_v2_brpo.npy'),
+                "target_depth_source_map_v2_brpo_path": str(frame_out / 'target_depth_source_map_v2_brpo.npy'),
+            },
+            "signal_pipeline": "exact_brpo_cm_old_target_v1",
+            "consumer_contract": {
+                "pseudo_observation_mode": "exact_brpo_cm_old_target_v1",
+                "shared_confidence": "pseudo_confidence_exact_brpo_cm_old_target_v1",
+                "depth_target": "pseudo_depth_target_exact_brpo_cm_old_target_v1",
+                "source_map": "pseudo_source_map_exact_brpo_cm_old_target_v1",
+                "strict_brpo_scope": "cm_only",
+            },
+        }
+        write_exact_brpo_cm_old_target_observation_outputs(frame_out, exact_brpo_cm_old_target_result, exact_brpo_cm_old_target_meta)
+
+        exact_brpo_full_target_result = build_exact_brpo_full_target_observation(
+            support_left=rgb_result['support_left'],
+            support_right=rgb_result['support_right'],
+            projected_depth_left=projected_depth_left,
+            projected_depth_right=projected_depth_right,
+            fusion_weight_left=fusion_weight_left,
+            fusion_weight_right=fusion_weight_right,
+        )
+        exact_brpo_full_target_meta = {
+            "frame_id": frame_id,
+            "image_name": image_name,
+            "summary": exact_brpo_full_target_result["summary"],
+            "inputs": {
+                "target_rgb_fused_path": str(fused_rgb_path),
+                "rgb_support_left_path": str(frame_out / 'rgb_support_left_v2.npy'),
+                "rgb_support_right_path": str(frame_out / 'rgb_support_right_v2.npy'),
+                "projected_depth_left_path": str(fused_root / 'projected_depth_left.npy'),
+                "projected_depth_right_path": str(fused_root / 'projected_depth_right.npy'),
+                "fusion_weight_left_path": str(fused_root / 'fusion_weight_left.npy'),
+                "fusion_weight_right_path": str(fused_root / 'fusion_weight_right.npy'),
+            },
+            "signal_pipeline": "exact_brpo_full_target_v1",
+            "consumer_contract": {
+                "pseudo_observation_mode": "exact_brpo_full_target_v1",
+                "shared_confidence": "pseudo_confidence_exact_brpo_full_target_v1",
+                "depth_target": "pseudo_depth_target_exact_brpo_full_target_v1",
+                "source_map": "pseudo_source_map_exact_brpo_full_target_v1",
+                "strict_brpo_scope": "cm_and_target",
+                "recommended_stageA_depth_loss_mode": "legacy",
+            },
+        }
+        write_exact_brpo_full_target_observation_outputs(frame_out, exact_brpo_full_target_result, exact_brpo_full_target_meta)
+
+        exact_brpo_cm_hybrid_target_result = build_exact_brpo_cm_hybrid_target_observation(
+            support_left=rgb_result['support_left'],
+            support_right=rgb_result['support_right'],
+            hybrid_depth_target=brpo_direct_result['pseudo_depth_target_brpo_direct_v1'],
+            hybrid_source_map=brpo_direct_result['pseudo_source_map_brpo_direct_v1'],
+        )
+        exact_brpo_cm_hybrid_target_meta = {
+            "frame_id": frame_id,
+            "image_name": image_name,
+            "summary": exact_brpo_cm_hybrid_target_result["summary"],
+            "inputs": {
+                "target_rgb_fused_path": str(fused_rgb_path),
+                "rgb_support_left_path": str(frame_out / 'rgb_support_left_v2.npy'),
+                "rgb_support_right_path": str(frame_out / 'rgb_support_right_v2.npy'),
+                "hybrid_depth_target_path": str(frame_out / 'pseudo_depth_target_brpo_direct_v1.npy'),
+                "hybrid_source_map_path": str(frame_out / 'pseudo_source_map_brpo_direct_v1.npy'),
+            },
+            "signal_pipeline": "exact_brpo_cm_hybrid_target_v1",
+            "consumer_contract": {
+                "pseudo_observation_mode": "exact_brpo_cm_hybrid_target_v1",
+                "shared_confidence": "pseudo_confidence_exact_brpo_cm_hybrid_target_v1",
+                "depth_target": "pseudo_depth_target_exact_brpo_cm_hybrid_target_v1",
+                "source_map": "pseudo_source_map_exact_brpo_cm_hybrid_target_v1",
+                "strict_brpo_scope": "cm_only",
+            },
+        }
+        write_exact_brpo_cm_hybrid_target_observation_outputs(frame_out, exact_brpo_cm_hybrid_target_result, exact_brpo_cm_hybrid_target_meta)
+
+        exact_brpo_cm_stable_target_result = build_exact_brpo_cm_stable_target_observation(
+            support_left=rgb_result['support_left'],
+            support_right=rgb_result['support_right'],
+            stable_depth_target=brpo_style_result_v2['pseudo_depth_target_brpo_style_v2'],
+            stable_source_map=brpo_style_result_v2['pseudo_source_map_brpo_style_v2'],
+        )
+        exact_brpo_cm_stable_target_meta = {
+            "frame_id": frame_id,
+            "image_name": image_name,
+            "summary": exact_brpo_cm_stable_target_result["summary"],
+            "inputs": {
+                "target_rgb_fused_path": str(fused_rgb_path),
+                "rgb_support_left_path": str(frame_out / 'rgb_support_left_v2.npy'),
+                "rgb_support_right_path": str(frame_out / 'rgb_support_right_v2.npy'),
+                "stable_depth_target_path": str(frame_out / 'pseudo_depth_target_brpo_style_v2.npy'),
+                "stable_source_map_path": str(frame_out / 'pseudo_source_map_brpo_style_v2.npy'),
+            },
+            "signal_pipeline": "exact_brpo_cm_stable_target_v1",
+            "consumer_contract": {
+                "pseudo_observation_mode": "exact_brpo_cm_stable_target_v1",
+                "shared_confidence": "pseudo_confidence_exact_brpo_cm_stable_target_v1",
+                "depth_target": "pseudo_depth_target_exact_brpo_cm_stable_target_v1",
+                "source_map": "pseudo_source_map_exact_brpo_cm_stable_target_v1",
+                "strict_brpo_scope": "cm_only",
+            },
+        }
+        write_exact_brpo_cm_stable_target_observation_outputs(frame_out, exact_brpo_cm_stable_target_result, exact_brpo_cm_stable_target_meta)
+
         # A2: geometry-constrained support expansion (optional)
         expand_result = None
         expand_meta = None
@@ -418,6 +543,10 @@ def main():
             "brpo_style_observation_summary": brpo_style_result["summary"],
             "brpo_style_observation_v2_summary": brpo_style_result_v2["summary"],
             "brpo_direct_observation_summary": brpo_direct_result["summary"],
+            "exact_brpo_cm_old_target_summary": exact_brpo_cm_old_target_result["summary"],
+            "exact_brpo_full_target_summary": exact_brpo_full_target_result["summary"],
+            "exact_brpo_cm_hybrid_target_summary": exact_brpo_cm_hybrid_target_result["summary"],
+            "exact_brpo_cm_stable_target_summary": exact_brpo_cm_stable_target_result["summary"],
         }
         if expand_meta:
             frame_summary["expand_summary"] = expand_meta["final_summary"]
@@ -440,6 +569,9 @@ def main():
         "brpo_style_observation_version": "brpo_style_v1",
         "brpo_style_observation_v2_version": "brpo_style_v2",
         "brpo_direct_observation_version": "brpo_direct_v1",
+        "exact_brpo_cm_old_target_version": "exact_brpo_cm_old_target_v1",
+        "exact_brpo_cm_hybrid_target_version": "exact_brpo_cm_hybrid_target_v1",
+        "exact_brpo_cm_stable_target_version": "exact_brpo_cm_stable_target_v1",
         "num_frames": len(summary),
     }
     if args.use_a2_expand:

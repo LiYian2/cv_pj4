@@ -65,6 +65,209 @@ def _blend_with_stable_target(
     return out
 
 
+
+def _build_exact_brpo_cm_support_sets(
+    support_left: np.ndarray,
+    support_right: np.ndarray,
+) -> Dict[str, np.ndarray]:
+    support_left = _normalize(support_left) > 0.5
+    support_right = _normalize(support_right) > 0.5
+    verify_both = support_left & support_right
+    verify_left_only = support_left & (~support_right)
+    verify_right_only = support_right & (~support_left)
+    verify_xor = verify_left_only | verify_right_only
+    verify_union = support_left | support_right
+
+    confidence = np.zeros_like(support_left, dtype=np.float32)
+    confidence[verify_both] = 1.0
+    confidence[verify_xor] = 0.5
+    return {
+        'support_left': support_left,
+        'support_right': support_right,
+        'verify_both': verify_both,
+        'verify_left_only': verify_left_only,
+        'verify_right_only': verify_right_only,
+        'verify_xor': verify_xor,
+        'verify_union': verify_union,
+        'confidence': confidence.astype(np.float32),
+    }
+
+
+def _build_exact_brpo_cm_observation_with_target(
+    version: str,
+    support_left: np.ndarray,
+    support_right: np.ndarray,
+    depth_target: np.ndarray,
+    source_map: np.ndarray,
+    depth_target_rule: str,
+    strict_scope: str = 'cm_only',
+) -> Dict[str, np.ndarray | Dict]:
+    verify = _build_exact_brpo_cm_support_sets(support_left=support_left, support_right=support_right)
+    depth_target = np.asarray(depth_target, dtype=np.float32)
+    source_map = np.asarray(source_map, dtype=np.int16)
+    confidence = verify['confidence'].astype(np.float32)
+    valid_mask = verify['verify_union'].astype(np.float32)
+
+    summary = {
+        'valid_ratio': float(valid_mask.mean()),
+        'cm_nonzero_ratio': float((confidence > 0).mean()),
+        'cm_mean_positive': float(confidence[confidence > 0].mean()) if (confidence > 0).any() else 0.0,
+        'cm_both_ratio': float(verify['verify_both'].mean()),
+        'cm_single_ratio': float(verify['verify_xor'].mean()),
+        'verify_left_ratio': float(verify['support_left'].mean()),
+        'verify_right_ratio': float(verify['support_right'].mean()),
+        'depth_target_nonzero_ratio': float((depth_target > 1e-6).mean()),
+        'source_left_ratio': float((source_map == SOURCE_LEFT).mean()),
+        'source_right_ratio': float((source_map == SOURCE_RIGHT).mean()),
+        'source_both_ratio': float((source_map == SOURCE_BOTH_WEIGHTED).mean()),
+        'policy': {
+            'version': version,
+            'confidence_rule': 'strict BRPO-style C_m from fused pseudo-frame correspondence support sets only: both->1.0 xor->0.5 none->0.0',
+            'depth_target_rule': depth_target_rule,
+            'strict_brpo_scope': strict_scope,
+            'target_confidence_same_source': False,
+        },
+    }
+
+    return {
+        f'pseudo_depth_target_{version}': depth_target.astype(np.float32),
+        f'pseudo_confidence_{version}': confidence.astype(np.float32),
+        f'pseudo_source_map_{version}': source_map.astype(np.int16),
+        f'pseudo_valid_mask_{version}': valid_mask.astype(np.float32),
+        f'pseudo_verify_left_{version}': verify['support_left'].astype(np.float32),
+        f'pseudo_verify_right_{version}': verify['support_right'].astype(np.float32),
+        f'pseudo_verify_both_{version}': verify['verify_both'].astype(np.float32),
+        f'pseudo_verify_xor_{version}': verify['verify_xor'].astype(np.float32),
+        f'pseudo_verify_union_{version}': verify['verify_union'].astype(np.float32),
+        'summary': summary,
+    }
+
+
+def build_exact_brpo_cm_old_target_observation(
+    support_left: np.ndarray,
+    support_right: np.ndarray,
+    target_depth_for_refine_v2_brpo: np.ndarray,
+    target_depth_source_map_v2_brpo: np.ndarray,
+) -> Dict[str, np.ndarray | Dict]:
+    return _build_exact_brpo_cm_observation_with_target(
+        version='exact_brpo_cm_old_target_v1',
+        support_left=support_left,
+        support_right=support_right,
+        depth_target=target_depth_for_refine_v2_brpo,
+        source_map=target_depth_source_map_v2_brpo,
+        depth_target_rule='reuse target_depth_for_refine_v2_brpo and target_depth_source_map_v2_brpo; strict BRPO alignment applies to C_m only',
+    )
+
+
+def build_exact_brpo_cm_hybrid_target_observation(
+    support_left: np.ndarray,
+    support_right: np.ndarray,
+    hybrid_depth_target: np.ndarray,
+    hybrid_source_map: np.ndarray,
+) -> Dict[str, np.ndarray | Dict]:
+    return _build_exact_brpo_cm_observation_with_target(
+        version='exact_brpo_cm_hybrid_target_v1',
+        support_left=support_left,
+        support_right=support_right,
+        depth_target=hybrid_depth_target,
+        source_map=hybrid_source_map,
+        depth_target_rule='reuse current hybrid brpo_direct_v1 target/source_map so the ablation isolates exact C_m vs hybrid geometry-gated C_m',
+    )
+
+
+def build_exact_brpo_cm_stable_target_observation(
+    support_left: np.ndarray,
+    support_right: np.ndarray,
+    stable_depth_target: np.ndarray,
+    stable_source_map: np.ndarray,
+) -> Dict[str, np.ndarray | Dict]:
+    return _build_exact_brpo_cm_observation_with_target(
+        version='exact_brpo_cm_stable_target_v1',
+        support_left=support_left,
+        support_right=support_right,
+        depth_target=stable_depth_target,
+        source_map=stable_source_map,
+        depth_target_rule='reuse brpo_style_v2 stable-target blend depth/source contract so the ablation isolates exact C_m from fallback/stabilization effects',
+    )
+
+
+def build_exact_brpo_full_target_observation(
+    support_left: np.ndarray,
+    support_right: np.ndarray,
+    projected_depth_left: np.ndarray,
+    projected_depth_right: np.ndarray,
+    fusion_weight_left: np.ndarray,
+    fusion_weight_right: np.ndarray,
+) -> Dict[str, np.ndarray | Dict]:
+    verify = _build_exact_brpo_cm_support_sets(support_left=support_left, support_right=support_right)
+    projected_depth_left = np.asarray(projected_depth_left, dtype=np.float32)
+    projected_depth_right = np.asarray(projected_depth_right, dtype=np.float32)
+    fusion_weight_left = np.asarray(fusion_weight_left, dtype=np.float32)
+    fusion_weight_right = np.asarray(fusion_weight_right, dtype=np.float32)
+
+    confidence = verify['confidence'].astype(np.float32)
+    valid_mask = verify['verify_union'].astype(np.float32)
+
+    left_available = projected_depth_left > 1e-6
+    right_available = projected_depth_right > 1e-6
+
+    both_weight_sum = np.maximum(fusion_weight_left + fusion_weight_right, 1e-8)
+    both_available = verify['verify_both'] & left_available & right_available
+    left_from_both_only = verify['verify_both'] & left_available & (~right_available)
+    right_from_both_only = verify['verify_both'] & right_available & (~left_available)
+    left_single = verify['verify_left_only'] & left_available
+    right_single = verify['verify_right_only'] & right_available
+
+    depth_target = np.zeros_like(projected_depth_left, dtype=np.float32)
+    depth_target[both_available] = (
+        fusion_weight_left[both_available] * projected_depth_left[both_available]
+        + fusion_weight_right[both_available] * projected_depth_right[both_available]
+    ) / both_weight_sum[both_available]
+    depth_target[left_from_both_only | left_single] = projected_depth_left[left_from_both_only | left_single]
+    depth_target[right_from_both_only | right_single] = projected_depth_right[right_from_both_only | right_single]
+
+    source_map = np.full_like(projected_depth_left, fill_value=SOURCE_NONE, dtype=np.int16)
+    source_map[left_from_both_only | left_single] = SOURCE_LEFT
+    source_map[right_from_both_only | right_single] = SOURCE_RIGHT
+    source_map[both_available] = SOURCE_BOTH_WEIGHTED
+
+    summary = {
+        'valid_ratio': float(valid_mask.mean()),
+        'cm_nonzero_ratio': float((confidence > 0).mean()),
+        'cm_mean_positive': float(confidence[confidence > 0].mean()) if (confidence > 0).any() else 0.0,
+        'cm_both_ratio': float(verify['verify_both'].mean()),
+        'cm_single_ratio': float(verify['verify_xor'].mean()),
+        'verify_left_ratio': float(verify['support_left'].mean()),
+        'verify_right_ratio': float(verify['support_right'].mean()),
+        'depth_target_nonzero_ratio': float((depth_target > 1e-6).mean()),
+        'depth_target_nonzero_within_cm_ratio': float((depth_target[verify['verify_union']] > 1e-6).mean()) if verify['verify_union'].any() else 0.0,
+        'source_left_ratio': float((source_map == SOURCE_LEFT).mean()),
+        'source_right_ratio': float((source_map == SOURCE_RIGHT).mean()),
+        'source_both_ratio': float((source_map == SOURCE_BOTH_WEIGHTED).mean()),
+        'source_none_ratio': float((source_map == SOURCE_NONE).mean()),
+        'policy': {
+            'version': 'exact_brpo_full_target_v1',
+            'confidence_rule': 'strict BRPO-style C_m from fused pseudo-frame correspondence support sets only: both->1.0 xor->0.5 none->0.0',
+            'depth_target_rule': 'strict BRPO target-side proxy: direct projected-depth composition under exact C_m support sets with fusion weights in both-supported regions, no stable-target blending and no old render-fallback contract',
+            'strict_brpo_scope': 'cm_and_target',
+            'target_confidence_same_source': True,
+            'recommended_stageA_depth_loss_mode': 'legacy',
+        },
+    }
+
+    return {
+        'pseudo_depth_target_exact_brpo_full_target_v1': depth_target.astype(np.float32),
+        'pseudo_confidence_exact_brpo_full_target_v1': confidence.astype(np.float32),
+        'pseudo_source_map_exact_brpo_full_target_v1': source_map.astype(np.int16),
+        'pseudo_valid_mask_exact_brpo_full_target_v1': valid_mask.astype(np.float32),
+        'pseudo_verify_left_exact_brpo_full_target_v1': verify['support_left'].astype(np.float32),
+        'pseudo_verify_right_exact_brpo_full_target_v1': verify['support_right'].astype(np.float32),
+        'pseudo_verify_both_exact_brpo_full_target_v1': verify['verify_both'].astype(np.float32),
+        'pseudo_verify_xor_exact_brpo_full_target_v1': verify['verify_xor'].astype(np.float32),
+        'pseudo_verify_union_exact_brpo_full_target_v1': verify['verify_union'].astype(np.float32),
+        'summary': summary,
+    }
+
 def build_brpo_style_observation(
     support_left: np.ndarray,
     support_right: np.ndarray,
@@ -362,8 +565,10 @@ def build_brpo_direct_observation(
         'overlap_conf_right_mean_verified': float(overlap_conf_right[valid_right].mean()) if valid_right.any() else 0.0,
         'policy': {
             'version': 'brpo_direct_v1',
-            'confidence_rule': 'shared C_m from fused-frame reciprocal correspondence sets gated by projected-depth overlap validity: both->1.0 xor->0.5 none->0.0',
-            'depth_target_rule': 'projected depth composed directly from per-side overlap confidence weights under the same verified support sets',
+            'semantic_label': 'hybrid_brpo_cm_geo_v1',
+            'strict_brpo': False,
+            'confidence_rule': 'hybrid C_m: fused-frame support sets additionally gated by overlap validity and overlap-confidence / projected-depth availability',
+            'depth_target_rule': 'projected depth composed directly from per-side overlap confidence weights under the same geometry-gated support sets',
             'target_confidence_same_source': True,
             'fusion_weight_source': 'overlap_conf_left/right',
         },
@@ -450,30 +655,51 @@ def write_brpo_style_observation_outputs_v2(frame_out: Path, result: Dict, meta:
 
 
 
-def write_brpo_direct_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
+
+def _write_basic_observation_outputs(frame_out: Path, result: Dict, meta: Dict, prefix: str, meta_filename: str):
     frame_out.mkdir(parents=True, exist_ok=True)
     diag_dir = frame_out / 'diag'
     diag_dir.mkdir(parents=True, exist_ok=True)
 
-    np.save(frame_out / 'pseudo_depth_target_brpo_direct_v1.npy', result['pseudo_depth_target_brpo_direct_v1'])
-    np.save(frame_out / 'pseudo_confidence_brpo_direct_v1.npy', result['pseudo_confidence_brpo_direct_v1'])
-    np.save(frame_out / 'pseudo_source_map_brpo_direct_v1.npy', result['pseudo_source_map_brpo_direct_v1'])
-    np.save(frame_out / 'pseudo_valid_mask_brpo_direct_v1.npy', result['pseudo_valid_mask_brpo_direct_v1'])
-    np.save(diag_dir / 'pseudo_verify_left_brpo_direct_v1.npy', result['pseudo_verify_left_brpo_direct_v1'])
-    np.save(diag_dir / 'pseudo_verify_right_brpo_direct_v1.npy', result['pseudo_verify_right_brpo_direct_v1'])
-    np.save(diag_dir / 'pseudo_verify_both_brpo_direct_v1.npy', result['pseudo_verify_both_brpo_direct_v1'])
-    np.save(diag_dir / 'pseudo_verify_xor_brpo_direct_v1.npy', result['pseudo_verify_xor_brpo_direct_v1'])
-    np.save(diag_dir / 'pseudo_verify_union_brpo_direct_v1.npy', result['pseudo_verify_union_brpo_direct_v1'])
+    np.save(frame_out / f'pseudo_depth_target_{prefix}.npy', result[f'pseudo_depth_target_{prefix}'])
+    np.save(frame_out / f'pseudo_confidence_{prefix}.npy', result[f'pseudo_confidence_{prefix}'])
+    np.save(frame_out / f'pseudo_source_map_{prefix}.npy', result[f'pseudo_source_map_{prefix}'])
+    np.save(frame_out / f'pseudo_valid_mask_{prefix}.npy', result[f'pseudo_valid_mask_{prefix}'])
+    np.save(diag_dir / f'pseudo_verify_left_{prefix}.npy', result[f'pseudo_verify_left_{prefix}'])
+    np.save(diag_dir / f'pseudo_verify_right_{prefix}.npy', result[f'pseudo_verify_right_{prefix}'])
+    np.save(diag_dir / f'pseudo_verify_both_{prefix}.npy', result[f'pseudo_verify_both_{prefix}'])
+    np.save(diag_dir / f'pseudo_verify_xor_{prefix}.npy', result[f'pseudo_verify_xor_{prefix}'])
+    np.save(diag_dir / f'pseudo_verify_union_{prefix}.npy', result[f'pseudo_verify_union_{prefix}'])
 
-    _save_float_png(result['pseudo_depth_target_brpo_direct_v1'], frame_out / 'pseudo_depth_target_brpo_direct_v1.png')
-    _save_float_png(result['pseudo_confidence_brpo_direct_v1'], frame_out / 'pseudo_confidence_brpo_direct_v1.png', vmax=1.0)
-    _save_source_map_png(result['pseudo_source_map_brpo_direct_v1'], frame_out / 'pseudo_source_map_brpo_direct_v1.png')
-    _save_mask_png(result['pseudo_valid_mask_brpo_direct_v1'], frame_out / 'pseudo_valid_mask_brpo_direct_v1.png')
-    _save_mask_png(result['pseudo_verify_left_brpo_direct_v1'], diag_dir / 'pseudo_verify_left_brpo_direct_v1.png')
-    _save_mask_png(result['pseudo_verify_right_brpo_direct_v1'], diag_dir / 'pseudo_verify_right_brpo_direct_v1.png')
-    _save_mask_png(result['pseudo_verify_both_brpo_direct_v1'], diag_dir / 'pseudo_verify_both_brpo_direct_v1.png')
-    _save_mask_png(result['pseudo_verify_xor_brpo_direct_v1'], diag_dir / 'pseudo_verify_xor_brpo_direct_v1.png')
-    _save_mask_png(result['pseudo_verify_union_brpo_direct_v1'], diag_dir / 'pseudo_verify_union_brpo_direct_v1.png')
+    _save_float_png(result[f'pseudo_depth_target_{prefix}'], frame_out / f'pseudo_depth_target_{prefix}.png')
+    _save_float_png(result[f'pseudo_confidence_{prefix}'], frame_out / f'pseudo_confidence_{prefix}.png', vmax=1.0)
+    _save_source_map_png(result[f'pseudo_source_map_{prefix}'], frame_out / f'pseudo_source_map_{prefix}.png')
+    _save_mask_png(result[f'pseudo_valid_mask_{prefix}'], frame_out / f'pseudo_valid_mask_{prefix}.png')
+    _save_mask_png(result[f'pseudo_verify_left_{prefix}'], diag_dir / f'pseudo_verify_left_{prefix}.png')
+    _save_mask_png(result[f'pseudo_verify_right_{prefix}'], diag_dir / f'pseudo_verify_right_{prefix}.png')
+    _save_mask_png(result[f'pseudo_verify_both_{prefix}'], diag_dir / f'pseudo_verify_both_{prefix}.png')
+    _save_mask_png(result[f'pseudo_verify_xor_{prefix}'], diag_dir / f'pseudo_verify_xor_{prefix}.png')
+    _save_mask_png(result[f'pseudo_verify_union_{prefix}'], diag_dir / f'pseudo_verify_union_{prefix}.png')
 
-    with open(frame_out / 'brpo_direct_observation_meta_v1.json', 'w', encoding='utf-8') as f:
+    with open(frame_out / meta_filename, 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2)
+
+
+def write_exact_brpo_cm_old_target_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
+    _write_basic_observation_outputs(frame_out, result, meta, 'exact_brpo_cm_old_target_v1', 'exact_brpo_cm_old_target_meta_v1.json')
+
+
+def write_exact_brpo_cm_hybrid_target_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
+    _write_basic_observation_outputs(frame_out, result, meta, 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_hybrid_target_meta_v1.json')
+
+
+def write_exact_brpo_cm_stable_target_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
+    _write_basic_observation_outputs(frame_out, result, meta, 'exact_brpo_cm_stable_target_v1', 'exact_brpo_cm_stable_target_meta_v1.json')
+
+
+def write_exact_brpo_full_target_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
+    _write_basic_observation_outputs(frame_out, result, meta, 'exact_brpo_full_target_v1', 'exact_brpo_full_target_meta_v1.json')
+
+
+def write_brpo_direct_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
+    _write_basic_observation_outputs(frame_out, result, meta, 'brpo_direct_v1', 'brpo_direct_observation_meta_v1.json')

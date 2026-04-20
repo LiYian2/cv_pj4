@@ -16,24 +16,26 @@
 当前固定参照线仍是：**RGB-only v2 + gated_rgb0192 + post40_lr03_120**（canonical StageB protocol）。
 
 A/T/B 主线现在更明确了：
-- **old A1** 仍是当前 observation 主线
+- **old A1** 仍是当前 observation control
 - **new T1**（`joint_topology_mode=brpo_joint_v1`）仍是当前 topology 主线
 - **A1 verify proxy（`brpo_verify_v1`）已完成 negative proof，不再是当前执行方向**
 - **A1 BRPO-style v1 / v2 都已完成 builder + consumer + formal compare，但都只是过渡 probe，不是当前落地主线**
-- **A1 direct BRPO v1（`brpo_direct_v1`）已完成 builder + consumer + formal compare；它是当前 A1 里最接近“直接 BRPO 语义”的已落地版本，也是当前最值得继续的 A1 研究线**
+- **历史 `brpo_direct_v1` 已被重新定性为 hybrid 分支**：它应被理解为 `hybrid_brpo_cm_geo_v1`，不是 strict BRPO
+- **strict BRPO 对齐的关键新结论已经拿到**：`exact_brpo_cm_old_target_v1` 与 `old A1` 基本等价，说明当前主要瓶颈已经从 `C_m` 转移到 target / fallback / stabilization contract
+- **exact BRPO target-side compare 也已经补完**：`exact_brpo_full_target_v1`（strict `C_m` + exact BRPO-style target-side proxy + shared-`C_m` depth loss）只有 `24.174488`，仍约 `-0.01325 PSNR` 低于 old A1，且几乎与 `exact_brpo_cm_hybrid_target_v1` 持平
 - **B3 deterministic participation** 与 **B3 delayed deterministic opacity participation** 都已完成 C1 compare；当前仍是 weak-negative / no-go，暂不进入 O2a/b
 - **StageA.5** 继续只保留 optional warmup / control 地位
 
-一句话判断：**当前 Re10k 默认候选主线仍是 `old A1 + new T1`。A1 方向已经从 verify proxy / style-v1/v2 进一步推进到 `brpo_direct_v1`；它明显优于 current new A1，也优于 style_v2，但仍未超过 old A1，因此 direct BRPO 语义本身已被证明确实更对，却还没有完成对 old A1 的接管。**
+一句话判断：**当前 Re10k 默认候选主线仍可记作 `old A1 + new T1`，但 A1 的语义判断已经前进一步：strict BRPO-style `C_m` 本身并不比 old A1 差，真正未对齐的是 target-side contract。未来的 BRPO 对齐主线不该再围绕 `C_m` 猜测，而应固定 exact `C_m` 后直接攻 target / fallback。**
 
-补充判断（来自最新 direct compare + signal meta）：`brpo_direct_v1` 与 `brpo_style_v2` 的平均 valid coverage 基本相同，但 `brpo_direct_v1` 的正样本 confidence 均值已经接近 old A1；这说明剩余 gap 更像是 **target builder / exact supervision contract** 问题，而不再像“把 confidence 再调强一点”就能解决的问题。
+补充判断（来自 `20260420_a1_strict_brpo_alignment_compare_e1` 与 `20260420_a1_exact_brpo_target_compare_e1`）：`exact_brpo_cm_old_target_v1` 相对 `old A1` 只有 `-6.4e-06 PSNR`；而 `exact_brpo_cm_hybrid_target_v1` / `exact_brpo_cm_stable_target_v1` 仍约 `-0.012 PSNR`，`exact_brpo_full_target_v1` 约 `-0.01325 PSNR`。这说明剩余 gap 不只是 current source-aware fallback/stable 契约的问题；在当前 proxy `I_t^{fix}` / projected-depth backend 下，纯 exact BRPO target-side 本身也没有赢过 old A1。
 
 ### 1.1 数据集 case 状态
 
 | 数据集 | 当前状态 | 当前判断 |
 |------|------|------|
-| Re10k-1 | ✅ A1/T1 收敛，✅ A1 verify proxy compare 已完成，✅ A1 BRPO-style v1/v2 compare 已完成，✅ A1 direct BRPO compare 已完成，✅ B3 boolean compare 已完成，✅ B3 opacity C1 compare 已完成 | 主线仍是 `old A1 + new T1`；`brpo_direct_v1` 是当前最强的新 A1 分支，但仍略低于 old A1；B3 boolean / opacity 两条 delayed path 当前都仍 weak-negative |
-| DL3DV-2 | ✅ canonical baseline + repair A 已打通 | 暂未平移新 A1 direct BRPO / B3 |
+| Re10k-1 | ✅ A1/T1 收敛，✅ A1 verify proxy compare 已完成，✅ A1 BRPO-style v1/v2 compare 已完成，✅ hybrid / exact BRPO-C_m compare 已完成，✅ exact BRPO target-side compare 已完成，✅ B3 boolean compare 已完成，✅ B3 opacity C1 compare 已完成 | 主线仍是 `old A1 + new T1`；`exact_brpo_cm_old_target_v1 ≈ old A1` 说明 strict BRPO `C_m` 已基本对齐；但 `exact_brpo_full_target_v1` 仍约 `-0.01325 PSNR` 低于 old A1，说明 current proxy `I_t^{fix}` / projected-depth backend 下，纯 exact BRPO target-side 也未 landing；historical `brpo_direct_v1` 仍应视为 hybrid 分支；B3 boolean / opacity 两条 delayed path 当前都仍 weak-negative |
+| DL3DV-2 | ✅ canonical baseline + repair A 已打通 | 暂未平移 strict BRPO A1 target-contract 路线 / B3 |
 
 ---
 
@@ -134,9 +136,13 @@ signal_v2/frame_<frame_id>/
 | A1 旧语义：joint support filter | ✅ | 当前 observation 主线 |
 | A1 新语义：joint observation rewrite | ⚠️ | 已完成并确认优于 control，但在固定 new T1 下仍低于 old A1 |
 | A1 verifier proxy：`brpo_verify_v1` | ❌ | 已完成 compare，当前 negative；保留为已验证过的失败 probe |
-| A1 BRPO-style v1：`brpo_style_v1` | ⚠️ | builder + consumer + compare 已完成；方向正确，但已被 direct BRPO v1 超过 |
-| A1 BRPO-style v2：`brpo_style_v2` | ⚠️ | continuous quality + stable-blend 版 compare 已完成；当前仍低于 direct BRPO v1 与 old A1 |
-| A1 direct BRPO v1：`brpo_direct_v1` | ⚠️ | builder + consumer + formal compare 已完成；当前是最强的新 A1 分支，但仍未超过 old A1 |
+| A1 BRPO-style v1：`brpo_style_v1` | ⚠️ | builder + consumer + compare 已完成；方向正确，但已被更严格的 exact / hybrid 分解分析取代 |
+| A1 BRPO-style v2：`brpo_style_v2` | ⚠️ | continuous quality + stable-blend 版 compare 已完成；现主要保留为 stable-target contract 对照 |
+| A1 hybrid BRPO-C_m 几何门控分支：historical `brpo_direct_v1` / semantic label `hybrid_brpo_cm_geo_v1` | ⚠️ | 已完成 builder + consumer + formal compare；这是 hybrid 分支，不再应被当作 strict BRPO |
+| A1 exact BRPO-C_m + old target：`exact_brpo_cm_old_target_v1` | ✅ | 与 old A1 基本等价，是当前 semantics-clean BRPO `C_m` control |
+| A1 exact BRPO target-side：`exact_brpo_full_target_v1` | ⚠️ | 已完成 exact target-side compare；在 shared-`C_m` depth loss 下仍约 `-0.01325 PSNR` 低于 old A1，几乎与 exact-hybrid-target 持平 |
+| A1 exact BRPO-C_m + hybrid target：`exact_brpo_cm_hybrid_target_v1` | ⚠️ | 已完成 compare；仍约 `-0.013 PSNR` 低于 old A1，说明 target contract 仍未对齐 |
+| A1 exact BRPO-C_m + stable target：`exact_brpo_cm_stable_target_v1` | ⚠️ | 比 exact+hypbrid-target 略好，但仍约 `-0.012 PSNR` 低于 old A1 |
 | T1：`joint_topology_mode=brpo_joint_v1` | ✅ | topology mode + compare + confirmation 已完成 |
 | T1 orchestration：StageA.5 optional warmup/control | ✅ | 角色已经固化 |
 | A2 geometry-constrained expand | ❌ | 当前 widening 方案不作为主线 |
@@ -154,8 +160,8 @@ signal_v2/frame_<frame_id>/
 | StageB baseline | signal pipeline | RGB-only v2 + depth-sidecar（control） |
 | A1 参考主线 | observation semantics | `joint_confidence_v2 + joint_depth_v2` |
 | T1 主线 | topology | `joint_topology_mode=brpo_joint_v1` |
-| 当前默认候选主线 | observation + topology | `old A1 + new T1` |
-| A1 当前研究线 | observation semantics | `pseudo_observation_mode=brpo_direct_v1` |
+| 当前默认候选主线 | observation + topology | `old A1 + new T1`（但 future BRPO 对齐应以 `exact_brpo_cm_old_target_v1` 为 semantics-clean control） |
+| A1 当前研究线 | observation semantics | `exact BRPO C_m` 固定 + target/fallback contract 对齐（old / hybrid / stable target 三臂已完成） |
 | StageA.5 role | orchestration | optional warmup / control |
 | SPGM repair A | keep / eta / weight_floor | (1,1,1) / 0.0 / 0.25 |
 | B3 v1 | manager mode | `deterministic_participation` |
@@ -179,29 +185,25 @@ signal_v2/frame_<frame_id>/
 - 当前工程定位仍是：**可选 warmup / 对照 / orchestration anchor**。
 
 ### 5.4 A1 当前结论
-- **old A1** 仍是当前 observation 主线。
-- **new A1** 已证明不是旧 A1 换壳，但在固定 `new T1` 下当前仍未取代 old A1。
+- **old A1** 仍可继续作为当前 observation control，但它已经不再是唯一的语义参考点。
+- **exact_brpo_cm_old_target_v1** 与 `old A1` 基本等价（约 `-6.4e-06 PSNR`），因此 strict BRPO-style `C_m` 在当前 fused pseudo-frame proxy 下已经对齐到足够接近 old A1 的水平。
+- **new A1** 已证明不是旧 A1 换壳，但在固定 `new T1` 下当前仍明显低于 old / exact-oldtarget control。
 - **verify proxy** 已完成 formal compare，当前结果比 old A1 和 current new A1 都更差，已经完成它的排错职责。
-- **BRPO-style v1 / v2** 都已证明“朝 BRPO-style semantics 走”方向是对的，但它们都还不是最终 landing 版本。
-- **direct BRPO v1** 已完成 formal compare：它明显强于 current new A1，也优于 style_v2，但整体仍略低于 old A1，当前还不能 landing。
+- **BRPO-style v1 / v2** 仍然有价值，但现在它们更适合作为中间 builder / stable-target 对照，不再是主对齐入口。
+- **historical `brpo_direct_v1`** 现在应明确写成 hybrid：`hybrid_brpo_cm_geo_v1`。它不是 strict BRPO，因为它把 `C_m` 和 geometry gate 混在了一起。
 
-### 5.5 direct BRPO v1 与真正 BRPO 的关系
-- 当前 `brpo_direct_v1` 已经更直接抓到了 BRPO A1 的核心形式：**shared `C_m` + fused-frame reciprocal correspondence support + 同源 projected-depth composition**。
-- 但它还不是完整 BRPO implementation，至少还有三处差异：
-  1. pseudo-frame 目前仍复用现有 `target_rgb_fused.png` 作为工程代理，不是完整论文版 `I_t^{fix}`；
-  2. `valid_left / valid_right` 仍建立在现有 matcher support + overlap validity 上，不是更独立的 direct verifier backend；
-  3. `depth_target_brpo_direct_v1` 当前是 overlap-conf weighted projected depth composition，没有接住 old A1 / 更完整 BRPO builder 里的稳定化 / fallback contract。
+### 5.5 strict BRPO `C_m` 与 current hybrid / target contract 的关系
+- `exact_brpo_cm_old_target_v1 ≈ old A1`：说明 **old A1 不是靠某个必须保留的非 BRPO confidence 才赢**。
+- `exact_brpo_cm_hybrid_target_v1` 仍比 old A1 低约 `-0.013 PSNR`：说明把 `C_m` 改成 strict BRPO 并不会自动救回 hybrid target contract。
+- `exact_brpo_cm_stable_target_v1` 比 `exact_brpo_cm_hybrid_target_v1` 略好（约 `+0.00096 PSNR`），但仍比 old A1 低约 `-0.01203 PSNR`：说明 stable-target blend 有一点帮助，但 target/fallback contract 仍未接住 old A1 的稳定性。
+- `exact_brpo_full_target_v1`（strict `C_m` + exact BRPO-style target-side proxy + shared-`C_m` depth loss）只有 `24.174488`，相对 old A1 约 `-0.01325 PSNR`，且只比 `exact_brpo_cm_hybrid_target_v1` 高约 `+0.00014 PSNR`：说明当前 proxy `I_t^{fix}` / projected-depth backend 下，纯 exact BRPO target-side 本身也没有带来新的 replay 优势。
+- builder 级检查也支持这个判断：`exact_brpo_full_target_v1` 与 `exact_brpo_cm_hybrid_target_v1` 的 target/source contract 几乎相同；frame 级 target array 差异只有浮点噪声量级，source map 也相同。现在的主要限制更像是 upstream proxy supervision field，而不只是 consumer-side source-aware 权重。
 
-### 5.6 为什么当前 direct BRPO v1 仍差于 old A1
-- 从最新 compare 看，**大方向已经再次被确认是对的**：`brpo_direct_v1` 相比 current new A1 回升明显，也比 style_v2 更强。
-- 但它仍略低于 old A1，且 latest signal meta 显示：
-  1. `brpo_direct_v1` 与 `brpo_style_v2` 的平均 valid coverage 基本相同；
-  2. `brpo_direct_v1` 的正样本 confidence 均值已经接近 old A1；
-  3. 但 old A1 仍然赢。
-- 这说明当前剩余缺口更像是：
-  1. **target builder 稳定性 / fallback contract** 仍不如 old A1；
-  2. direct verifier support 的 exact pixel set 与 old A1 的有效 supervision contract 仍有细小但重要的偏差；
-  3. 问题已不再像“再调一下 confidence 强度”就能解决。
+### 5.6 当前对 target-side 的更新判断
+- 当前证据不再支持“只要把 consumer 再往 exact BRPO 挪一步就能救回 old A1”。
+- 更准确的说法是：**现在 `C_m` 已基本对齐；target-side exactness 也已直接试过；但在 current proxy `I_t^{fix}` / projected-depth backend 下，纯 exact BRPO target-side 仍未落地。**
+- 因此下一步若还坚持 exact BRPO 路线，重心应上移到更 upstream 的 Layer B proxy：`I_t^{fix}` 质量、verifier backend、以及 projected-depth supervision field 本身，而不是继续只在 stable/fallback 权重上打转。
+
 
 ### 5.7 SPGM / B3
 - B3 第一版已经真正把动作位置从 **post-backward grad scaling** 推到 **pre-render participation control**。
@@ -209,9 +211,9 @@ signal_v2/frame_<frame_id>/
 - 但 C1 formal compare 中，opacity path 相对复用的 `summary_only` 与旧 boolean conservative arm 仍是**轻微负向**，因此当前结论仍不是 landing，也**不应直接进入 O2a/b**。
 
 ### 5.8 是否继续做完全 BRPO 版本
-- **应该继续，但下一步要更有针对性。**
-- 不应回退去打磨 proxy，也不应继续做 conf-only / depth-only 单侧开关扫描。
-- 更合理的下一步是：**先对 `old A1` 与 `brpo_direct_v1` 做 residual-gap diagnosis，直接找 target builder / verifier backend / exact valid set 的差异，再决定下一版 direct BRPO patch。**
+- **应该继续，而且现在路径比之前更清楚。**
+- 不应回退去打磨 proxy，也不应再把“是不是 BRPO”集中在 `C_m` 上反复猜。
+- 更合理的下一步是：**固定 exact `C_m`（以 `exact_brpo_cm_old_target_v1` 为 control），直接做 target-side contract 对齐：old target → hybrid target → stable target → next exact BRPO target patch。**
 
 ### 5.9 DL3DV case
 - 暂维持 canonical baseline + repair A 现状；不在 Re10k 的 A1/B3 还未稳定前贸然平移。
@@ -221,14 +223,14 @@ signal_v2/frame_<frame_id>/
 ## 6. 待办
 
 ### 当前进行中 ⚠️
-- A1：围绕 `old A1` vs `brpo_direct_v1` 做一轮 residual-gap diagnosis，重点看 valid-set disagreement、target residual、fallback / stable-target 语义差异，而不是继续做单侧 toggle。
+- A1：`exact_brpo_cm_old_target_v1` 继续作为 semantics-clean control；`exact_brpo_full_target_v1` 已证明“纯 exact BRPO target-side + shared-C_m depth loss”在 current proxy backend 下仍不赢 old A1。下一步若坚持 exact BRPO，应上移到 `I_t^{fix}` / verifier / projected-depth backend 本身，而不是继续只打 stable/fallback 权重。
 - B3：当前 delayed opacity C1 仍未过关；如果继续，应先回到 C0-2 的小步 candidate-law / opacity-law 诊断，而不是直接推进 O2a/b。
 
 ### 下一阶段 ⏳
 - 如果继续推进 A1，优先做：
-  1. old A1 vs direct BRPO v1 的 supervision-set / target-builder 差异诊断
-  2. 更接近 BRPO 的 direct verifier backend 或更稳的 direct target builder（两者一次只改一侧）
-  3. 再做新一轮 `old A1 / current new A1 / brpo_style_v2 / brpo_direct_v1 / next direct patch` compare
+  1. 明确选择路线：`exact BRPO upstream re-entry` vs `replay-first hybrid target contract`
+  2. 若走 exact BRPO：直接检查 `I_t^{fix}` proxy / verifier backend / projected-depth field，避免再把时间花在 consumer-side source-aware 权重细修上
+  3. 若走 replay-first：承认 `hybrid/stable target` 是工程分支，并在该标签下继续优化，而不要再把它表述成纯 BRPO
 - 如果继续推进 B3，优先做：
   1. 用已接入的 C0 history 字段指导 C0-2 小步修改
   2. 只重跑新 opacity 臂，复用旧 control

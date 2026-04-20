@@ -1,143 +1,142 @@
 # hermes.md
 
 > 用途：Part3 BRPO 压缩/重启后的第一入口。先看这份，再按这里列的顺序继续。
-> 维护原则：只保留当前真实状态、当前执行顺序、关键文档入口和固定环境信息；不重复写完整 changelog。
-> 更新时间：2026-04-20 16:35 (Asia/Shanghai)
+> 维护原则：只保留当前真实状态、当前执行顺序、关键文档入口和固定环境信息。
+> 更新时间：2026-04-20 19:15 (Asia/Shanghai)
+
+---
+
+## 口径说明（重要）
+
+**当前统一口径**：
+- **M~** = Mask（confidence），监督域 + 监督强度
+- **T~** = Target，监督目标数值
+- **G~** = Gaussian Management，per-Gaussian gating
+- **R~** = Joint Refine，topology joint loop
+
+历史文档中的 **A1 → M~ + T~**（分离记载），**B3 → G~**，**T1 → R~**。
+
+详细设计文档位置：
+- `docs/design/MASK_DESIGN.md` — M~ 详细分析
+- `docs/design/TARGET_DESIGN.md` — T~ 详细分析
+- `docs/design/GAUSSIAN_MANAGEMENT_DESIGN.md` — G~ 详细分析
+- `docs/design/REFINE_DESIGN.md` — R~ 详细分析
+
+---
 
 ## 1. 现在先怎么用这份文档
 
-如果用户让我“先回忆一下现在做到哪了”，按这个顺序：
+如果用户让我"先回忆一下现在做到哪了"，按这个顺序：
 1. 先看本文件 `docs/agent/hermes.md`
-2. 再看 `docs/STATUS.md`
-3. 再看 `docs/DESIGN.md`
-4. 再看 `docs/CHANGELOG.md`
-5. 如果要接 B3，再看 `docs/agent/charles.md`（注意：旧 handoff 在 `docs/agent/charles.md`，不是 `docs/charles.md`）
-6. 如果要接 B3，再看 `docs/REFINE_DESIGN.md`
-7. 如果要接 A1，再看：
-   - `pseudo_branch/brpo_v2_signal/pseudo_observation_brpo_style.py`
-   - `scripts/build_brpo_v2_signal_from_internal_cache.py`
-   - `scripts/run_pseudo_refinement_v2.py`
-   - `scripts/run_a1_brpo_direct_compare.py`
+2. 再看 `docs/current/STATUS.md`
+3. 再看 `docs/current/DESIGN.md`
+4. 再看 `docs/current/CHANGELOG.md`
+5. 如果要看详细设计，再看 `docs/design/` 下的四个文件
 
-## 2. 当前项目位置（本次更新后的真实状态）
+---
 
-当前最新完成、且比 `docs/agent/charles.md` 更晚的工作，是 **A1 direct BRPO v1**：
-1. 已新增 direct builder：`build_brpo_direct_observation(...)`
-2. 已在 signal builder 中并行产出 `pseudo_*_brpo_direct_v1`
-3. `run_pseudo_refinement_v2.py` 已真实接通 `--pseudo_observation_mode brpo_direct_v1`
-4. 已完成 signal smoke、consumer smoke、formal compare
-5. compare 结论已经落地：
-   - `oldA1 = 24.187551`
-   - `newA1 = 24.149272`
-   - `brpo_style_v2 = 24.167642`
-   - `brpo_direct_v1 = 24.175408`
-6. 所以当前结论是：
-   - `brpo_direct_v1` 明显优于 current new A1（约 `+0.02614 PSNR`）
-   - 也优于 `brpo_style_v2`（约 `+0.00777 PSNR`）
-   - 但仍低于 `old A1`（约 `-0.01214 PSNR`）
-7. 因此默认主线**仍是**：`old A1 + new T1`
-8. 但 A1 的当前研究主线**已经不是** verify proxy，也不是继续磨 `brpo_style_v2`，而是：`brpo_direct_v1`
+## 2. 当前项目位置（真实状态）
 
-补充一个重要事实（来自最新 signal meta 聚合）：
-- `brpo_direct_v1` 与 `brpo_style_v2` 的 average valid coverage 基本一样
-- `brpo_direct_v1` 的 positive confidence mean 已接近 old A1
-- 但 old A1 仍然赢
+### M~ 状态：已完成 BRPO 对齐
 
-这意味着：
-> 当前剩余 gap 更像是 target builder / exact supervision contract / fallback semantics 的问题，而不是把 confidence 再调大一点就能解决。
+M~（mask）已完成 BRPO semantics 对齐：
+- exact M~ + old T~ 组合达到 24.1875 PSNR
+- 与 old M~ + old T~ (24.1877) 差距仅 0.0002 PSNR
+- 说明 M~ 侧已经成功对齐
 
-## 3. 当前固定判断
+### T~ 状态：residual gap 需 upstream 改进
 
-### 3.1 A1 现在该怎么理解
-1. `verify proxy` 已完成职责，不能回头继续磨
-2. `brpo_style_v1/v2` 证明了方向对，但它们都只是过渡 probe
-3. `brpo_direct_v1` 是当前最强的新 A1 分支，也是最值得继续的 A1 线
-4. 但 `old A1` 仍是默认 observation 主线，不能被误写成“已经被 direct BRPO 替代”
+T~（target）仍有 residual gap：
+- exact M~ + exact T~ = 24.1745 PSNR，比 old 组合低约 0.013
+- hybrid/stable T~ 都比 old T~ 差
+- 说明 T~ 的瓶颈在上游 proxy backend，不是 consumer blend 微调
 
-### 3.2 B3 现在该怎么理解
-1. `docs/agent/charles.md` 对 B3 的 handoff 仍有效，尤其是：**现在不要推进 O2a/b**
-2. B3 当前正确下一步仍是 C0-2 的一小步 candidate-law 或 opacity-law 修改
-3. 但从时间顺序上说，`charles.md` 早于这次 A1 direct compare；所以它不能覆盖 A1 的最新状态
+### G~ 状态：已诊断，待推进
 
-### 3.3 当前优先级判断
-我现在的判断是：
-1. 先把 A1 direct BRPO 的 residual gap 看清楚，再决定是否继续 A1 patch
-2. B3 仍保留为并行候选线，但**不允许**直接跳 O2a/b
-3. 如果用户要求“下一步做什么”，默认先做 A1 residual diagnosis；如果用户明确要切 B3，再按 `charles.md` 的 C0-2 节奏走
+G~（Gaussian Management）opacity compare 显示：
+- opacity vs summary = -0.000573 PSNR（weak-negative）
+- 三模式（boolean/opacity/summary）无区别
+- 原因：分数相关、动作轻、delayed、动作域窄
 
-## 4. 当前必须按顺序完成的任务
+### R~ 状态：稳定
 
-### Task 1：A1 residual-gap diagnosis（当前默认下一步）
-先不要再做新的大 patch，也不要再做 conf-only / depth-only toggle。
-先做一轮 grounded diagnosis，直接比：`old A1` vs `brpo_direct_v1`。
+R~（Topology）T1 = brpo_joint_v1 是稳定主线。
 
-最少要回答这三件事：
-1. 两者 valid / supervision set 的精确差异在哪里？
-2. 两者 target depth 的差异主要落在什么像素簇上？
-3. 剩余 gap 更像 verifier backend 问题，还是 target/fallback contract 问题？
+---
 
-建议优先产出一个小诊断脚本或报告，读取：
-- `joint_meta_v2.json`
-- `brpo_direct_observation_meta_v1.json`
-- 必要时逐帧对比 `joint_depth_target_v2.npy` vs `pseudo_depth_target_brpo_direct_v1.npy`
-- 必要时对比 `joint_confidence_v2.npy` vs `pseudo_confidence_brpo_direct_v1.npy`
+## 3. 当前最佳组合
 
-### Task 2：只做一侧 direct patch，再重跑 compare
-诊断完后，如果继续 A1，只允许做一侧：
-1. 要么改 direct verifier backend
-2. 要么改 direct target builder / fallback contract
+`exact M~ + old T~ + summary G~ + T1` ≈ old A1 + new T1
 
-一次只改一侧，不要把 verifier、target、topology、B3 混在一起。
-然后再做固定 `new T1 + summary_only` compare。
+---
 
-### Task 3：如果切回 B3，只做 C0-2
-如果用户要求切回 B3：
-1. 先读 `docs/agent/charles.md`
-2. 不推进 O2a/b
-3. 一次只改一小步 candidate-law 或 opacity mapping
-4. compare 时只重跑新 opacity 臂，复用旧 control
+## 4. 下一步：推进 G~ BRPO 对齐
 
-## 5. 明确不要做的事
-1. 不把 `brpo_direct_v1` 误写成完整 BRPO implementation
-2. 不回去继续磨 `brpo_verify_v1`
-3. 不再把 A1 剩余 gap 简化成 confidence-only 或 depth-only 单侧问题
-4. 不在 observation compare 里同时改 topology 或 B3
-5. 不在 B3 delayed opacity 仍 weak-negative 时直接推进 O2a/b
+用户明确要求推进 G~ 的 BRPO 对齐。
 
-## 6. 一句话 handoff
-现在最准确的状态不是“继续磨 style_v2”，也不是“直接去做 B3 O2”。更准确的状态是：**A1 已经推进到 `brpo_direct_v1`，它是当前最强的新 A1 分支，但仍比 old A1 低约 0.0121 PSNR；所以下一步默认应先做 `old A1` vs `brpo_direct_v1` 的 residual-gap diagnosis，定位 target builder / exact supervision contract 的差异。若用户明确切 B3，则按 `docs/agent/charles.md` 继续 C0-2，小步修改，绝不直接推进 O2a/b。**
+### G~ BRPO 对齐的核心方向
 
-## 7. 云服务器环境信息（固定配置）
+**Phase 1：action law 改进**
+- 当前 opacity scale mean ~0.98 太保守
+- 目标：让 low participation score 有更明显的 opacity reduction
+
+**Phase 2：action domain 扩展**
+- 当前 candidate_part_only_ratio ~10% 太窄
+- 目标：让更多 Gaussians 受影响
+
+**Phase 3：score semantics separation**
+- 当前 state vs participation correlation 高
+- 目标：让 participation score 有更独立语义
+
+### 重要约束
+- 每次只改一小步
+- 改完必须跑 compare 验证
+- 不把 G~ 和 M~/T~/R~ 混在一起改
+- 不直接跳到 O2a/b
+
+---
+
+## 5. 相关代码路径
+
+G~ 核心文件：
+- `pseudo_branch/spgm/manager.py` — action generation
+- `pseudo_branch/spgm/score.py` — score definitions
+- `scripts/run_pseudo_refinement_v2.py` — consumer side
+
+---
+
+## 6. 明确不要做的事
+
+1. 不偷偷做文档"安全小改动"
+2. 不把 G~ 和 M~/T~/R~ 同时改
+3. 不在没跑 compare 时声称改动有效
+4. 不继续优先投入 T~ residual gap（太小不值得）
+
+---
+
+## 7. 一句话 handoff
+
+M~ 已完成 BRPO 对齐，T~ residual gap 太小不值得继续。现在重心转向 G~ BRPO 对齐：action law 太保守、action domain 太窄、score semantics 太相似——三个方向依次推进，每次只改一小步，必须跑 compare。
+
+---
+
+## 8. 云服务器环境信息
 
 ### SSH alias
-- `Group8DDY`（大小写敏感，必须精确匹配）
+- `Group8DDY`
 
 ### Python 环境
-s3po 部分：
 - Conda env: `s3po-gs`
-- 完整路径: `/home/bzhang512/miniconda3/envs/s3po-gs/bin/python`
-- 激活命令: `source ~/.bashrc && conda activate s3po-gs`
+- 路径: `/home/bzhang512/miniconda3/envs/s3po-gs/bin/python`
 
-### PYTHONPATH（远端执行必须显式设置）
-- 必须包含: `/home/bzhang512/CV_Project/third_party/S3PO-GS:/home/bzhang512/CV_Project/part3_BRPO`
+### PYTHONPATH
+- `/home/bzhang512/CV_Project/third_party/S3PO-GS:/home/bzhang512/CV_Project/part3_BRPO`
 
 ### 项目路径
-- Part3 BRPO root: `/home/bzhang512/CV_Project/part3_BRPO`
-- 实验输出默认优先: `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments`
-
-### 最近关键输出
-- A1 direct signal root:
-  - `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260420_a1_brpo_direct_signal_full`
-- A1 direct compare root:
-  - `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260420_a1_brpo_direct_compare_e1`
-- A1 direct compare summary:
-  - `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260420_a1_brpo_direct_compare_e1/compare_summary.json`
-- B3 C0 diagnosis:
-  - `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260420_b3_c0_diagnosis/diagnosis_summary.json`
-- B3 opacity compare summary:
-  - `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260420_b3_opacity_participation_compare_e1/compare_summary.json`
+- Part3 root: `/home/bzhang512/CV_Project/part3_BRPO`
+- 输出: `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments`
 
 ### 执行模板
 ```bash
-ssh Group8DDY "cd /home/bzhang512/CV_Project/part3_BRPO && export PYTHONPATH=/home/bzhang512/CV_Project/third_party/S3PO-GS:/home/bzhang512/CV_Project/part3_BRPO:$PYTHONPATH && /home/bzhang512/miniconda3/envs/s3po-gs/bin/python scripts/xxx.py --args"
+ssh Group8DDY "cd /home/bzhang512/CV_Project/part3_BRPO && export PYTHONPATH=/home/bzhang512/CV_Project/third_party/S3PO-GS:/home/bzhang512/CV_Project/part3_BRPO && /home/bzhang512/miniconda3/envs/s3po-gs/bin/python scripts/xxx.py --args"
 ```

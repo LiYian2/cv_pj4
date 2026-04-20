@@ -63,7 +63,7 @@ def parse_args():
     p.add_argument('--brpo_mask_root', default=None)
     p.add_argument('--signal_pipeline', choices=['legacy', 'brpo_v2'], default='legacy')
     p.add_argument('--signal_v2_root', default=None, help='Optional root containing signal_v2/frame_<id> artifacts; defaults to <prepare_root>/signal_v2 or <prepare_root>/signal_v2_* when discoverable.')
-    p.add_argument('--pseudo_observation_mode', choices=['off', 'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1'], default='off')
+    p.add_argument('--pseudo_observation_mode', choices=['off', 'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1'], default='off')
     p.add_argument('--stage_mode', choices=['stageA', 'stageA5', 'stageB'], default='stageA')
     p.add_argument('--joint_topology_mode', choices=['off', 'brpo_joint_v1'], default='off')
     p.add_argument('--stageA_iters', type=int, default=300)
@@ -253,7 +253,21 @@ def _summarize_source_map(source_map: np.ndarray | None, kind: str | None = None
         return {'verified_ratio': None, 'render_fallback_ratio': None, 'seed_ratio': None, 'dense_ratio': None}
     source_map = np.asarray(source_map)
     total = float(source_map.size)
-    if kind in {'target_depth_for_refine_v2_brpo', 'joint_depth_target_v2', 'joint_depth_target_expand_v1', 'joint_depth_target_joint_v1'}:
+    no_none_as_fallback_kinds = {
+        'target_depth_for_refine_v2_brpo',
+        'joint_depth_target_v2',
+        'joint_depth_target_expand_v1',
+        'joint_depth_target_joint_v1',
+        'joint_depth_target_brpo_style_v1',
+        'joint_depth_target_brpo_style_v2',
+        'joint_depth_target_brpo_direct_v1',
+        'joint_depth_target_hybrid_brpo_cm_geo_v1',
+        'joint_depth_target_exact_brpo_cm_old_target_v1',
+        'joint_depth_target_exact_brpo_full_target_v1',
+        'joint_depth_target_exact_brpo_cm_hybrid_target_v1',
+        'joint_depth_target_exact_brpo_cm_stable_target_v1',
+    }
+    if kind in no_none_as_fallback_kinds:
         verified = np.isin(source_map, [1, 2, 3])
         fallback = source_map == 4
         return {
@@ -467,6 +481,16 @@ def _load_brpo_direct_observation_bundle(frame_dir: Path):
     }
 
 
+def _load_named_basic_observation_bundle(frame_dir: Path, prefix: str, meta_filename: str):
+    return {
+        'confidence_joint': np.load(frame_dir / f'pseudo_confidence_{prefix}.npy').astype(np.float32),
+        'depth_target': np.load(frame_dir / f'pseudo_depth_target_{prefix}.npy').astype(np.float32),
+        'source_map': np.load(frame_dir / f'pseudo_source_map_{prefix}.npy'),
+        'valid_mask': np.load(frame_dir / f'pseudo_valid_mask_{prefix}.npy').astype(np.float32),
+        'meta_path': frame_dir / meta_filename,
+    }
+
+
 def compute_stageA_scene_scale(sample_dir: Path, conf_arr: np.ndarray, scale_source: str, fixed_scale: float):
     if scale_source == 'fixed':
         return max(float(fixed_scale), 1e-6), 'fixed'
@@ -609,6 +633,8 @@ def load_stageA_pseudo_views(args):
         signal_v2_frame_dir = _signal_v2_frame_dir(sample_dir, frame_id, args.signal_v2_root)
 
         pseudo_observation_mode = str(getattr(args, 'pseudo_observation_mode', 'off') or 'off')
+        if pseudo_observation_mode == 'exact_brpo_full_target_v1' and args.stageA_depth_loss_mode != 'legacy':
+            raise ValueError('exact_brpo_full_target_v1 is reserved for full BRPO target-side semantics and must run with --stageA_depth_loss_mode legacy so RGB/depth share the same C_m without source-aware fallback tiers')
         rgb_mask_mode = args.stageA_rgb_mask_mode
         depth_mask_mode = args.stageA_depth_mask_mode
         depth_target_mode = args.stageA_target_depth_mode
@@ -620,7 +646,7 @@ def load_stageA_pseudo_views(args):
             if depth_target_mode in {'auto', 'blended_depth', 'blended_depth_m5'}:
                 depth_target_mode = 'brpo_v2'
 
-        if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1'}:
+        if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1'}:
             if signal_v2_frame_dir is None:
                 raise FileNotFoundError(f'No signal_v2 frame dir found for frame_id={frame_id} under sample_dir={sample_dir}')
             if pseudo_observation_mode == 'brpo_joint_v1':
@@ -667,7 +693,7 @@ def load_stageA_pseudo_views(args):
                 depth_kind = f'joint_depth_target_{suffix}'
                 depth_for_refine = signal_v2_frame_dir / f'pseudo_depth_target_{suffix}.npy'
                 source_map_path = signal_v2_frame_dir / f'pseudo_source_map_{suffix}.npy'
-            else:
+            elif pseudo_observation_mode in {'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1'}:
                 bundle = _load_brpo_direct_observation_bundle(signal_v2_frame_dir)
                 rgb_conf = bundle['confidence_joint']
                 depth_conf = bundle['confidence_joint']
@@ -675,12 +701,33 @@ def load_stageA_pseudo_views(args):
                 depth_conf_path = str(signal_v2_frame_dir / 'pseudo_confidence_brpo_direct_v1.npy')
                 rgb_conf_kind = 'joint_observation::pseudo_confidence_brpo_direct_v1.npy'
                 depth_conf_kind = 'joint_observation::pseudo_confidence_brpo_direct_v1.npy'
-                rgb_conf_mode = 'pseudo_observation::brpo_direct_v1'
-                depth_conf_mode = 'pseudo_observation::brpo_direct_v1'
+                rgb_conf_mode = f'pseudo_observation::{pseudo_observation_mode}'
+                depth_conf_mode = f'pseudo_observation::{pseudo_observation_mode}'
                 depth_meta_path = bundle['meta_path']
-                depth_kind = 'joint_depth_target_brpo_direct_v1'
+                depth_kind = 'joint_depth_target_hybrid_brpo_cm_geo_v1' if pseudo_observation_mode == 'hybrid_brpo_cm_geo_v1' else 'joint_depth_target_brpo_direct_v1'
                 depth_for_refine = signal_v2_frame_dir / 'pseudo_depth_target_brpo_direct_v1.npy'
                 source_map_path = signal_v2_frame_dir / 'pseudo_source_map_brpo_direct_v1.npy'
+            else:
+                exact_prefix_map = {
+                    'exact_brpo_cm_old_target_v1': ('exact_brpo_cm_old_target_v1', 'exact_brpo_cm_old_target_meta_v1.json'),
+                    'exact_brpo_full_target_v1': ('exact_brpo_full_target_v1', 'exact_brpo_full_target_meta_v1.json'),
+                    'exact_brpo_cm_hybrid_target_v1': ('exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_hybrid_target_meta_v1.json'),
+                    'exact_brpo_cm_stable_target_v1': ('exact_brpo_cm_stable_target_v1', 'exact_brpo_cm_stable_target_meta_v1.json'),
+                }
+                prefix, meta_filename = exact_prefix_map[pseudo_observation_mode]
+                bundle = _load_named_basic_observation_bundle(signal_v2_frame_dir, prefix=prefix, meta_filename=meta_filename)
+                rgb_conf = bundle['confidence_joint']
+                depth_conf = bundle['confidence_joint']
+                rgb_conf_path = str(signal_v2_frame_dir / f'pseudo_confidence_{prefix}.npy')
+                depth_conf_path = str(signal_v2_frame_dir / f'pseudo_confidence_{prefix}.npy')
+                rgb_conf_kind = f'joint_observation::pseudo_confidence_{prefix}.npy'
+                depth_conf_kind = f'joint_observation::pseudo_confidence_{prefix}.npy'
+                rgb_conf_mode = f'pseudo_observation::{pseudo_observation_mode}'
+                depth_conf_mode = f'pseudo_observation::{pseudo_observation_mode}'
+                depth_meta_path = bundle['meta_path']
+                depth_kind = f'joint_depth_target_{prefix}'
+                depth_for_refine = signal_v2_frame_dir / f'pseudo_depth_target_{prefix}.npy'
+                source_map_path = signal_v2_frame_dir / f'pseudo_source_map_{prefix}.npy'
             rgb_conf_variant = 'continuous'
             depth_conf_variant = 'continuous'
             depth_arr = bundle['depth_target']
@@ -689,7 +736,7 @@ def load_stageA_pseudo_views(args):
             source_summary = _summarize_source_map(source_map, kind=depth_kind)
             view['pseudo_observation_mode_effective'] = pseudo_observation_mode
             view['pseudo_observation_meta_path'] = str(depth_meta_path)
-            view['depth_source_id_groups'] = {'seed': [1, 2, 3], 'dense': [], 'fallback': [0, 4]}
+            view['depth_source_id_groups'] = {'seed': [1, 2, 3], 'dense': [], 'fallback': [4]}
         else:
             rgb_conf, rgb_conf_path, rgb_conf_kind, rgb_conf_mode, rgb_conf_variant = resolve_stageA_mask(
                 sample_dir, frame_id, args.target_side, rgb_mask_mode, args.stageA_confidence_variant,
@@ -744,7 +791,7 @@ def load_stageA_pseudo_views(args):
         view['source_meta'] = source_meta
         view['depth_meta'] = depth_meta
         view['target_depth_for_refine_kind'] = depth_kind
-        view['stageA_target_depth_mode_effective'] = ('joint_depth_v1' if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1'} else (pseudo_observation_mode if pseudo_observation_mode in {'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1'} else _resolve_depth_mode_alias(depth_target_mode)))
+        view['stageA_target_depth_mode_effective'] = ('joint_depth_v1' if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1'} else (pseudo_observation_mode if pseudo_observation_mode in {'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1'} else _resolve_depth_mode_alias(depth_target_mode)))
         view['target_depth_for_refine_path'] = str(depth_for_refine)
         view['target_depth_for_refine_source_map_path'] = str(source_map_path) if source_map_path is not None and Path(source_map_path).exists() else None
         view['target_depth_source_map'] = source_map
