@@ -219,3 +219,177 @@ def save_float_map_png(arr: np.ndarray, path: str, scale: float = None):
 
 def save_mask_png(mask: np.ndarray, path: str):
     Image.fromarray((np.clip(mask, 0.0, 1.0) * 255).astype(np.uint8)).save(path)
+
+def verify_single_branch_exact(
+    pseudo_state: Dict,
+    ref_state: Dict,
+    pseudo_depth: np.ndarray,
+    ref_depth: np.ndarray,
+    pts_pseudo: np.ndarray,
+    pts_ref: np.ndarray,
+    tau_reproj_px: float = 4.0,
+    tau_rel_depth: float = 0.15,
+    ref_side: str = "left",
+    ref_frame_id: int = 0,
+):
+    """Exact backend verification with provenance tracking and multi-hit diagnostics.
+    
+    Returns additional maps compared to verify_single_branch:
+    - provenance: which ref frame each valid point came from
+    - hit_count: number of matches passing threshold per pixel
+    - occlusion_reason: why each match failed (0=valid, 1=out_of_bounds, 2=behind_camera, 3=depth_mismatch)
+    - confidence: continuous confidence based on reproj_err + depth_err
+    - depth_variance: variance across multiple hits per pixel
+    """    
+    h = int(pseudo_state["image_height"])
+    w = int(pseudo_state["image_width"])
+
+    pts_world, valid_ref_depth, ref_depth_samples = backproject_ref_points_to_world(pts_ref, ref_depth, ref_state)
+    reproj_uv, reproj_z = project_world_to_pseudo(pts_world, pseudo_state)
+
+    in_bounds = (
+        (reproj_uv[:, 0] >= 0) & (reproj_uv[:, 0] < w) &
+        (reproj_uv[:, 1] >= 0) & (reproj_uv[:, 1] < h) &
+        (reproj_z > 1e-4)
+    )
+    behind_camera = reproj_z <= 1e-4
+    out_of_bounds = ~in_bounds & ~behind_camera
+    
+    reproj_err = np.linalg.norm(reproj_uv - pts_pseudo, axis=1)
+    pseudo_depth_samples, valid_pseudo_depth = sample_depth_at_points(pseudo_depth, pts_pseudo)
+    rel_depth_err = np.full_like(reproj_err, fill_value=np.inf, dtype=np.float32)
+    depth_valid = valid_ref_depth & valid_pseudo_depth & (pseudo_depth_samples > 1e-4)
+    rel_depth_err[depth_valid] = np.abs(reproj_z[depth_valid] - pseudo_depth_samples[depth_valid]) / np.maximum(pseudo_depth_samples[depth_valid], 1e-6)
+    
+    depth_mismatch = depth_valid & (rel_depth_err >= tau_rel_depth)
+    
+    # Threshold-based support (binary)
+    support = valid_ref_depth & in_bounds & valid_pseudo_depth & (reproj_err < tau_reproj_px) & (rel_depth_err < tau_rel_depth)
+    
+    # Continuous confidence: exponential decay from errors
+    tau_r = max(tau_reproj_px, 1e-8)
+    tau_d = max(tau_rel_depth, 1e-8)
+    conf_reproj = np.exp(-reproj_err / tau_r).astype(np.float32)
+    conf_depth = np.where(np.isfinite(rel_depth_err), np.exp(-rel_depth_err / tau_d).astype(np.float32), 0.0)
+    continuous_confidence = conf_reproj * conf_depth
+    
+    # Occlusion reason: 0=valid, 1=out_of_bounds, 2=behind_camera, 3=depth_mismatch, 4=no_ref_depth, 5=no_pseudo_depth
+    occlusion_reason = np.zeros(len(pts_pseudo), dtype=np.int32)
+    occlusion_reason[behind_camera] = 2
+    occlusion_reason[out_of_bounds] = 1
+    occlusion_reason[~valid_ref_depth] = 4
+    occlusion_reason[~valid_pseudo_depth & valid_ref_depth & in_bounds] = 5
+    occlusion_reason[depth_mismatch] = 3
+    occlusion_reason[support] = 0  # valid
+    
+    # Provenance: 0=none, 1=left_ref, 2=right_ref
+    provenance_value = 1 if ref_side == "left" else 2
+    provenance = np.zeros(len(pts_pseudo), dtype=np.int32)
+    provenance[support] = provenance_value
+    
+    # Initialize output maps
+    support_mask = np.zeros((h, w), dtype=np.float32)
+    hit_count = np.zeros((h, w), dtype=np.int32)
+    occlusion_reason_map = np.zeros((h, w), dtype=np.int32)
+    confidence_map = np.zeros((h, w), dtype=np.float32)
+    projected_depth_map = np.zeros((h, w), dtype=np.float32)
+    projected_depth_valid_mask = np.zeros((h, w), dtype=np.float32)
+    provenance_map = np.zeros((h, w), dtype=np.int32)
+    
+    # For multi-hit depth variance
+    depth_hits = {}  # (y, x) -> list of depths
+    
+    x = np.round(pts_pseudo[:, 0]).astype(int)
+    y = np.round(pts_pseudo[:, 1]).astype(int)
+    pix_valid = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+    
+    for i in np.where(pix_valid)[0]:
+        xi, yi = x[i], y[i]
+        hit_count[yi, xi] += 1
+        occlusion_reason_map[yi, xi] = occlusion_reason[i]
+        
+        if support[i]:
+            support_mask[yi, xi] = 1.0
+            provenance_map[yi, xi] = provenance[i]
+            
+            # Track depth hits for variance
+            key = (yi, xi)
+            if key not in depth_hits:
+                depth_hits[key] = []
+            depth_hits[key].append(reproj_z[i])
+            
+            # Use best confidence for final depth
+            if projected_depth_valid_mask[yi, xi] == 0 or continuous_confidence[i] > confidence_map[yi, xi]:
+                projected_depth_map[yi, xi] = reproj_z[i]
+                projected_depth_valid_mask[yi, xi] = 1.0
+                confidence_map[yi, xi] = continuous_confidence[i]
+    
+    # Compute depth variance from multi-hits
+    depth_variance_map = np.zeros((h, w), dtype=np.float32)
+    for (yi, xi), depths in depth_hits.items():
+        if len(depths) > 1:
+            depth_variance_map[yi, xi] = float(np.var(depths))
+    
+    # Stats
+    num_projected_depth = int((projected_depth_valid_mask > 0.5).sum())
+    occlusion_breakdown = {
+        "valid": int((occlusion_reason_map == 0).sum()),
+        "out_of_bounds": int((occlusion_reason_map == 1).sum()),
+        "behind_camera": int((occlusion_reason_map == 2).sum()),
+        "depth_mismatch": int((occlusion_reason_map == 3).sum()),
+        "no_ref_depth": int((occlusion_reason_map == 4).sum()),
+        "no_pseudo_depth": int((occlusion_reason_map == 5).sum()),
+    }
+    
+    stats = {
+        "num_matches": int(len(pts_pseudo)),
+        "num_valid_ref_depth": int(valid_ref_depth.sum()),
+        "num_valid_pseudo_depth": int(valid_pseudo_depth.sum()),
+        "num_support": int(support.sum()),
+        "num_projected_depth": num_projected_depth,
+        "support_ratio_vs_matches": float(support.sum() / max(len(pts_pseudo), 1)),
+        "support_ratio_vs_image": float((support_mask > 0).sum() / float(h * w)),
+        "projected_depth_ratio_vs_image": float(num_projected_depth / float(h * w)),
+        "mean_reproj_error": float(reproj_err[support].mean()) if support.any() else None,
+        "mean_rel_depth_error": float(rel_depth_err[support].mean()) if support.any() else None,
+        "tau_reproj_px": float(tau_reproj_px),
+        "tau_rel_depth": float(tau_rel_depth),
+        "ref_side": ref_side,
+        "ref_frame_id": int(ref_frame_id),
+        "avg_confidence": float(confidence_map[support_mask > 0].mean()) if (support_mask > 0).any() else 0.0,
+        "avg_depth_variance": float(depth_variance_map[support_mask > 0].mean()) if (support_mask > 0).any() else 0.0,
+        "multi_hit_pixels": int((hit_count > 1).sum()),
+        "occlusion_breakdown": occlusion_breakdown,
+    }
+
+    # Add reproj_error_map and rel_depth_error_map for downstream compatibility
+    reproj_error_map = np.zeros((h, w), dtype=np.float32)
+    rel_depth_error_map = np.zeros((h, w), dtype=np.float32)
+    match_density = np.zeros((h, w), dtype=np.float32)
+    
+    x_all = np.round(pts_pseudo[:, 0]).astype(int)
+    y_all = np.round(pts_pseudo[:, 1]).astype(int)
+    pix_valid_all = (x_all >= 0) & (x_all < w) & (y_all >= 0) & (y < h)
+    
+    for i in np.where(pix_valid_all)[0]:
+        xi, yi = x_all[i], y_all[i]
+        match_density[yi, xi] += 1
+        if reproj_error_map[yi, xi] == 0 or reproj_err[i] < reproj_error_map[yi, xi]:
+            reproj_error_map[yi, xi] = reproj_err[i]
+        if np.isfinite(rel_depth_err[i]) and (rel_depth_error_map[yi, xi] == 0 or rel_depth_err[i] < rel_depth_error_map[yi, xi]):
+            rel_depth_error_map[yi, xi] = rel_depth_err[i]
+
+    return {
+        "support_mask": support_mask,
+        "reproj_error_map": reproj_error_map,
+        "rel_depth_error_map": rel_depth_error_map,
+        "match_density": match_density,
+        "projected_depth_map": projected_depth_map,
+        "projected_depth_valid_mask": projected_depth_valid_mask,
+        "hit_count": hit_count,
+        "occlusion_reason_map": occlusion_reason_map,
+        "confidence_map": confidence_map,
+        "provenance_map": provenance_map,
+        "depth_variance_map": depth_variance_map,
+        "stats": stats,
+    }

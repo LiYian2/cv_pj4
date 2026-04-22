@@ -65,6 +65,8 @@ def parse_args():
     p.add_argument("--prop-tau-rgb-l1", type=float, default=0.05)
     p.add_argument("--depth-fallback-mode", choices=["render_depth", "none"], default="render_depth")
     p.add_argument("--depth-both-mode", choices=["average"], default="average")
+    p.add_argument("--fusion-use-exact-backend-confidence", action="store_true", help="Use exact backend confidence to replace proxy fusion weights when available")
+    p.add_argument("--fusion-exact-backend-root", default=None, help="Path to exact backend root (contains frame_XXXX/confidence_left_exact.npy)")
 
     # Difix args
     p.add_argument("--prompt", type=str, default="remove degradation")
@@ -407,6 +409,10 @@ def stage_fusion(args, run_root: Path):
     ensure_dir(fusion_root)
     fusion_samples = []
 
+    exact_backend_root = None
+    if args.fusion_use_exact_backend_confidence and args.fusion_exact_backend_root:
+        exact_backend_root = Path(args.fusion_exact_backend_root)
+
     for rec in records:
         frame_root = fusion_frame_root(run_root, rec.frame_id)
         ensure_dir(frame_root)
@@ -441,6 +447,16 @@ def stage_fusion(args, run_root: Path):
         left_ref_depth = render_depth_from_state(gaussians, left_ref_state, pipe, background)
         right_ref_depth = render_depth_from_state(gaussians, right_ref_state, pipe, background)
 
+        exact_conf_left = None
+        exact_conf_right = None
+        if exact_backend_root is not None:
+            exact_frame_root = exact_backend_root / f"frame_{int(rec.frame_id):04d}"
+            l_conf = exact_frame_root / "confidence_left_exact.npy"
+            r_conf = exact_frame_root / "confidence_right_exact.npy"
+            if l_conf.exists() and r_conf.exists():
+                exact_conf_left = np.load(l_conf).astype(np.float32)
+                exact_conf_right = np.load(r_conf).astype(np.float32)
+
         stats, *_ = run_fusion_for_sample(
             render_rgb_path=str(render_rgb),
             target_rgb_left_path=str(target_left),
@@ -459,6 +475,8 @@ def stage_fusion(args, run_root: Path):
             depth_consistency_tau=0.15,
             translation_scale_tau=1.0,
             overlap_valid_eps=1e-4,
+            exact_conf_left=exact_conf_left,
+            exact_conf_right=exact_conf_right,
         )
         meta_path = frame_root / 'fusion_meta.json'
         meta = load_json(meta_path) if meta_path.exists() else {}
@@ -476,6 +494,8 @@ def stage_fusion(args, run_root: Path):
             'left_ref_rgb_path': str(Path(left_ref_state['image_path']).resolve()),
             'right_ref_rgb_path': str(Path(right_ref_state['image_path']).resolve()),
             'stage_ply_path': str(stage_ply.resolve()),
+            'fusion_use_exact_backend_confidence': bool(args.fusion_use_exact_backend_confidence),
+            'fusion_exact_backend_root': str(exact_backend_root.resolve()) if exact_backend_root is not None else None,
         })
         write_json(meta_path, meta)
         fusion_samples.append({

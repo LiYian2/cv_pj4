@@ -1,6 +1,6 @@
 # DESIGN.md - Part3 BRPO 设计文档
 
-> 更新时间：2026-04-20 19:10 (Asia/Shanghai)
+> 更新时间：2026-04-22 04:22 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只记录"设计原则、架构决策、接口定义"，不记录实验数据
@@ -36,6 +36,33 @@ Pipeline:
   Prepare → Fusion → M~/T~ builder → G~ gating → R~ topology → Backward → Optimize
 ```
 
+
+
+### 1.3 T~ 状态
+
+**Phase T1-T4 已完成**：
+- exact backend bundle（`verify_single_branch_exact`）
+- exact target field（`build_exact_upstream_depth_target`）
+- exact loss contract（`build_stageA_loss_exact_shared_cm`）
+- branch-native verifier input + exact-upstream signal + consumer smoke
+- fixed clean G~ / fixed T1 formal compare
+
+**核心语义**：
+- `no_render_fallback=true`：不支持区域保持 invalid/zeroed，不悄悄 fallback
+- `shared C_m`：RGB 和 depth 使用同一 confidence mask
+- `verifier_backend_semantics=exact_branch_native_v1`：branch-native provenance
+- `exact_brpo_upstream_target_v1`：当前 winning T~ bundle
+
+**设计结论**：T~ 的决定性增益来自 upstream verifier/backend/target field 的整体对齐，而不是继续在 proxy backend 上做 consumer-side exact 化。
+
+### 1.4 工程目录组织（第二轮整理）
+
+- `scripts/` 顶层只保留 live 入口、active builder 和仍在被当前 docs 消费的 utility；历史 compare / one-off runner 归档到 `scripts/archive_experiments/`
+- `pseudo_branch/` 已建立 `common/ / observation/ / mask/ / target/ / gaussian_management/ / refine/` 六个骨架目录
+- G~ Phase 1 已落地：`local_gating/`、`spgm/`、`gaussian_param_groups.py` 已迁入 `pseudo_branch/gaussian_management/`，直接 caller 已切到新路径，旧 top-level G~ 路径已退役
+- 后续迁移继续按 direct migration 执行：每一轮都直接改 import / caller / doc 引用，不保留长期兼容 shim；下一步是 Phase 2 R~ 壳层迁移
+- 详细 mapping 与阶段顺序见 `docs/design/PSEUDO_BRANCH_LAYOUT.md`；本轮记录见 `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`
+
 ---
 
 ## 2. 当前主线
@@ -48,12 +75,12 @@ Pipeline:
 
 | 模块 | 当前状态 | 说明 |
 |------|---------|------|
-| M~ | exact M~ | 已基本对齐 BRPO semantics |
-| T~ | old T~ | 最稳，depth pipeline 成熟 |
-| G~ | summary control | Boolean/Opacity 仍弱负，暂不 landing |
+| M~ | exact M~ | 已基本对齐 BRPO semantics；`exact_brpo_cm_old_target_v1` 保留为 semantics-clean control |
+| T~ | exact upstream T~ | T4 formal compare 已证实这是当前 winning target path |
+| G~ | clean summary G~ | clean compare 证明 G~ 不是当前主瓶颈 |
 | R~ | T1 (brpo_joint_v1) | 当前 topology 主线 |
 
-**最佳组合**：`exact M~ + old T~ + summary G~ + T1` ≈ old A1 + new T1
+**当前主线判断**：`exact M~ + exact upstream T~ + clean summary G~ + T1` 是当前 standalone 最优组合；`exact M~ + old T~ + clean summary G~ + T1` 与 `old A1 + new T1` 保留为对照 control。
 
 ---
 
@@ -65,14 +92,16 @@ Pipeline:
 - 剩余 gap 不在 M~
 
 ### 3.2 T~ 结论
-- old T~ 最稳（工程成熟）
-- exact T~ 在当前 proxy backend 下仍弱 -0.013 PSNR
-- 真正瓶颈在上游 Layer B proxy
+- `exact_brpo_full_target_v1` 证明：只做 proxy backend 下的 consumer-side exact 化，不足以赢 old A1
+- `exact_brpo_upstream_target_v1` 证明：把 verifier backend / projected-depth / target field 整体拉到 exact upstream 之后，strict BRPO T~ 可以转成正向 winner
+- 因此 T~ 当前主线应固定为 **exact upstream T~**，old T~ 仅保留为历史 control
+- 后续大工程的重点不再是继续扫 standalone T~ compare，而是把这套 winner 以 backend-only 方式集成进 S3PO
 
 ### 3.3 G~ 结论
-- Boolean/Opacity/Summary 三模式无区别
-- 原因：分数相关、动作轻、delayed、动作域窄
-- 下一步：C0 层拉开分数，不进 O2a/b
+- clean compare 之后，direct BRPO current-step 仍有小幅正向，但幅度只有约 `+0.005 PSNR`
+- 旧 `+0.0114` 结论来自脏 baseline，不能继续当设计依据
+- legacy delayed opacity 明确负向，不能作为 landing 路线
+- 因此 G~ 应定位为：**语义已对齐、收益有限的 side branch**；下一步不优先继续扩 G~，而是转到 T~ upstream
 
 ### 3.4 R~ 结论
 - T1 (brpo_joint_v1) 是稳定 topology 主线
@@ -105,9 +134,9 @@ Pipeline:
 
 | mode | action 类型 | 输出 |
 |------|------------|------|
-| summary | 无动作 | 只统计 |
-| boolean | mask | participation_render_mask |
-| opacity | scale | participation_opacity_scale |
+| clean summary | 无动作 / no-action control | diagnostics only |
+| legacy opacity | delayed opacity scale | participation_opacity_scale |
+| direct current-step | stochastic Bernoulli opacity masking | participation_opacity_scale + current-step history |
 
 ### 4.4 R~ 接口
 
@@ -122,7 +151,8 @@ Pipeline:
 
 - 不继续打磨 verify proxy（已完成 negative proof）
 - 不在 M~ contract 上继续微调（已对齐）
-- 不在 G~ delayed opacity 仍弱负时推进 O2a/b
+- 不再把旧 `+0.0114` G~ 结论当成当前依据
+- 不在 G~ legacy delayed opacity 仍负向时推进 O2a/b
 - 不把 T~ 剩余 gap 简化成单侧问题
 - 不在 observation compare 里同时改 topology 或 G~
 
@@ -132,6 +162,10 @@ Pipeline:
 
 - 状态：[STATUS.md]
 - 过程：[CHANGELOG.md]
+- G~ clean compare：[docs/archived/2026-04-experiments/G_BRPO_CLEAN_COMPARE_20260421.md]
+- T4 compare 执行文档：[docs/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md]
+- pseudo_branch 目录迁移：[docs/design/PSEUDO_BRANCH_LAYOUT.md]
+- pseudo_branch G~ 迁移记录：[docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md]
 - M~ 详细：[MASK_DESIGN.md]
 - T~ 详细：[TARGET_DESIGN.md]
 - G~ 详细：[GAUSSIAN_MANAGEMENT_DESIGN.md]

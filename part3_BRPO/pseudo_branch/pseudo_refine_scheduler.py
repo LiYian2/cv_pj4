@@ -6,7 +6,7 @@ from typing import List, Tuple
 import torch
 
 from pseudo_branch.pseudo_camera_state import viewpoint_optimizer_groups
-from pseudo_branch.gaussian_param_groups import build_micro_gaussian_param_groups
+from pseudo_branch.gaussian_management.gaussian_param_groups import build_micro_gaussian_param_groups
 
 
 @dataclass

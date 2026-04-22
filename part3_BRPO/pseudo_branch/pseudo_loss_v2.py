@@ -371,3 +371,121 @@ def build_stageA_loss(
         return total, stats, terms
     return total, stats
 
+
+
+def build_stageA_loss_exact_shared_cm(
+    render_rgb,
+    render_depth,
+    target_rgb,
+    target_depth,
+    confidence_mask,  # shared C_m for RGB and depth
+    viewpoint,
+    beta_rgb: float,
+    lambda_pose: float,
+    lambda_exp: float,
+    trans_weight: float,
+    lambda_depth: float = 1.0,
+    use_depth: bool = True,
+    lambda_abs_pose: float = 0.0,
+    lambda_abs_t: float = 0.0,
+    lambda_abs_r: float = 0.0,
+    abs_pose_robust: str = "charbonnier",
+    scene_scale: float = 1.0,
+    return_terms: bool = False,
+    valid_mask=None,  # exact valid mask (optional, for additional gating)
+    target_confidence=None,  # continuous target confidence (optional)
+):
+    """Exact shared C_m loss contract for exact T~ upstream.
+    
+    Key differences from build_stageA_loss:
+    1. RGB and depth share the same C_m (no separate masks)
+    2. No source_aware grouping (exact valid_mask defines scope)
+    3. No fallback (exact T~ explicitly rejects fallback)
+    4. Optional continuous confidence weighting
+    """    
+    # Shared C_m for RGB and depth
+    shared_mask = to_torch(confidence_mask, device="cuda")
+    
+    # Apply additional valid_mask gating if provided
+    if valid_mask is not None:
+        valid = to_torch(valid_mask, device="cuda") > 0.5
+        shared_mask = shared_mask * valid.float()
+    
+    # Optional continuous confidence weighting
+    if target_confidence is not None:
+        cont_conf = to_torch(target_confidence, device="cuda")
+        # Combine discrete C_m with continuous confidence
+        effective_mask = shared_mask * cont_conf
+    else:
+        effective_mask = shared_mask
+    
+    l_rgb = masked_rgb_loss(render_rgb, target_rgb, effective_mask, viewpoint)
+    
+    if use_depth:
+        # Depth loss uses same mask as RGB (shared C_m semantics)
+        l_depth = masked_depth_loss(render_depth, target_depth, effective_mask)
+    else:
+        l_depth = torch.zeros((), device=render_rgb.device)
+    
+    l_pose = pose_reg_loss(viewpoint, trans_weight)
+    
+    if float(lambda_abs_t) != 0.0 or float(lambda_abs_r) != 0.0:
+        l_abs_pose, l_abs_t, l_abs_r, comps = absolute_pose_prior_loss_scaled(
+            viewpoint=viewpoint,
+            scene_scale=scene_scale,
+            lambda_abs_t=lambda_abs_t,
+            lambda_abs_r=lambda_abs_r,
+            robust_type=abs_pose_robust,
+        )
+    else:
+        legacy = absolute_pose_prior_loss(viewpoint)
+        l_abs_pose = float(lambda_abs_pose) * legacy
+        l_abs_t = l_abs_pose
+        l_abs_r = torch.zeros_like(l_abs_t)
+        comps = compute_abs_pose_components(viewpoint, scene_scale)
+    
+    l_exp = exposure_reg_loss(viewpoint)
+    
+    # Exact loss contract: RGB + depth with shared C_m
+    total = (
+        float(beta_rgb) * l_rgb
+        + float(lambda_depth) * l_depth  # single depth term, no seed/dense/fallback split
+        + float(lambda_pose) * l_pose
+        + l_abs_pose
+        + float(lambda_exp) * l_exp
+    )
+    
+    stats = _build_stats_dict(
+        l_rgb=l_rgb,
+        l_depth=l_depth,
+        l_depth_seed=l_depth,  # for compatibility, treat as seed
+        l_depth_dense=torch.zeros_like(l_depth),  # no dense
+        l_depth_fallback=torch.zeros_like(l_depth),  # no fallback
+        l_pose=l_pose,
+        l_abs_pose=l_abs_pose,
+        l_abs_t=l_abs_t,
+        l_abs_r=l_abs_r,
+        l_exp=l_exp,
+        total=total,
+        comps=comps,
+        extra_stats={
+            "exact_shared_cm_v1": True,
+            "no_render_fallback": True,
+            "rgb_depth_share_cm": True,
+            "lambda_depth": float(lambda_depth),
+            "effective_mask_mean": float(effective_mask.mean().item()),
+            "effective_mask_nonzero_ratio": float((effective_mask > 0).float().mean().item()),
+        }
+    )
+    
+    if return_terms:
+        return total, stats, {
+            "l_rgb": l_rgb,
+            "l_depth": l_depth,
+            "l_pose": l_pose,
+            "l_abs_pose": l_abs_pose,
+            "l_exp": l_exp,
+            "comps": comps,
+        }
+    return total, stats
+

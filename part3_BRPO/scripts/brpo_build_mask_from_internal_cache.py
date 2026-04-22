@@ -15,6 +15,7 @@ from pseudo_branch.brpo_reprojection_verify import (
     find_neighbor_kfs,
     render_depth_from_state,
     verify_single_branch,
+    verify_single_branch_exact,
     save_float_map_png,
 )
 from pseudo_branch.brpo_confidence_mask import (
@@ -53,6 +54,10 @@ def parse_args():
     p.add_argument("--cont-tau-reproj", type=float, default=4.0)
     p.add_argument("--cont-tau-depth", type=float, default=0.15)
     p.add_argument("--cont-tau-agree", type=float, default=0.10)
+    p.add_argument("--verifier-backend-semantics", choices=["proxy_flow_v3", "exact_branch_native_v1"], default="proxy_flow_v3",
+                   help="Verifier backend semantics: proxy_flow_v3 (current threshold) or exact_branch_native_v1 (provenance-aware)")
+    p.add_argument("--exact-backend-output-dir", default=None,
+                   help="Output directory for exact backend bundle (defaults to output_root/exact_backend_v1)")
     return p.parse_args()
 
 
@@ -89,7 +94,7 @@ def resolve_fused_pseudo_rgb(frame_id: int, image_name: str, default_path: Path,
     return default_path
 
 
-def run_branch(side, frame_id, pseudo_state, ref_state, pseudo_rgb_path, pseudo_depth_path, stage_ply, gaussians, pipe, background, matcher, tau_reproj_px, tau_rel_depth, pseudo_left_root=None, pseudo_right_root=None, pseudo_role="branch"):
+def run_branch(side, frame_id, pseudo_state, ref_state, pseudo_rgb_path, pseudo_depth_path, stage_ply, gaussians, pipe, background, matcher, tau_reproj_px, tau_rel_depth, pseudo_left_root=None, pseudo_right_root=None, pseudo_role="branch", use_exact_backend=False):
     ref_rgb_path = Path(ref_state["image_path"])
     branch_pseudo_rgb_path = resolve_branch_pseudo_rgb(
         side,
@@ -102,16 +107,30 @@ def run_branch(side, frame_id, pseudo_state, ref_state, pseudo_rgb_path, pseudo_
     pseudo_depth = np.load(pseudo_depth_path).astype(np.float32)
     ref_depth = render_depth_from_state(gaussians, ref_state, pipe, background)
     pts_pseudo, pts_ref, _ = matcher.match_pair(str(branch_pseudo_rgb_path), str(ref_rgb_path), size=int(pseudo_state["image_width"]))
-    result = verify_single_branch(
-        pseudo_state=pseudo_state,
-        ref_state=ref_state,
-        pseudo_depth=pseudo_depth,
-        ref_depth=ref_depth,
-        pts_pseudo=pts_pseudo,
-        pts_ref=pts_ref,
-        tau_reproj_px=tau_reproj_px,
-        tau_rel_depth=tau_rel_depth,
-    )
+    if use_exact_backend:
+        result = verify_single_branch_exact(
+            pseudo_state=pseudo_state,
+            ref_state=ref_state,
+            pseudo_depth=pseudo_depth,
+            ref_depth=ref_depth,
+            pts_pseudo=pts_pseudo,
+            pts_ref=pts_ref,
+            tau_reproj_px=tau_reproj_px,
+            tau_rel_depth=tau_rel_depth,
+            ref_side=side,
+            ref_frame_id=int(ref_state["frame_id"]),
+        )
+    else:
+        result = verify_single_branch(
+            pseudo_state=pseudo_state,
+            ref_state=ref_state,
+            pseudo_depth=pseudo_depth,
+            ref_depth=ref_depth,
+            pts_pseudo=pts_pseudo,
+            pts_ref=pts_ref,
+            tau_reproj_px=tau_reproj_px,
+            tau_rel_depth=tau_rel_depth,
+        )
     meta = {
         "frame_id": int(frame_id),
         "ref_side": side,
@@ -151,6 +170,12 @@ def main():
     output_root = Path(args.output_root) if args.output_root else default_out
     output_root.mkdir(parents=True, exist_ok=True)
 
+    use_exact = args.verifier_backend_semantics == "exact_branch_native_v1"
+    exact_backend_root = None
+    if use_exact:
+        exact_backend_root = Path(args.exact_backend_output_dir) if args.exact_backend_output_dir else (output_root / "exact_backend_v1")
+        exact_backend_root.mkdir(parents=True, exist_ok=True)
+
     summary = []
 
     for frame_id in args.frame_ids:
@@ -184,12 +209,14 @@ def main():
             left_result, left_meta, left_ref_depth = run_branch(
                 "left", frame_id, pseudo_state, left_state, pseudo_rgb_path, pseudo_depth_path,
                 stage_ply, gaussians, pipe, background, matcher, args.tau_reproj_px, args.tau_rel_depth,
-                args.pseudo_left_root, args.pseudo_right_root, pseudo_role="branch"
+                args.pseudo_left_root, args.pseudo_right_root, pseudo_role="branch",
+                use_exact_backend=use_exact
             )
             right_result, right_meta, right_ref_depth = run_branch(
                 "right", frame_id, pseudo_state, right_state, pseudo_rgb_path, pseudo_depth_path,
                 stage_ply, gaussians, pipe, background, matcher, args.tau_reproj_px, args.tau_rel_depth,
-                args.pseudo_left_root, args.pseudo_right_root, pseudo_role="branch"
+                args.pseudo_left_root, args.pseudo_right_root, pseudo_role="branch",
+                use_exact_backend=use_exact
             )
 
         fused = build_brpo_confidence_mask(
@@ -317,6 +344,55 @@ def main():
         save_float_map_png(left_result["projected_depth_valid_mask"], str(diag_dir / "projected_depth_valid_left.png"), scale=1.0)
         save_float_map_png(right_result["projected_depth_valid_mask"], str(diag_dir / "projected_depth_valid_right.png"), scale=1.0)
 
+        # Export exact backend bundle if requested
+        if use_exact and exact_backend_root:
+            exact_frame_out = exact_backend_root / f"frame_{int(frame_id):04d}"
+            exact_frame_out.mkdir(parents=True, exist_ok=True)
+            
+            # Save exact backend arrays
+            np.save(exact_frame_out / "support_left_exact.npy", left_result["support_mask"])
+            np.save(exact_frame_out / "support_right_exact.npy", right_result["support_mask"])
+            np.save(exact_frame_out / "projected_depth_left_exact.npy", left_result["projected_depth_map"])
+            np.save(exact_frame_out / "projected_depth_right_exact.npy", right_result["projected_depth_map"])
+            np.save(exact_frame_out / "projected_valid_left_exact.npy", left_result["projected_depth_valid_mask"])
+            np.save(exact_frame_out / "projected_valid_right_exact.npy", right_result["projected_depth_valid_mask"])
+            np.save(exact_frame_out / "provenance_left.npy", left_result["provenance_map"])
+            np.save(exact_frame_out / "provenance_right.npy", right_result["provenance_map"])
+            np.save(exact_frame_out / "hit_count_left.npy", left_result["hit_count"])
+            np.save(exact_frame_out / "hit_count_right.npy", right_result["hit_count"])
+            np.save(exact_frame_out / "occlusion_reason_left.npy", left_result["occlusion_reason_map"])
+            np.save(exact_frame_out / "occlusion_reason_right.npy", right_result["occlusion_reason_map"])
+            np.save(exact_frame_out / "confidence_left_exact.npy", left_result["confidence_map"])
+            np.save(exact_frame_out / "confidence_right_exact.npy", right_result["confidence_map"])
+            np.save(exact_frame_out / "depth_variance_left.npy", left_result["depth_variance_map"])
+            np.save(exact_frame_out / "depth_variance_right.npy", right_result["depth_variance_map"])
+            
+            # Write exact backend meta
+            exact_meta = {
+                "frame_id": int(frame_id),
+                "verifier_backend_semantics": "exact_branch_native_v1",
+                "target_proxy_semantics": "branch_native_exact",
+                "verification_mode": args.verification_mode,
+                "left_ref_frame_id": int(left_kf),
+                "right_ref_frame_id": int(right_kf),
+                "tau_reproj_px": float(args.tau_reproj_px),
+                "tau_rel_depth": float(args.tau_rel_depth),
+                "backend_version": "exact-v1",
+                "left_stats": left_result["stats"],
+                "right_stats": right_result["stats"],
+                "policy": {
+                    "multi_hit_resolve": "best_confidence",
+                    "occlusion_handling": "explicit_invalid",
+                    "provenance_tracking": True,
+                    "confidence_continuous": True,
+                },
+            }
+            with open(exact_frame_out / "exact_backend_meta.json", "w") as f:
+                import json
+                json.dump(exact_meta, f, indent=2)
+            
+            frame_meta["exact_backend_bundle_path"] = str(exact_frame_out)
+
         summary.append(frame_meta)
 
     with open(output_root / "summary.json", "w", encoding="utf-8") as f:
@@ -329,6 +405,8 @@ def main():
             "stage_ply": str(stage_ply),
             "frame_ids": [int(x) for x in args.frame_ids],
             "verification_mode": args.verification_mode,
+            "verifier_backend_semantics": args.verifier_backend_semantics,
+            "exact_backend_root": str(exact_backend_root) if exact_backend_root else None,
             "pseudo_left_root": args.pseudo_left_root,
             "pseudo_right_root": args.pseudo_right_root,
             "pseudo_fused_root": args.pseudo_fused_root,
@@ -347,6 +425,7 @@ def main():
             "exports": {
                 "projected_depth": True,
                 "projected_depth_valid_mask": True,
+                "exact_backend_bundle": use_exact,
             },
         }, f, indent=2)
 

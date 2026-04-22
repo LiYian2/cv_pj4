@@ -36,6 +36,7 @@ from pseudo_branch.brpo_v2_signal.pseudo_observation_brpo_style import (
     build_exact_brpo_cm_old_target_observation,
     build_exact_brpo_cm_stable_target_observation,
     build_exact_brpo_full_target_observation,
+    build_exact_brpo_upstream_target_observation,
     write_brpo_direct_observation_outputs,
     write_brpo_style_observation_outputs,
     write_brpo_style_observation_outputs_v2,
@@ -43,6 +44,7 @@ from pseudo_branch.brpo_v2_signal.pseudo_observation_brpo_style import (
     write_exact_brpo_cm_old_target_observation_outputs,
     write_exact_brpo_cm_stable_target_observation_outputs,
     write_exact_brpo_full_target_observation_outputs,
+    write_exact_brpo_upstream_target_observation_outputs,
 )
 from pseudo_branch.brpo_v2_signal.support_expand import (
     build_support_expand_from_a1,
@@ -70,6 +72,9 @@ def parse_args():
     p.add_argument("--a2-fusion-weight-threshold", type=float, default=0.3, help="Min fusion weight for expansion")
     p.add_argument("--a2-max-expand-iterations", type=int, default=3, help="Max region grow iterations")
     p.add_argument("--dry-run", action="store_true")
+    # Exact upstream backend parameters
+    p.add_argument("--use-exact-backend", action="store_true", help="Use exact backend bundle instead of proxy projected depth")
+    p.add_argument("--exact-backend-root", default=None, help="Root directory of exact backend bundle (must contain exact_backend_v1/frame_*")
     return p.parse_args()
 
 
@@ -509,6 +514,49 @@ def main():
         }
         write_exact_brpo_cm_stable_target_observation_outputs(frame_out, exact_brpo_cm_stable_target_result, exact_brpo_cm_stable_target_meta)
 
+        # Exact upstream backend observation (Phase T2)
+        exact_upstream_result = None
+        exact_upstream_meta = None
+        if args.use_exact_backend and args.exact_backend_root:
+            exact_backend_frame_root = Path(args.exact_backend_root) / f"frame_{int(frame_id):04d}"
+            if exact_backend_frame_root.exists():
+                support_left_exact = np.load(exact_backend_frame_root / "support_left_exact.npy").astype(np.float32)
+                support_right_exact = np.load(exact_backend_frame_root / "support_right_exact.npy").astype(np.float32)
+                projected_depth_left_exact = np.load(exact_backend_frame_root / "projected_depth_left_exact.npy").astype(np.float32)
+                projected_depth_right_exact = np.load(exact_backend_frame_root / "projected_depth_right_exact.npy").astype(np.float32)
+                confidence_left_exact = np.load(exact_backend_frame_root / "confidence_left_exact.npy").astype(np.float32)
+                confidence_right_exact = np.load(exact_backend_frame_root / "confidence_right_exact.npy").astype(np.float32)
+                
+                exact_upstream_result = build_exact_brpo_upstream_target_observation(
+                    support_left_exact=support_left_exact,
+                    support_right_exact=support_right_exact,
+                    projected_depth_left_exact=projected_depth_left_exact,
+                    projected_depth_right_exact=projected_depth_right_exact,
+                    confidence_left_exact=confidence_left_exact,
+                    confidence_right_exact=confidence_right_exact,
+                    fusion_weight_left=fusion_weight_left,
+                    fusion_weight_right=fusion_weight_right,
+                )
+                exact_upstream_meta = {
+                    "frame_id": frame_id,
+                    "image_name": image_name,
+                    "left_ref_frame_id": left_ref_id,
+                    "right_ref_frame_id": right_ref_id,
+                    "verifier_backend_semantics": "exact_branch_native_v1",
+                    "target_field_semantics": "exact_upstream_v1",
+                    "exact_backend_bundle_path": str(exact_backend_frame_root),
+                    "fusion_weight_left_path": str(fused_root / "fusion_weight_left.npy"),
+                    "fusion_weight_right_path": str(fused_root / "fusion_weight_right.npy"),
+                    "consumer_contract": {
+                        "pseudo_observation_mode": "exact_brpo_upstream_target_v1",
+                        "shared_confidence": "pseudo_confidence_exact_brpo_upstream_target_v1",
+                        "depth_target": "pseudo_depth_target_exact_brpo_upstream_target_v1",
+                        "source_map": "pseudo_source_map_exact_brpo_upstream_target_v1",
+                        "upstream_backend": "exact_branch_native_v1",
+                    },
+                }
+                write_exact_brpo_upstream_target_observation_outputs(frame_out, exact_upstream_result, exact_upstream_meta)
+
         # A2: geometry-constrained support expansion (optional)
         expand_result = None
         expand_meta = None
@@ -548,6 +596,8 @@ def main():
             "exact_brpo_cm_hybrid_target_summary": exact_brpo_cm_hybrid_target_result["summary"],
             "exact_brpo_cm_stable_target_summary": exact_brpo_cm_stable_target_result["summary"],
         }
+        if exact_upstream_result:
+            frame_summary["exact_brpo_upstream_target_summary"] = exact_upstream_result["summary"]
         if expand_meta:
             frame_summary["expand_summary"] = expand_meta["final_summary"]
         summary.append(frame_summary)
@@ -574,6 +624,10 @@ def main():
         "exact_brpo_cm_stable_target_version": "exact_brpo_cm_stable_target_v1",
         "num_frames": len(summary),
     }
+    if args.use_exact_backend:
+        summary_meta["exact_upstream_backend_enabled"] = True
+        summary_meta["exact_backend_root"] = str(args.exact_backend_root)
+        summary_meta["exact_brpo_upstream_target_version"] = "exact_brpo_upstream_target_v1"
     if args.use_a2_expand:
         summary_meta["a2_expand_enabled"] = True
         summary_meta["a2_parameters"] = {

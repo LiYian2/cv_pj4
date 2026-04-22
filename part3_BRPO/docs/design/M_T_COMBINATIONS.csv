@@ -1,0 +1,14 @@
+M_class,M_name,T_class,T_name,combination_name,experiment_status,PSNR,notes
+M1,Legacy Joint,T1,Old Pipeline,old A1 (implicit),verified,24.1877,current most stable baseline
+M1,Legacy Joint,T1,Old Pipeline,brpo_joint_v1,verified,-,legacy topology experiment (use joint confidence)
+M1,Legacy Joint,T1,Old Pipeline,brpo_verify_v1,verified,-,verify path (negative proof, not mainline)
+M2,BRPO-style Support Sets,T2,BRPO-style Proxy,brpo_style_v1,verified,-,M2+T2 same verification domain, proxy backend
+M2,BRPO-style Support Sets,T3,Stable Blend,brpo_style_v2,verified,-,M2+T3 with stable fallback
+M2,BRPO-style Support Sets,T2,BRPO-style Proxy,exact_brpo_cm_full_target_v1,verified,24.174,-0.013 vs old A1, T2 backend is proxy
+M2 Exact,BRPO-style Exact,T1,Old Pipeline,exact_brpo_cm_old_target_v1,verified,24.1877,<1e-5 difference vs old A1, M2 aligned
+M2 Exact,BRPO-style Exact,T2,BRPO-style Proxy,exact_brpo_cm_full_target_v1,verified,24.174,M2 exact + T2 proxy, -0.013 vs old A1
+M2 Exact,BRPO-style Exact,T3,Stable Blend,exact_brpo_cm_stable_target_v1,verified,-,comparison experiment
+M2 Exact,BRPO-style Exact,T3 Hybrid,Stable Hybrid,exact_brpo_cm_hybrid_target_v1,verified,-,comparison experiment
+M2 Exact,BRPO-style Exact,T4,Exact Upstream,exact_brpo_upstream_target_v1,pending (T4),-,Phase T4 target: exact backend + verifier-driven composition
+M3,Hybrid Geometry-gated,T3 Hybrid,Hybrid,brpo_direct_v1,verified,-,M3+T3 same source (candidate competition), unstable
+M3,Hybrid Geometry-gated,T3 Hybrid,Hybrid,hybrid_brpo_cm_geo_v1,verified,-,M3+T3 geometry-gated version

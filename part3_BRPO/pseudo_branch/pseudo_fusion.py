@@ -309,6 +309,8 @@ def run_fusion_for_sample(
     depth_consistency_tau: float = 0.15,
     translation_scale_tau: float = 1.0,
     overlap_valid_eps: float = 1e-4,
+    exact_conf_left: Optional[np.ndarray] = None,
+    exact_conf_right: Optional[np.ndarray] = None,
 ) -> Tuple[Dict, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
     """Run fusion for one sample.
 
@@ -365,10 +367,17 @@ def run_fusion_for_sample(
         overlap_valid_eps=overlap_valid_eps,
     )
 
-    w_left, w_right, c_fused = normalize_branch_weights(
-        left_geom["overlap_confidence"],
-        right_geom["overlap_confidence"],
-    )
+    if exact_conf_left is not None and exact_conf_right is not None:
+        exact_conf_left = np.asarray(exact_conf_left, dtype=np.float32)
+        exact_conf_right = np.asarray(exact_conf_right, dtype=np.float32)
+        w_left, w_right, c_fused = normalize_branch_weights(exact_conf_left, exact_conf_right)
+        fusion_weight_source = "exact_backend_confidence"
+    else:
+        w_left, w_right, c_fused = normalize_branch_weights(
+            left_geom["overlap_confidence"],
+            right_geom["overlap_confidence"],
+        )
+        fusion_weight_source = "proxy_overlap_confidence"
     fused = fuse_residual_targets(i_render, i_left, i_right, w_left, w_right)
 
     Image.fromarray(fused).save(output_dir / "target_rgb_fused.png")
@@ -403,6 +412,7 @@ def run_fusion_for_sample(
     mean_conf = float(c_fused[c_fused > 0].mean()) if (c_fused > 0).any() else 0.0
     stats = {
         "fusion_mode": "brpo_overlap_confidence_v1",
+        "fusion_weight_source": fusion_weight_source,
         "support_ratio_fused": support_ratio,
         "support_pixels_fused": int((c_fused > 0.01).sum()),
         "mean_conf_fused": mean_conf,
@@ -423,9 +433,75 @@ def run_fusion_for_sample(
     }
     with open(output_dir / "fusion_meta.json", "w", encoding="utf-8") as f:
         json.dump(stats, f, indent=2)
+    
+    # Phase T1 补充：export branch-native artifacts for exact T~ backend
+    branch_native_meta = export_branch_native_artifacts(
+        output_dir=output_dir,
+        i_render=i_render,
+        i_left=i_left,
+        i_right=i_right,
+        w_left=w_left,
+        w_right=w_right,
+        left_geom=left_geom,
+        right_geom=right_geom,
+        export_branch_rgb=False,  # exact backend uses pseudo RGB from cache, not fusion output
+    )
+    stats["branch_native_exact_exported"] = True
+    stats["branch_native_meta"] = branch_native_meta
+    
     return stats, i_render, i_left, i_right, w_left, w_right, left_geom["overlap_confidence"], c_fused
 
 
+
+def export_branch_native_artifacts(
+    output_dir: Path,
+    i_render: np.ndarray,
+    i_left: np.ndarray,
+    i_right: np.ndarray,
+    w_left: np.ndarray,
+    w_right: np.ndarray,
+    left_geom: Dict,
+    right_geom: Dict,
+    export_branch_rgb: bool = False,
+):
+    """Export branch-native artifacts for exact T~ backend.
+    
+    This is separate from target_rgb_fused.png which is kept as debug/control.
+    Exact T~ backend should consume branch-native provenance-aware artifacts.
+    """    
+    output_dir = Path(output_dir)
+    exact_dir = output_dir / "branch_native_exact"
+    exact_dir.mkdir(parents=True, exist_ok=True)
+    
+    # Save branch-native weights and confidence (already done in run_fusion_for_sample)
+    # Here we add provenance markers in metadata
+    
+    # Optionally export branch-native RGB
+    if export_branch_rgb:
+        Image.fromarray(i_left).save(exact_dir / "target_rgb_left.png")
+        Image.fromarray(i_right).save(exact_dir / "target_rgb_right.png")
+        Image.fromarray(i_render).save(exact_dir / "render_rgb.png")
+    
+    # Metadata for branch-native artifacts
+    meta = {
+        "fusion_output_mode": "branch_native_exact",
+        "target_rgb_fused_role": "debug_control",
+        "branch_native_role": "exact_upstream_truth",
+        "provenance": {
+            "fusion_weight_left": "branch_native_from_left_ref",
+            "fusion_weight_right": "branch_native_from_right_ref",
+            "overlap_conf_left": "overlap_confidence_to_left_ref",
+            "overlap_conf_right": "overlap_confidence_to_right_ref",
+            "projected_depth_left": "projected_from_left_ref",
+            "projected_depth_right": "projected_from_right_ref",
+        },
+        "export_branch_rgb": export_branch_rgb,
+    }
+    with open(exact_dir / "branch_native_meta.json", "w") as f:
+        import json
+        json.dump(meta, f, indent=2)
+    
+    return meta
 def get_fusion_diag_images(
     I_L: np.ndarray,
     I_R: np.ndarray,

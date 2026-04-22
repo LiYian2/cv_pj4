@@ -1,298 +1,345 @@
 # TARGET_DESIGN.md - T~ Target 设计文档
 
-> 更新时间：2026-04-20 19:00 (Asia/Shanghai)
+> 更新时间：2026-04-22 03:39 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只讲 T~（target）：信息从哪里来、怎么转换成 target 数值、怎么被下游消费
 > 2. 遵循"信息源 → 信号转换 → 下游消费"链式分析
-> 3. 需要比较时，统一比较 BRPO / old T~ / new T~ / hybrid T~ / stable T~ / exact T~
-> 4. 数学公式用 `$...$` 或 `$$...$$` 包裹
+> 3. 数学公式用 `$...$` 或 `$$...$$` 包裹
+> 4. T~ 与 M~ 语义分离，但工程实现可能有组合命名约定
 > 5. 更新后修改文档顶部时间戳
 
 ---
 
-## 1. 先说结论
+## 1. 概览
 
-T~（target）与 M~（mask）最初实现是耦合的：两者都从同一套 correspondence / projected depth 信息派生。但语义上它们是独立组件：
-- **M~**：决定"哪些像素被监督、监督强度如何"
-- **T~**：决定"监督目标的数值是什么"
+T~（Target）决定"监督目标的数值是什么"。**T~ 有 4 大类**：
 
-当前最佳组合是 `exact M~ + old T~`（≈ old A1），因为 old T~ 的 depth pipeline 更成熟稳定。pure exact T~ 在当前 proxy backend 下仍弱于 old T~ 约 -0.013 PSNR。
+| 类别 | Verifier Backend | Composition 权重 | Fallback | 与 BRPO 论文对齐度 |
+|------|-----------------|-----------------|---------|------------------|
+| **T1: Old Pipeline** | RGB gate + depth pipeline | fusion_weight | render_depth fallback | 低（工程稳） |
+| **T2: BRPO-style Proxy** | Proxy backend（单向 matcher） | fusion_weight | 无（隐式有问题） | 中（形态对，backend 不够强） |
+| **T3: Stable Blend** | 同 T2 + stable fallback | stable blend | stable fallback | 低（工程 hybrid） |
+| **T4: Exact Upstream** | Exact backend（mutual NN + geometric） | continuous confidence | **no_render_fallback=true** | **最高** |
+
+**关键结论**：
+- T4 不只是最接近 BRPO 论文 semantics 的 T~ variant，**它也已经在 fixed clean G~ / fixed T1 formal compare 中成为当前 winner**
+- T2 / `exact_brpo_full_target_v1` 的负结果说明：命名 `brpo_style` 或 consumer-side exact 化本身不等于真正对齐 BRPO target path
+- 真正决定 replay 转正的增益来自 T~ 的 verifier backend（Layer B）与 projected-depth / target field 的 upstream 对齐
+- 当前 T~ 主线应固定为：`exact_brpo_upstream_target_v1 + exact_shared_cm_v1`
 
 ---
 
-## 2. T~ 的信息源
+## 2. T1: Old Pipeline
 
-T~ 的上游信息来自 depth 侧：
+### 2.1 信息源
 
-**主要输入**：
-- `projected_depth_left`：左侧 reference 投影到 pseudo-frame 的 depth
-- `projected_depth_right`：右侧 reference 投影到 pseudo-frame 的 depth
-- `fusion_weight_left`：左侧 fusion 权重
-- `fusion_weight_right`：右侧 fusion 权重
-- `overlap_mask_left`：左侧 overlap 有效域
-- `overlap_mask_right`：右侧 overlap 有效域
+**代码位置**：`depth_supervision_v2.py` → `build_depth_supervision_v2()`
+
+**输入**：
+- `projected_depth_left/right`：reference 投影到 pseudo-frame 的 depth
+- `fusion_weight_left/right`：fusion 权重（来自 proxy matcher）
+- `rgb_confidence`：RGB gate（前置过滤）
 - `render_depth`：当前 render depth（fallback 用）
 
-**辅助输入**（来自 M~ 的 verification 结果）：
-- `verify_both`：双侧都验证通过的区域
-- `verify_left_only`：只左侧验证通过
-- `verify_right_only`：只右侧验证通过
-- `verify_xor`：单侧验证区域
+### 2.2 信号转换
+
+**验证域定义**：
+$$
+	ext{valid}_{left} = (d_{left} > 0) \land (	ext{rgb\_confidence} \ge 0.5)
+$$
+$$
+	ext{valid}_{right} = (d_{right} > 0) \land (	ext{rgb\_confidence} \ge 0.5)
+$$
+
+**Target 区域划分**：
+$$
+egin{aligned}
+	ext{both} &= 	ext{valid}_{left} \land 	ext{valid}_{right} \
+	ext{left\_only} &= 	ext{valid}_{left} \land 
+eg 	ext{valid}_{right} \
+	ext{right\_only} &= 	ext{valid}_{right} \land 
+eg 	ext{valid}_{left} \
+	ext{fallback} &= 
+eg 	ext{valid}_{left} \land 
+eg 	ext{valid}_{right} \land (	ext{rgb\_confidence} \ge 0.5)
+\end{aligned}
+$$
+
+**Target 数值生成**：
+$$
+d_{target}[	ext{both}] = rac{w_l \cdot d_l + w_r \cdot d_r}{w_l + w_r}
+$$
+$$
+d_{target}[	ext{left\_only}] = d_l
+$$
+$$
+d_{target}[	ext{right\_only}] = d_r
+$$
+$$
+d_{target}[	ext{fallback}] = 	ext{render\_depth} 	ext{ 或 } 0
+$$
+
+### 2.3 下游消费
+
+被 `build_stageA_loss()` 和 `build_stageA_loss_source_aware()` 消费：
+- Legacy: 单一 depth loss term
+- Source-aware: seed/dense/fallback tier 分层
+
+### 2.4 特点
+
+- **工程 maturity 最高**：RGB gate + fusion weight + fallback 都经过长期验证
+- **但语义不完全对齐 BRPO**：
+  - Verifier 是 RGB gate（不是 mutual NN）
+  - Composition 权重是 fusion_weight（不是 verifier-driven confidence）
+  - 有 fallback（BRPO 论文无 fallback）
 
 ---
 
-## 3. 各版本 T~ 的信号转换
+## 3. T2: BRPO-style Proxy
 
-### 3.1 BRPO T~（论文原始）
+### 3.1 信息源
 
-BRPO 论文中的 target 来自 pseudo-frame `I_t^{fix}$ 对应的 verified depth field。语义上：
-- 在 `M_left ∩ M_right` 区域：双侧验证通过的 projected depth composition
-- 在 `M_left ⊕ M_right` 区域：单侧验证通过的 projected depth
-- 在 outside union 区域：不监督
+**代码位置**：`pseudo_observation_brpo_style.py` → `build_brpo_style_observation()`
 
-数学形态：
+**输入**：
+- `support_left/right`：matcher correspondence support
+- `projected_depth_left/right`：projected depth
+- `fusion_weight_left/right`：fusion 权重
+- `overlap_mask_left/right`：overlap 有效域
+
+### 3.2 信号转换
+
+**验证域定义**（与 M2 共用）：
 $$
-d_{target}[i] = \begin{cases}
-\text{composition}(d_{left}[i], d_{right}[i]) & \text{if } i \in M_{left} \cap M_{right} \\
-d_{left}[i] \text{ or } d_{right}[i] & \text{if } i \in M_{left} \oplus M_{right} \\
-\text{no supervision} & \text{otherwise}
-\end{cases}
-$$
-
-关键点：BRPO 的 target 与 confidence 来源分离，target 由 independent verifier 决定。
-
----
-
-### 3.2 Old T~（当前最稳）
-
-**代码路径**：`depth_supervision_v2.py`
-
-**信息源**：projected depth + fusion weight + rgb confidence gate
-
-**信号转换**：
-1. 验证域定义：
-$$
-\text{valid}_{left} = (\text{projected\_depth}_{left} > 0) \land (\text{rgb\_confidence} \ge 0.5)
+	ext{valid}_{left} = 	ext{support}_{left} \land 	ext{overlap}_{left} \land (d_{left} > 0)
 $$
 $$
-\text{valid}_{right} = (\text{projected\_depth}_{right} > 0) \land (\text{rgb\_confidence} \ge 0.5)
+	ext{valid}_{right} = 	ext{support}_{right} \land 	ext{overlap}_{right} \land (d_{right} > 0)
 $$
 
-2. Target 区域划分：
+**Target 数值生成**：
 $$
-\text{both} = \text{valid}_{left} \land \text{valid}_{right}
-$$
-$$
-\text{left\_only} = \text{valid}_{left} \land \neg \text{valid}_{right}
+d_{target}[	ext{verify\_both}] = rac{w_l \cdot d_l + w_r \cdot d_r}{w_l + w_r}
 $$
 $$
-\text{right\_only} = \text{valid}_{right} \land \neg \text{valid}_{left}
+d_{target}[	ext{verify\_left\_only}] = d_l
 $$
 $$
-\text{fallback} = \neg \text{valid}_{left} \land \neg \text{valid}_{right} \land (\text{rgb\_confidence} \ge 0.5)
-$$
-
-3. Target 数值生成：
-$$
-d_{target}[\text{both}] = \frac{w_l \cdot d_l + w_r \cdot d_r}{w_l + w_r}
+d_{target}[	ext{verify\_right\_only}] = d_r
 $$
 $$
-d_{target}[\text{left\_only}] = d_l
-$$
-$$
-d_{target}[\text{right\_only}] = d_r
-$$
-$$
-d_{target}[\text{fallback}] = \text{render\_depth} \text{ 或 } 0
+d_{target}[	ext{neither}] = 0
 $$
 
-**输出**：`target_depth_for_refine_v2_brpo` + `target_depth_source_map_v2_brpo`
+### 3.3 特点
 
-**稳定性来源**：
-- RGB confidence gate 提供前置过滤
-- fusion weight 经过长期验证
-- render_depth fallback 作为兜底
-- 整条 pipeline 经过大量实验打磨
+- **命名 `brpo_style` 只反映形态**：
+  - C_m 形态正确（离散三档）
+  - Target composition 与 C_m 共用验证域
+  
+- **但 verifier backend 是 proxy**：
+  - `support_left/right` 来自单向 matcher mask
+  - 不是 BRPO 论文要求的 mutual NN + geometric verification
+  
+- **Composition 权重是 fusion_weight**：
+  - 来自 proxy matcher confidence
+  - 不是 BRPO 论文的 verifier-driven confidence
+
+- **无 explicit fallback**，但 backend 不够强时隐式有问题
+
+### 3.4 为什么 T2 不是最接近 BRPO semantics
+
+**BRPO 论文 T~ 要求**：
+- Verifier: mutual nearest-neighbor + geometric verification
+- Composition 权重: verifier-driven confidence
+- Fallback: 无
+
+**T2 实际**：
+- Verifier: proxy backend（单向 matcher）⚠️
+- Composition 权重: fusion_weight（proxy）⚠️
+- Fallback: 无 ✅
+
+只有 fallback 符合，verifier 和 composition 权重都不够强。
 
 ---
 
-### 3.3 New T~（candidate competition）
+## 4. T3: Stable Blend
 
-**代码路径**：`joint_observation.py`
+### 4.1 信息源
 
-**信息源**：4-candidate depth stack + 4-evidence score stack
+**代码位置**：`pseudo_observation_brpo_style.py` → `build_brpo_style_observation_v2()`
 
-**候选集**：
-$$
-\text{depth\_stack} = [d_{left}, d_{right}, d_{both\_weighted}, d_{render}]
-$$
+**输入**：
+- T2 的所有输入
+- `stable_depth_target`：稳定 depth target（来自 old T~ 或 render_depth）
+- `render_depth`：当前 render depth
 
-**证据评估**：
-$$
-\text{score\_stack} = f(\text{appearance}, \text{geometry}, \text{support}, \text{prior})
-$$
+### 4.2 信号转换
 
-**Target 生成**：
 $$
-\text{score\_prob} = \text{softmax}(\text{score\_stack})
-$$
-$$
-d_{target} = \sum_{c} \text{score\_prob}_c \cdot d_c
-$$
-
-**关键问题**：target 与 confidence（M~）同源。如果 score ranking 错误：
-$$
-\text{wrong\_target} + \text{inflated\_confidence} \to \text{smooth\_but\_self\_consistent\_error}
-$$
-
-这就是为什么 new T~ 不稳定。
-
----
-
-### 3.4 Hybrid T~（brpo_style）
-
-**代码路径**：`pseudo_observation_brpo_style.py`
-
-**信息源**：verified projected depth + M~ verification result
-
-**信号转换**：
-$$
-d_{target}[\text{verify\_both}] = \frac{w_l \cdot d_l + w_r \cdot d_r}{w_l + w_r}
-$$
-$$
-d_{target}[\text{verify\_left\_only}] = d_l
-$$
-$$
-d_{target}[\text{verify\_right\_only}] = d_r
-$$
-$$
-d_{target}[\text{neither}] = 0
-$$
-
-**特点**：
-- target 与 M~ 已分离（不再同源）
-- 但 target builder 仍是第一版工程近似
-- 简单的 weighted composition，没有 old T~ 的成熟 fallback 机制
-
----
-
-### 3.5 Stable T~
-
-**信息源**：hybrid T~ + old T~ + render_depth blend
-
-**信号转换**：
-$$
-d_{target} = \alpha \cdot d_{hybrid} + (1-\alpha) \cdot d_{stable}
+d_{target} = lpha \cdot d_{T2} + (1-lpha) \cdot d_{stable}
 $$
 
 其中 $d_{stable}$ 来自 old T~ 或 render_depth fallback。
 
-**目的**：用 stable target 做兜底，减少 hybrid T~ 的不稳定。
+### 4.3 特点
 
-**效果**：比 hybrid T~ 略好，但仍弱于 old T~ 约 -0.012 PSNR。
+- **工程 hybrid**：用 stable target 做兜底
+- **减少极端 case**：T2 不稳定时，stable blend 提供保护
+- **但偏离 BRPO semantics**：引入 fallback，不是 strict BRPO
 
 ---
 
-### 3.6 Exact T~（pure BRPO semantics）
+## 5. T4: Exact Upstream（Phase T2 新增）
 
-**代码路径**：`pseudo_observation_brpo_style.py` → `exact_brpo_full_target_v1`
+### 5.1 信息源
 
-**信息源**：strict M~ verification result + projected depth
+**代码位置**：
+- `depth_supervision_v2.py` → `build_exact_upstream_depth_target()`
+- `brpo_reprojection_verify.py` → `verify_single_branch_exact()`
 
-**信号转换**：
-- 严格按 BRPO 论文语义：在 exact $C_m$ 覆盖域内用 verified projected depth
-- 强制 RGB/depth 共用同一个 $C_m$（`stageA_depth_loss_mode=legacy`）
-- 无 source-aware fallback tiers
+**输入**：
+- `support_left_exact/right_exact`：exact backend verified support
+- `projected_depth_left_exact/right_exact`：exact backend projected depth
+- `confidence_left_exact/right_exact`：continuous confidence（verifier-driven）
+- `provenance_left/right`：branch provenance tracking
 
-**数学形态**：
+### 5.2 信号转换
+
+**Exact backend verification**：
 $$
-d_{target}[i] = \begin{cases}
-\text{composition}(d_l, d_r) & \text{if } C_m[i] = 1.0 \\
-d_l \text{ or } d_r & \text{if } C_m[i] = 0.5 \\
-\text{no supervision} & \text{if } C_m[i] = 0.0
+	ext{reproj\_err} = \|u_{reproj} - u_{pseudo}\|_2
+$$
+$$
+	ext{rel\_depth\_err} = rac{|z_{reproj} - z_{pseudo}|}{z_{pseudo}}
+$$
+
+**Binary support**：
+$$
+	ext{support}^{	ext{exact}} = (	ext{reproj\_err} < 	au_{px}) \land (	ext{rel\_depth\_err} < 	au_d) \land (z_{reproj} > 0)
+$$
+
+**Continuous confidence（verifier-driven）**：
+$$
+C_{side} = \exp\left(-rac{	ext{reproj\_err}}{	au_{px}}
+ight) \cdot \exp\left(-rac{	ext{rel\_depth\_err}}{	au_d}
+ight)
+$$
+
+**Target 数值生成（verifier-driven weighted composition）**：
+$$
+d_{target}[i] = egin{cases}
+rac{C_l \cdot d_l + C_r \cdot d_r}{C_l + C_r} & 	ext{if both sides verified} \
+d_l & 	ext{if only left verified} \
+d_r & 	ext{if only right verified} \
+0 & 	ext{otherwise}
 \end{cases}
 $$
 
-**效果**：PSNR 24.174488，仍弱于 old T~ 约 -0.01325 PSNR，与 hybrid T~ 几乎等价。
+**关键**：权重 $C_l, C_r$ 是 **continuous confidence（verifier-driven）**，不是 fusion_weight（proxy）。
+
+### 5.3 下游消费
+
+被 `build_stageA_loss_exact_shared_cm()` 消费：
+- Shared C_m（M2 Exact）
+- Continuous confidence weighting
+- `no_render_fallback=true`
+
+### 5.4 特点
+
+- **Verifier backend 是 exact**：mutual NN + geometric verification ✅
+- **Composition 权重是 verifier-driven**：continuous confidence ✅
+- **Fallback 是 no_render_fallback=true**：符合 BRPO semantics ✅
+- **Provenance tracked**：记录每个像素来自哪个 reference
+
+### 5.5 为什么 T4 是最接近 BRPO semantics
+
+**BRPO 论文 T~ 要求**：
+- Verifier: mutual nearest-neighbor + geometric verification
+- Composition 权重: verifier-driven confidence
+- Fallback: 无
+
+**T4 实际**：
+- Verifier: exact backend（mutual NN + geometric）✅
+- Composition 权重: continuous confidence（verifier-driven）✅
+- Fallback: no_render_fallback=true ✅
+
+**完全对齐**，这是 T4 的语义基础。
+
+### 5.6 T4 formal compare verdict
+
+固定 protocol：
+- `joint_topology_mode=brpo_joint_v1`
+- G~ = clean `summary_only` no-action control
+- 4-arm replay compare：`oldA1` / `exactBrpoCm_oldTarget_v1` / `exactBrpoFullTarget_v1` / `exactBrpoUpstreamTarget_v1`
+
+结果判断：
+- `exactBrpoUpstreamTarget_v1_newT1_summary_only` 明确高于 `oldA1_newT1_summary_only`
+- 同时高于 `exactBrpoCm_oldTarget_v1_newT1_summary_only`
+- 也高于 `exactBrpoFullTarget_v1_newT1_summary_only`
+
+设计结论：
+- `exact_brpo_full_target_v1` 证明：**只把 proxy backend 下的 consumer-side target/loss contract 写得更 exact，不足以赢 old A1**
+- `exact_brpo_upstream_target_v1` 证明：**把 verifier backend / projected-depth / target field 整体改成 exact upstream 之后，strict BRPO T~ 才真正转成正向 winner**
+- 因此当前 T~ 主线不是 old T~，也不是 exact-full-target proxy variant，而是 **T4 exact upstream**
 
 ---
 
-## 4. 下游消费方式
+## 6. T~ 与 M~ 的命名约定
 
-T~ 的输出被 depth loss 消费：
+`pseudo_observation_mode` 命名反映了 M~ + T~ 组合：
 
-### 4.1 Standard depth loss
-
-$$
-L_{depth} = \text{mask} \cdot |d_{render} - d_{target}|
-$$
-
-其中 mask 来自 M~。
-
-### 4.2 Shared-$C_m$ depth loss（exact BRPO）
-
-$$
-L_{depth} = C_m \cdot |d_{render} - d_{target}|
-$$
-
-RGB loss 也用同一个 $C_m$：
-$$
-L_{rgb} = C_m \cdot |I_{render} - I_{target}|
-$$
+| 命名 pattern | M~ 部分 | T~ 部分 |
+|-------------|--------|--------|
+| `brpo_style_v1` | M2 | T2 |
+| `brpo_style_v2` | M2 | T3 |
+| `exact_brpo_cm_old_target_v1` | M2 Exact | T1 |
+| `exact_brpo_cm_full_target_v1` | M2 Exact | T2 |
+| `exact_brpo_cm_stable_target_v1` | M2 Exact | T3 |
+| `exact_brpo_cm_hybrid_target_v1` | M2 Exact | T3 (hybrid) |
+| `exact_brpo_upstream_target_v1` | M2 Exact | T4 |
+| `hybrid_brpo_cm_geo_v1` | M3 | T3 (hybrid) |
 
 ---
 
-## 5. 各版本与 BRPO 的差异
+## 7. 各类与 BRPO 论文对齐分析
 
-| 版本 | Target 来源 | 与 M~ 关系 | 与 BRPO 差距 |
-|------|------------|-----------|-------------|
-| BRPO | verified projected depth composition | 分离 | 0（定义） |
-| Old T~ | projected depth + rgb gate + fallback | 分离（取 min 策略） | 工程成熟但语义不完全对齐 |
-| New T~ | score_prob weighted fusion | 同源（candidate competition） | 语义偏离大 |
-| Hybrid T~ | verified projected depth composition | 分离 | builder 工程不够强 |
-| Stable T~ | hybrid + stable blend | 分离 | fallback 有帮助但不够 |
-| Exact T~ | strict verified composition | 分离 + shared $C_m$ | 语义对齐但 backend 不够强 |
+### 7.1 BRPO 论文 T~ 定义
 
----
+- **Verifier**：pseudo-frame 与 reference 的 mutual nearest-neighbor + geometric verification
+- **Composition 权重**：verifier-driven confidence
+- **Fallback**：无（不监督区域保持 invalid）
 
-## 6. 为什么 Exact T~ 没赢
+### 7.2 各类对齐度
 
-**数值证据**：exact T~ 与 hybrid T~ 的 target array 差异只有浮点噪声（max abs diff ~1.4e-06），source map 相同。
-
-**原因分析**：
-- 当前 proxy `I_t^{fix}` / projected-depth backend 本身不够丰富
-- exact BRPO target semantics 在当前 backend 下与 hybrid T~ 几乎等价
-- 真正的瓶颈在上游（Layer B proxy），而不是 target contract 本身
+| 类别 | Verifier Backend | Composition 权重 | Fallback | 与 BRPO 论文对齐度 |
+|------|-----------------|-----------------|---------|------------------|
+| T1 | RGB gate + depth pipeline | fusion_weight | render_depth fallback | 低 |
+| T2 | Proxy（单向 matcher）⚠️ | fusion_weight（proxy）⚠️ | 无 ✅ | 中 |
+| T3 | 同 T2 | stable blend | stable fallback | 低 |
+| T4 | Exact（mutual NN + geometric）✅ | continuous confidence（verifier-driven）✅ | no_render_fallback=true ✅ | **最高** |
 
 ---
 
-## 7. 当前最佳组合与下一步
+## 8. 代码位置索引
 
-### 7.1 最佳组合
-- `exact M~ + old T~` ≈ old A1（24.1877 PSNR）
-- old T~ 的 depth pipeline 更成熟，提供稳定兜底
-
-### 7.2 下一步方向
-若坚持 exact BRPO：
-- 上移到 Layer B proxy：改进 `I_t^{fix}$` 质量、verifier backend、projected-depth supervision field
-- 不继续只在 stable/fallback 权重上打转
-
-若走 replay-first：
-- 承认 hybrid/stable T~ 是工程分支
-- 在该标签下继续优化，不再表述为 pure BRPO
+| 文件 | 功能 | T~ 类别 |
+|------|------|--------|
+| `pseudo_branch/brpo_v2_signal/depth_supervision_v2.py` | Old Pipeline + Exact Upstream | T1, T4 |
+| `pseudo_branch/brpo_v2_signal/pseudo_observation_brpo_style.py` | BRPO-style Proxy + Stable Blend | T2, T3 |
+| `pseudo_branch/brpo_reprojection_verify.py` | Exact backend verifier | T4 |
+| `pseudo_branch/pseudo_loss_v2.py` | Loss 消费 | 所有 |
 
 ---
 
-## 8. 代码位置
+## 9. 当前状态
 
-| 文件 | 功能 |
-|------|------|
-| `pseudo_branch/brpo_v2_signal/depth_supervision_v2.py` | Old T~ 生成 |
-| `pseudo_branch/brpo_v2_signal/joint_observation.py` | New T~（candidate competition） |
-| `pseudo_branch/brpo_v2_signal/pseudo_observation_brpo_style.py` | Hybrid T~ / Exact T~ |
-| `scripts/run_pseudo_refinement_v2.py` | T~ 消费（depth loss） |
+- **T4 semantic path 已完全落地**：exact backend / exact target field / exact loss contract / consumer path 都已打通
+- **T4 formal compare 已完成**：`exact_brpo_upstream_target_v1` 在 fixed clean G~ / fixed T1 replay compare 中赢过 old A1、exact-oldtarget、exact-fulltarget
+- **当前 T~ 主线已更新**：`exact_brpo_upstream_target_v1 + exact_shared_cm_v1`
+- **结构性教训已固化**：T~ 的主瓶颈确实在 Layer B verifier/backend / projected-depth field，而不是继续做 proxy-backend 下的 consumer-side exact 化
 
 ---
 
-> 文档口径：T~ = Target 模块。与 M~（Mask）最初耦合实现，但语义独立。
+> 文档口径：T~ = Target 模块。与 M~（Mask）语义分离。组合实验见 M_T_COMBINATIONS.csv。

@@ -1,266 +1,244 @@
 # MASK_DESIGN.md - M~ Mask 设计文档
 
-> 更新时间：2026-04-20 19:00 (Asia/Shanghai)
+> 更新时间：2026-04-22 02:50 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只讲 M~（mask/confidence）：信息从哪里来、怎么转换成 confidence、怎么被下游消费
 > 2. 遵循"信息源 → 信号转换 → 下游消费"链式分析
-> 3. 需要比较时，统一比较 BRPO / old M~ / new M~ / hybrid M~ / exact M~
-> 4. 数学公式用 `$...$` 或 `$$...$$` 包裹
+> 3. 数学公式用 `$...$` 或 `$$...$$` 包裹
+> 4. M~ 与 T~ 语义分离，但工程实现可能有组合命名约定
 > 5. 更新后修改文档顶部时间戳
 
 ---
 
-## 1. 先说结论
+## 1. 概览
 
-M~（mask/confidence）决定"哪些像素被监督、监督强度如何"。T~（target）决定"监督目标的数值"，两者最初实现耦合但语义独立。
+M~（Mask/Confidence）决定"哪些像素被监督、监督强度如何"。**M~ 只有 3 大类**：
 
-当前最佳组合是 `exact M~ + old T~`（≈ old A1），因为 exact M~ 已基本对齐 BRPO semantics，而 old T~ 的 depth pipeline 更成熟。pure exact M~ + exact T~ 在当前 proxy backend 下仍弱于 old A1 约 -0.013 PSNR。
+| 类别 | C_m 来源 | 与 T~ 关系 | 关键特征 |
+|------|---------|-----------|---------|
+| **M1: Legacy Joint** | rgb_conf × geometry_tier（取 min） | 分离 | 半连续值，工程最稳 |
+| **M2: BRPO-style Support Sets** | verify_both=1.0, verify_xor=0.5, neither=0.0 | 分离（同验证域） | 离散三档，与 BRPO 论文 C_m 形态一致 |
+| **M3: Hybrid Geometry-gated** | geometry + candidate competition | **同源** | confidence 与 target 同一 score_stack 派生 |
 
----
-
-## 2. M~ 的信息源
-
-M~ 的上游信息来自 pseudo-frame 与 reference 的 correspondence verification：
-
-**主要输入**：
-- `target_rgb_fused.png`：pseudo-frame proxy（工程代理）
-- `rgb_support_left`：左侧 matcher correspondence support
-- `rgb_support_right`：右侧 matcher correspondence support
-- `projected_depth_left`：左侧 projected depth
-- `projected_depth_right`：右侧 projected depth
-- `overlap_mask_left`：左侧 overlap 有效域
-- `overlap_mask_right`：右侧 overlap 有效域
+**关键结论**：
+- M2 (BRPO-style) 已对齐 BRPO 论文 C_m semantics
+- `exact_brpo_cm_old_target_v1 ≈ old A1`（差 < 1e-5 PSNR），说明 M2 已不是主瓶颈
+- 主瓶颈在 T~ 的 verifier backend（Layer B）
 
 ---
 
-## 3. 各版本 M~ 的信号转换
+## 2. M1: Legacy Joint Confidence
 
-### 3.1 BRPO M~（论文原始）
+### 2.1 信息源
 
-**信息源**：pseudo-frame $I_t^{fix}$ 与左右 reference 的 **mutual nearest-neighbor correspondence**
+**代码位置**：`joint_confidence.py` + `rgb_mask_inference.py`
 
-**定义**：
-- $M_{left}$：pseudo-frame 与左侧 reference 的双向匹配点集
-- $M_{right}$：pseudo-frame 与右侧 reference 的双向匹配点集
+**输入**：
+- RGB matcher confidence：`rgb_conf_cont`（连续值）
+- Geometry tier：来自 source_map（BOTH=1.0, LEFT/RIGHT=0.5, NONE=0）
 
-**Confidence $C_m$**：
+### 2.2 信号转换
+
+**RGB 链**：
 $$
-C_m[i] = \begin{cases}
-1.0 & \text{if } i \in M_{left} \cap M_{right} \\
-0.5 & \text{if } i \in M_{left} \oplus M_{right} \\
-0.0 & \text{otherwise}
-\end{cases}
+	ext{rgb\_conf} = 	ext{continuous\_score\_from\_matcher\_confidence}
 $$
 
-**关键特点**：
-- Pseudo content 先生成
-- Confidence 由 reference 事后验证生成
-- Target 与 confidence 来源分离
-- RGB/depth 共用同一个 $C_m$
-
----
-
-### 3.2 Old M~（当前最稳）
-
-**代码路径**：
-- `rgb_mask_inference.py` → RGB support/confidence
-- `depth_supervision_v2.py` → depth source map
-- `joint_confidence.py` → joint confidence
-
-**RGB 链信息流**：
-1. Matcher 找 correspondence：
+**Depth 链（geometry tier）**：
 $$
-\text{support}_{left/right} = \text{matcher\_found\_correspondence}
-$$
-2. 生成 continuous confidence：
-$$
-\text{rgb\_conf} = \text{continuous\_score\_from\_matcher\_confidence}
-$$
-
-**Depth 链信息流**：
-1. Projected depth fusion 得到 source_map
-2. 压出 geometry tier：
-$$
-\text{geometry\_tier} = \begin{cases}
-1.0 & \text{if source\_map == BOTH} \\
-0.5 & \text{if source\_map == LEFT or RIGHT} \\
-0.0 & \text{otherwise}
+	ext{geometry\_tier}[i] = egin{cases}
+1.0 & 	ext{if source\_map}[i] = 	ext{BOTH} \
+0.5 & 	ext{if source\_map}[i] = 	ext{LEFT or RIGHT} \
+0.0 & 	ext{otherwise}
 \end{cases}
 $$
 
 **Joint confidence**：
 $$
-\text{joint\_confidence} = \min(\text{rgb\_conf}, \text{geometry\_tier})
+	ext{joint\_confidence} = \min(	ext{rgb\_conf}, 	ext{geometry\_tier})
 $$
 $$
-\text{joint\_confidence\_cont} = \text{rgb\_conf\_cont} \times \text{geometry\_tier}
+	ext{joint\_confidence\_cont} = 	ext{rgb\_conf\_cont} 	imes 	ext{geometry\_tier}
 $$
 
-**特点**：
-- 半连续值（不是硬三档）
-- RGB/depth 分别过滤，取共同 trusted support
-- 不重写 target，只加 confidence filter
+### 2.3 下游消费
+
+被 `build_stageA_loss()` 和 `build_stageA_loss_source_aware()` 消费：
+- RGB loss: `rgb_mask = confidence_mask` 或 `rgb_confidence_mask`
+- Depth loss: `depth_mask = rgb_mask` 或 `depth_confidence_mask`
+
+### 2.4 特点
+
+- **半连续值**：不是硬三档 $\{1, 0.5, 0\}$，而是连续值 capped by geometry tier
+- **RGB/depth 分离过滤**：各自有 mask，取共同 trusted support
+- **工程稳**：经过大量实验验证，fallback 机制成熟
 
 ---
 
-### 3.3 New M~（candidate competition）
+## 3. M2: BRPO-style Support Sets
 
-**代码路径**：`joint_observation.py`
+### 3.1 信息源
 
-**信息源**：4-candidate depth stack + 4-evidence score stack
+**代码位置**：`pseudo_observation_brpo_style.py`
 
-**Confidence 生成**：
+**输入**：
+- `support_left`：左侧 matcher correspondence support
+- `support_right`：右侧 matcher correspondence support
+- `overlap_mask_left/right`：overlap 有效域
+- `projected_depth_left/right`：投影 depth validity
+
+### 3.2 信号转换
+
+**验证域定义**：
 $$
-\text{confidence}_{joint} = \sqrt{\text{conf}_{rgb} \times \text{conf}_{depth}}
+	ext{valid}_{left} = 	ext{support}_{left} \land 	ext{overlap}_{left} \land (d_{left} > 0)
+$$
+$$
+	ext{valid}_{right} = 	ext{support}_{right} \land 	ext{overlap}_{right} \land (d_{right} > 0)
+$$
+
+**三档 C_m 生成（BRPO 论文形态）**：
+$$
+	ext{verify\_both} = 	ext{valid}_{left} \land 	ext{valid}_{right}
+$$
+$$
+	ext{verify\_xor} = 	ext{valid}_{left} \oplus 	ext{valid}_{right}
+$$
+
+$$
+C_m[i] = egin{cases}
+1.0 & 	ext{if } i \in 	ext{verify\_both} \
+0.5 & 	ext{if } i \in 	ext{verify\_xor} \
+0.0 & 	ext{otherwise}
+\end{cases}
+$$
+
+### 3.3 下游消费
+
+被 `build_stageA_loss()` 和 `build_stageA_loss_exact_shared_cm()` 消费：
+- 作为 shared C_m，RGB/depth 共用同一 mask
+
+### 3.4 特点
+
+- **离散三档**：与 BRPO 论文 C_m 形态一致
+- **与 T~ 分离**：confidence 与 target 来源不同（虽然共用同一验证域）
+- **但 verifier backend 不够强**：当前是 proxy backend（单向 matcher mask），不是 BRPO 论文要求的双向验证
+
+### 3.5 Exact C_m（M2 的 exact instantiation）
+
+`exact_brpo_cm_*` 系列：
+- **信息源**：`verify_single_branch_exact()` 输出
+- **C_m 生成**：同 M2 三档逻辑，但用 exact backend support
+- **Provenance tracked**：记录每个像素来自哪个 reference
+
+**数值证据**：
+- `exact_brpo_cm_old_target_v1 ≈ old A1`（差 < 1e-5 PSNR）
+- 说明 M2 (BRPO-style C_m) 已基本对齐 BRPO semantics
+
+---
+
+## 4. M3: Hybrid Geometry-gated
+
+### 4.1 信息源
+
+**代码位置**：`joint_observation.py` + `brpo_direct_v1` path
+
+**输入**：
+- 4-candidate depth stack
+- 4-evidence score stack
+
+### 4.2 信号转换
+
+**Score stack 派生**：
+$$
+	ext{score\_prob} = 	ext{softmax}(	ext{score\_stack})
+$$
+$$
+	ext{confidence} = \sqrt{	ext{conf}_{rgb} 	imes 	ext{conf}_{depth}}
 $$
 
 其中 conf_rgb / conf_depth 都从同一个 score_stack 派生。
 
-**关键问题**：confidence 与 T~（target）同源。如果 score ranking 错误，"wrong target + inflated confidence" 同时出现。
+### 4.3 特点
+
+- **M~ 与 T~ 同源**：confidence 和 target 都从 score_stack 派生
+- **同源问题**：如果 score ranking 错误：
+  $$	ext{wrong\_target} + 	ext{inflated\_confidence} 	o 	ext{smooth\_but\_self\_consistent\_error}$$
+- 这就是为什么 M3 不稳定
 
 ---
 
-### 3.4 Hybrid M~（brpo_style）
+## 5. M~ 与 BRPO 论文对齐分析
 
-**代码路径**：`pseudo_observation_brpo_style.py`
+### 5.1 BRPO 论文 M~ 定义
 
-**信息源**：support sets + overlap mask + projected depth validity
-
-**验证域定义**：
 $$
-\text{valid}_{left} = \text{support}_{left} \land \text{overlap}_{left} \land (d_{left} > 0)
-$$
-$$
-\text{valid}_{right} = \text{support}_{right} \land \text{overlap}_{right} \land (d_{right} > 0)
-$$
-
-**Shared $C_m$**：
-$$
-C_m = \begin{cases}
-1.0 & \text{if valid}_{left} \land \text{valid}_{right} \\
-0.5 & \text{if valid}_{left} \oplus \text{valid}_{right} \\
-0.0 & \text{otherwise}
+C_m[i] = egin{cases}
+1.0 & 	ext{if } i \in M_{left} \cap M_{right} \
+0.5 & 	ext{if } i \in M_{left} \oplus M_{right} \
+0.0 & 	ext{otherwise}
 \end{cases}
 $$
 
-**特点**：
-- Shared $C_m$（RGB/depth 共用）
-- Confidence 与 T~ 分离
-- 但 verifier backend 不够强（单向 matcher mask）
+其中 $M_{left/right}$ 来自 **mutual nearest-neighbor correspondence**。
+
+### 5.2 各类对齐度
+
+| 类别 | C_m 形态 | Verifier Backend | 与 BRPO 论文对齐度 |
+|------|---------|-----------------|------------------|
+| M1 Legacy | 半连续 | RGB gate + depth pipeline | 低（形态不同） |
+| M2 BRPO-style | 离散三档 ✅ | Proxy（单向 matcher）⚠️ | **形态一致，backend 不够强** |
+| M2 Exact | 离散三档 ✅ | Exact（mutual NN + geometric）✅ | **完全对齐** |
+| M3 Hybrid | 连续（同源）| Candidate competition | 低（偏离大） |
 
 ---
 
-### 3.5 Exact M~（strict BRPO semantics）
+## 6. M~ 与 T~ 的命名约定
 
-**代码路径**：`pseudo_observation_brpo_style.py` → exact branches
+`pseudo_observation_mode` 命名反映了 M~ + T~ 组合：
 
-**信息源**：strict mutual NN verification（工程近似）
+| 命名 pattern | M~ 部分 | T~ 部分 |
+|-------------|--------|--------|
+| `brpo_style_v1` | M2 (BRPO-style) | T2 (BRPO-style Proxy) |
+| `exact_brpo_cm_old_target_v1` | M2 Exact | T1 (Old) |
+| `exact_brpo_cm_full_target_v1` | M2 Exact | T2 (BRPO-style Proxy) |
+| `exact_brpo_cm_stable_target_v1` | M2 Exact | T3 (Stable) |
+| `exact_brpo_upstream_target_v1` | M2 Exact | T4 (Exact Upstream) |
+| `hybrid_brpo_cm_geo_v1` | M3 (Hybrid) | T3 (Hybrid) |
 
-**Confidence**：同 hybrid M~，但语义严格定位为 BRPO-style
-
-**与 old M~ 对比**：
-- `exact M~ + old T~` ≈ old A1（差 < 1e-5 PSNR）
-- 说明 exact M~ 已基本对齐 BRPO semantics
-
----
-
-## 4. 下游消费方式
-
-M~ 的输出被 RGB/depth loss 消费：
-
-### 4.1 Standard loss
-
-$$
-L_{rgb} = M~ \cdot |I_{render} - I_{target}|
-$$
-$$
-L_{depth} = M~ \cdot |d_{render} - T~|
-$$
-
-M~ 决定监督域和监督强度。
-
-### 4.2 Shared-$C_m$ loss（exact BRPO）
-
-$$
-L_{rgb} = C_m \cdot |I_{render} - I_{target}|
-$$
-$$
-L_{depth} = C_m \cdot |d_{render} - T~|
-$$
-
-RGB/depth 共用同一个 $C_m$。
+**关键**：`cm` = confidence mask（M~），`target` 后缀 = T~ variant。
 
 ---
 
-## 5. 各版本与 BRPO 的差异
+## 7. 下游消费层总结
 
-| 版本 | Confidence 来源 | 形态 | 与 BRPO 差距 |
-|------|----------------|------|-------------|
-| BRPO | mutual NN verification | 离散三档 | 0（定义） |
-| Old M~ | RGB matcher + geometry tier | 半连续 | 工程稳但语义不完全对齐 |
-| New M~ | score_stack 派生 | 连续 | 与 T~ 同源，偏离大 |
-| Hybrid M~ | support sets verification | 离散三档 | verifier 不够强 |
-| Exact M~ | strict BRPO semantics | 离散三档 | 语义对齐，已基本 parity |
+| Loss mode | RGB mask | Depth mask | M~ 类型 |
+|-----------|---------|-----------|---------|
+| `legacy` | `confidence_mask` 或 `rgb_confidence_mask` | `confidence_mask` 或 `depth_confidence_mask` | M1/M2/M3 |
+| `source_aware` | `rgb_confidence_mask` | `depth_confidence_mask` + source_map tier | M1 |
+| `exact_shared_cm_v1` | **shared C_m** | **shared C_m** | M2 Exact |
 
 ---
 
-## 6. 为什么 exact M~ + exact T~ 没赢
+## 8. 代码位置索引
 
-**数值证据**：
-- `exact M~ + old T~` ≈ 24.1877（与 old A1 等价）
-- `exact M~ + exact T~` ≈ 24.1744（弱 -0.013 PSNR）
-- exact T~ 与 hybrid T~ target array 差异只有浮点噪声
-
-**原因**：
-- M~ 已基本对齐
-- T~ 的 backend 不够强（proxy $I_t^{fix}$ / projected-depth field）
-- 真正瓶颈在上游 Layer B，不是 M~ contract
-
----
-
-## 7. 当前最佳组合与下一步
-
-### 7.1 最佳组合
-- `exact M~ + old T~` ≈ old A1（当前最稳）
-- exact M~ 的 semantics 已对齐 BRPO
-- old T~ 的 depth pipeline 提供稳定兜底
-
-### 7.2 下一步方向
-若坚持 exact BRPO：
-- 上移到 Layer B proxy：改进 `I_t^{fix}` 质量、verifier backend
-- 不继续在 M~ contract 上微调
-
-若走 replay-first：
-- 承认 hybrid/stable T~ 是工程分支
-- 在该标签下继续优化
+| 文件 | 功能 | M~ 类别 |
+|------|------|--------|
+| `pseudo_branch/brpo_v2_signal/joint_confidence.py` | Legacy joint confidence | M1 |
+| `pseudo_branch/brpo_v2_signal/rgb_mask_inference.py` | RGB confidence | M1 |
+| `pseudo_branch/brpo_v2_signal/pseudo_observation_brpo_style.py` | BRPO-style M~ + Exact C_m | M2 |
+| `pseudo_branch/brpo_reprojection_verify.py` | Exact backend verifier | M2 Exact |
+| `pseudo_branch/brpo_v2_signal/joint_observation.py` | Hybrid geometry-gated | M3 |
+| `pseudo_branch/pseudo_loss_v2.py` | Loss 消费 | 所有 |
 
 ---
 
-## 8. 代码位置
+## 9. 当前状态
 
-| 文件 | 功能 |
-|------|------|
-| `pseudo_branch/brpo_v2_signal/rgb_mask_inference.py` | RGB support/confidence |
-| `pseudo_branch/brpo_v2_signal/joint_confidence.py` | Old M~ joint confidence |
-| `pseudo_branch/brpo_v2_signal/joint_observation.py` | New M~（与 T~ 同源） |
-| `pseudo_branch/brpo_v2_signal/pseudo_observation_brpo_style.py` | Hybrid M~ / Exact M~ |
-| `scripts/run_pseudo_refinement_v2.py` | M~ 消费（RGB/depth loss） |
+- **M2 已对齐**：`exact_brpo_cm_old_target_v1 ≈ old A1`
+- **不是主瓶颈**：M~ 已完成对齐，下一步在 T~ upstream backend
 
 ---
 
-## 9. M~ 与 T~ 的最初耦合实现
-
-**耦合点**：
-- old A1：RGB 链和 depth 链分别构造，但最终 joint confidence 取 min，target 复用已有 depth pipeline
-- new A1：score_stack 同时派生 confidence（M~）和 target（T~）
-
-**语义分离**：
-- M~：监督域 + 监督强度
-- T~：监督目标数值
-
-当前工程趋势：M~ 和 T~ 越来越分离，各自有独立设计文档。
-
----
-
-> 文档口径：M~ = Mask（confidence）模块。与 T~（Target）最初耦合实现，但语义独立。T~ 的详细设计见 TARGET_DESIGN.md。
+> 文档口径：M~ = Mask（confidence）模块。与 T~（Target）语义分离。组合实验见 M_T_COMBINATIONS.csv。

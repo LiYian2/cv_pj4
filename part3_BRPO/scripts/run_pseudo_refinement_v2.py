@@ -27,17 +27,17 @@ from pseudo_branch.pseudo_camera_state import (
     apply_loaded_view_state_,
     summarize_true_pose_deltas,
 )
-from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
+from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware, build_stageA_loss_exact_shared_cm
 from pseudo_branch.pseudo_refine_scheduler import StageAConfig, StageA5Config, build_stageA_optimizer, build_stageA5_optimizers
-from pseudo_branch.gaussian_param_groups import build_micro_gaussian_param_groups
-from pseudo_branch.local_gating import (
+from pseudo_branch.gaussian_management.gaussian_param_groups import build_micro_gaussian_param_groups
+from pseudo_branch.gaussian_management.local_gating import (
     PseudoLocalGatingConfig,
     evaluate_sampled_views_for_local_gating,
     build_visibility_weight_map,
     apply_gaussian_grad_mask,
     build_iteration_gating_summary,
 )
-from pseudo_branch.spgm import (
+from pseudo_branch.gaussian_management.spgm import (
     collect_spgm_stats,
     build_spgm_importance_score,
     build_spgm_update_policy,
@@ -63,7 +63,7 @@ def parse_args():
     p.add_argument('--brpo_mask_root', default=None)
     p.add_argument('--signal_pipeline', choices=['legacy', 'brpo_v2'], default='legacy')
     p.add_argument('--signal_v2_root', default=None, help='Optional root containing signal_v2/frame_<id> artifacts; defaults to <prepare_root>/signal_v2 or <prepare_root>/signal_v2_* when discoverable.')
-    p.add_argument('--pseudo_observation_mode', choices=['off', 'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1'], default='off')
+    p.add_argument('--pseudo_observation_mode', choices=['off', 'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1', 'exact_brpo_upstream_target_v1'], default='off')
     p.add_argument('--stage_mode', choices=['stageA', 'stageA5', 'stageB'], default='stageA')
     p.add_argument('--joint_topology_mode', choices=['off', 'brpo_joint_v1'], default='off')
     p.add_argument('--stageA_iters', type=int, default=300)
@@ -100,7 +100,7 @@ def parse_args():
         default='blended_depth',
         help='Which depth target Stage A should actually consume.',
     )
-    p.add_argument('--stageA_depth_loss_mode', choices=['legacy', 'source_aware'], default='legacy')
+    p.add_argument('--stageA_depth_loss_mode', choices=['legacy', 'source_aware', 'exact_shared_cm_v1'], default='legacy')
     p.add_argument('--stageA_lambda_depth_seed', type=float, default=1.0)
     p.add_argument('--stageA_lambda_depth_dense', type=float, default=0.35)
     p.add_argument('--stageA_lambda_depth_fallback', type=float, default=0.0)
@@ -635,6 +635,8 @@ def load_stageA_pseudo_views(args):
         pseudo_observation_mode = str(getattr(args, 'pseudo_observation_mode', 'off') or 'off')
         if pseudo_observation_mode == 'exact_brpo_full_target_v1' and args.stageA_depth_loss_mode != 'legacy':
             raise ValueError('exact_brpo_full_target_v1 is reserved for full BRPO target-side semantics and must run with --stageA_depth_loss_mode legacy so RGB/depth share the same C_m without source-aware fallback tiers')
+        if pseudo_observation_mode == 'exact_brpo_upstream_target_v1' and args.stageA_depth_loss_mode != 'exact_shared_cm_v1':
+            raise ValueError('exact_brpo_upstream_target_v1 must run with --stageA_depth_loss_mode exact_shared_cm_v1 to enforce exact loss contract')
         rgb_mask_mode = args.stageA_rgb_mask_mode
         depth_mask_mode = args.stageA_depth_mask_mode
         depth_target_mode = args.stageA_target_depth_mode
@@ -713,6 +715,7 @@ def load_stageA_pseudo_views(args):
                     'exact_brpo_full_target_v1': ('exact_brpo_full_target_v1', 'exact_brpo_full_target_meta_v1.json'),
                     'exact_brpo_cm_hybrid_target_v1': ('exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_hybrid_target_meta_v1.json'),
                     'exact_brpo_cm_stable_target_v1': ('exact_brpo_cm_stable_target_v1', 'exact_brpo_cm_stable_target_meta_v1.json'),
+                    'exact_brpo_upstream_target_v1': ('exact_brpo_upstream_target_v1', 'exact_brpo_upstream_target_observation_meta_v1.json'),
                 }
                 prefix, meta_filename = exact_prefix_map[pseudo_observation_mode]
                 bundle = _load_named_basic_observation_bundle(signal_v2_frame_dir, prefix=prefix, meta_filename=meta_filename)
@@ -728,6 +731,12 @@ def load_stageA_pseudo_views(args):
                 depth_kind = f'joint_depth_target_{prefix}'
                 depth_for_refine = signal_v2_frame_dir / f'pseudo_depth_target_{prefix}.npy'
                 source_map_path = signal_v2_frame_dir / f'pseudo_source_map_{prefix}.npy'
+                if pseudo_observation_mode == 'exact_brpo_upstream_target_v1':
+                    target_confidence_path = signal_v2_frame_dir / f'pseudo_target_confidence_{prefix}.npy'
+                    target_confidence = np.load(target_confidence_path).astype(np.float32) if target_confidence_path.exists() else bundle['confidence_joint']
+                    view['exact_upstream_bundle'] = {'valid_mask': bundle['valid_mask'], 'target_confidence': target_confidence}
+                else:
+                    view.pop('exact_upstream_bundle', None)
             rgb_conf_variant = 'continuous'
             depth_conf_variant = 'continuous'
             depth_arr = bundle['depth_target']
@@ -1246,6 +1255,23 @@ def _append_gating_history(container: dict, summary: dict) -> None:
         container[key].append(summary.get(key))
 
 
+def _build_spgm_passthrough_update_policy(spgm_raw_stats, spgm_score, policy_mode: str) -> dict:
+    weights = torch.ones_like(spgm_score['importance_score'])
+    return {
+        'weights': weights,
+        'weight_mean': 1.0,
+        'weight_p10': 1.0,
+        'weight_p50': 1.0,
+        'weight_p90': 1.0,
+        'active_ratio': spgm_raw_stats['active_ratio'],
+        'selected_ratio': spgm_raw_stats['active_ratio'],
+        'selected_count_near': spgm_score['cluster_count_near'],
+        'selected_count_mid': spgm_score['cluster_count_mid'],
+        'selected_count_far': spgm_score['cluster_count_far'],
+        'policy_mode_effective': f"{policy_mode}:passthrough",
+    }
+
+
 def _build_spgm_summary_payload(spgm_raw_stats, spgm_score, spgm_update_policy, spgm_manager, accepted_view_count: int) -> dict:
     return {
         'active_ratio': spgm_raw_stats['active_ratio'],
@@ -1400,30 +1426,44 @@ def maybe_apply_pseudo_local_gating(
             ranking_mode=gating_cfg.spgm_ranking_mode,
             lambda_support_rank=gating_cfg.spgm_lambda_support_rank,
         )
-        spgm_update_policy = build_spgm_update_policy(
-            weight_score=spgm_score['importance_score'],
-            ranking_score=spgm_score['ranking_score'],
-            cluster_id=spgm_score['cluster_id'],
-            active_mask=spgm_raw_stats['active_mask'],
-            weight_floor=gating_cfg.spgm_weight_floor,
-            cluster_keep=(gating_cfg.spgm_cluster_keep_near, gating_cfg.spgm_cluster_keep_mid, gating_cfg.spgm_cluster_keep_far),
-            policy_mode=gating_cfg.spgm_policy_mode,
-            selector_keep_ratio=(
-                gating_cfg.spgm_selector_keep_ratio_near,
-                gating_cfg.spgm_selector_keep_ratio_mid,
-                gating_cfg.spgm_selector_keep_ratio_far,
-            ),
-            selector_min_keep=gating_cfg.spgm_selector_min_keep,
-        )
-        grad_stats = apply_gaussian_grad_mask(
-            gaussians=gaussians,
-            weights=spgm_update_policy['weights'],
-            params_mode=gating_cfg.params,
-        )
+        manager_mode_requested = str(gating_cfg.spgm_manager_mode or 'summary_only').strip().lower()
+        no_action_summary_only = manager_mode_requested in {'summary_only', 'off', 'disabled'}
+        if no_action_summary_only:
+            spgm_update_policy = _build_spgm_passthrough_update_policy(
+                spgm_raw_stats=spgm_raw_stats,
+                spgm_score=spgm_score,
+                policy_mode=gating_cfg.spgm_policy_mode,
+            )
+            grad_stats = apply_gaussian_grad_mask(
+                gaussians=gaussians,
+                weights=spgm_update_policy['weights'],
+                params_mode=gating_cfg.params,
+            )
+        else:
+            spgm_update_policy = build_spgm_update_policy(
+                weight_score=spgm_score['importance_score'],
+                ranking_score=spgm_score['ranking_score'],
+                cluster_id=spgm_score['cluster_id'],
+                active_mask=spgm_raw_stats['active_mask'],
+                weight_floor=gating_cfg.spgm_weight_floor,
+                cluster_keep=(gating_cfg.spgm_cluster_keep_near, gating_cfg.spgm_cluster_keep_mid, gating_cfg.spgm_cluster_keep_far),
+                policy_mode=gating_cfg.spgm_policy_mode,
+                selector_keep_ratio=(
+                    gating_cfg.spgm_selector_keep_ratio_near,
+                    gating_cfg.spgm_selector_keep_ratio_mid,
+                    gating_cfg.spgm_selector_keep_ratio_far,
+                ),
+                selector_min_keep=gating_cfg.spgm_selector_min_keep,
+            )
+            grad_stats = apply_gaussian_grad_mask(
+                gaussians=gaussians,
+                weights=spgm_update_policy['weights'],
+                params_mode=gating_cfg.params,
+            )
         spgm_manager = apply_spgm_state_management(
             gaussians=gaussians,
             cluster_id=spgm_score['cluster_id'],
-            active_mask=spgm_raw_stats['active_mask'],
+            control_mask=spgm_raw_stats['active_mask'],
             update_policy=spgm_update_policy,
             manager_mode=gating_cfg.spgm_manager_mode,
             state_score=spgm_score['state_score'],
@@ -1594,7 +1634,12 @@ def main():
             sampled_views.append(view)
             pkg = render(view['vp'], gaussians, pipeline_params, bg)
             render_packages.append(pkg)
-            if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
+            if args.stageA_depth_loss_mode == 'exact_shared_cm_v1':
+                exact_upstream_bundle = view.get('exact_upstream_bundle', {})
+                loss, stats = build_stageA_loss_exact_shared_cm(
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth=args.stageA_lambda_depth_seed, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), valid_mask=exact_upstream_bundle.get('valid_mask'), target_confidence=exact_upstream_bundle.get('target_confidence'),
+                )
+            elif args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                 loss, stats = build_stageA_loss_source_aware(
                     render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], rgb_confidence_mask=view.get('conf_rgb'), depth_confidence_mask=view.get('conf_depth'), beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), depth_seed_source_ids=_depth_source_id_groups_for_view(view)[0], depth_dense_source_ids=_depth_source_id_groups_for_view(view)[1], depth_fallback_source_ids=_depth_source_id_groups_for_view(view)[2],
                 )
@@ -1843,7 +1888,12 @@ def main():
                 else:
                     pkg = render(view['vp'], gaussians, pipeline_params, bg)
                 pseudo_render_packages.append(pkg)
-                if args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
+                if args.stageA_depth_loss_mode == 'exact_shared_cm_v1':
+                    exact_upstream_bundle = view.get('exact_upstream_bundle', {})
+                    loss, stats = build_stageA_loss_exact_shared_cm(
+                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth=args.stageA_lambda_depth_seed, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), valid_mask=exact_upstream_bundle.get('valid_mask'), target_confidence=exact_upstream_bundle.get('target_confidence'),
+                    )
+                elif args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                     loss, stats = build_stageA_loss_source_aware(
                         render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], depth_source_map=view['target_depth_source_map'], viewpoint=view['vp'], rgb_confidence_mask=view.get('conf_rgb'), depth_confidence_mask=view.get('conf_depth'), beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth_seed=args.stageA_lambda_depth_seed, lambda_depth_dense=args.stageA_lambda_depth_dense, lambda_depth_fallback=args.stageA_lambda_depth_fallback, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), depth_seed_source_ids=_depth_source_id_groups_for_view(view)[0], depth_dense_source_ids=_depth_source_id_groups_for_view(view)[1], depth_fallback_source_ids=_depth_source_id_groups_for_view(view)[2],
                     )
