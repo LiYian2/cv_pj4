@@ -10,7 +10,7 @@ from pathlib import Path
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, S3PO_ROOT)
@@ -18,8 +18,8 @@ sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
 from scene.gaussian_model import GaussianModel
 from gaussian_renderer import render
-from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
-from pseudo_branch.pseudo_refine_scheduler import StageAConfig
+from pseudo_branch.refine.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
+from pseudo_branch.refine.pseudo_refine_scheduler import StageAConfig
 from scripts.run_pseudo_refinement_v2 import load_stageA_pseudo_views, sample_indices, diagnose_grad_contrib_for_sampled_views
 from types import SimpleNamespace
 

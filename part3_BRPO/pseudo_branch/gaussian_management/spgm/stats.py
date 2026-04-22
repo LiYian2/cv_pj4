@@ -17,7 +17,7 @@ import torch
 
 def _camera_space_depths(xyz: torch.Tensor, vp) -> torch.Tensor:
     """Compute camera-space z-depth for each Gaussian."""
-    from pseudo_branch.pseudo_camera_state import current_w2c
+    from pseudo_branch.refine.pseudo_camera_state import current_w2c
 
     w2c = current_w2c(vp)
     R = w2c[:3, :3]

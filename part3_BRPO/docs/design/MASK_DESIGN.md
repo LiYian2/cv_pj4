@@ -1,6 +1,6 @@
 # MASK_DESIGN.md - M~ Mask 设计文档
 
-> 更新时间：2026-04-22 02:50 (Asia/Shanghai)
+> 更新时间：2026-04-22 13:45 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只讲 M~（mask/confidence）：信息从哪里来、怎么转换成 confidence、怎么被下游消费
@@ -80,7 +80,7 @@ $$
 
 ### 3.1 信息源
 
-**代码位置**：`pseudo_observation_brpo_style.py`
+**代码位置**：`pseudo_branch/observation/pseudo_observation_brpo_style.py`
 
 **输入**：
 - `support_left`：左侧 matcher correspondence support
@@ -142,7 +142,7 @@ $$
 
 ### 4.1 信息源
 
-**代码位置**：`joint_observation.py` + `brpo_direct_v1` path
+**代码位置**：`pseudo_branch/observation/joint_observation.py` + `brpo_direct_v1` path
 
 **输入**：
 - 4-candidate depth stack
@@ -225,12 +225,15 @@ $$
 
 | 文件 | 功能 | M~ 类别 |
 |------|------|--------|
-| `pseudo_branch/brpo_v2_signal/joint_confidence.py` | Legacy joint confidence | M1 |
-| `pseudo_branch/brpo_v2_signal/rgb_mask_inference.py` | RGB confidence | M1 |
-| `pseudo_branch/brpo_v2_signal/pseudo_observation_brpo_style.py` | BRPO-style M~ + Exact C_m | M2 |
-| `pseudo_branch/brpo_reprojection_verify.py` | Exact backend verifier | M2 Exact |
-| `pseudo_branch/brpo_v2_signal/joint_observation.py` | Hybrid geometry-gated | M3 |
-| `pseudo_branch/pseudo_loss_v2.py` | Loss 消费 | 所有 |
+| `pseudo_branch/mask/joint_confidence.py` | Legacy joint confidence | M1 |
+| `pseudo_branch/mask/rgb_mask_inference.py` | RGB confidence | M1 |
+| `pseudo_branch/mask/brpo_confidence_mask.py` | BRPO-style support-set confidence / discrete+continuous C_m | M2 |
+| `pseudo_branch/mask/brpo_train_mask.py` | train-time propagated support / confidence mask | M2 |
+| `pseudo_branch/mask/confidence_builder.py` | simplified confidence helper / legacy utility | M1 |
+| `pseudo_branch/observation/pseudo_observation_brpo_style.py` | BRPO-style M~ + Exact C_m bundle | M2 |
+| `pseudo_branch/observation/brpo_reprojection_verify.py` | Exact backend verifier | M2 Exact |
+| `pseudo_branch/observation/joint_observation.py` | Hybrid geometry-gated | M3 |
+| `pseudo_branch/refine/pseudo_loss_v2.py` | Loss 消费 | 所有 |
 
 ---
 

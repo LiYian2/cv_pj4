@@ -65,7 +65,7 @@ for idx in "${!labels[@]}"; do
     echo "[P1A] run already exists label=$label"
   fi
 
-  "$PY" "$PROJECT_ROOT/scripts/summarize_stageA_compare.py" \
+  "$PY" "$PROJECT_ROOT/scripts/diagnostics/summarize_stageA_compare.py" \
     --run-dirs "${run_dirs[@]}" \
     --output-root "$SUMMARY_DIR"
 

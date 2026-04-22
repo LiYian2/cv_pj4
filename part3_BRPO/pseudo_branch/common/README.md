@@ -2,4 +2,9 @@
 
 Cross-cutting runtime helpers, cache/build utilities, geometry helpers, and diagnostics.
 
-This directory is the phase-0 skeleton for the direct pseudo_branch migration. Real file moves will follow docs/design/PSEUDO_BRANCH_LAYOUT.md.
+Live common entries now live here after the Phase 5 direct migration:
+- align_depth_scale.py
+- build_pseudo_cache.py
+- diag_writer.py
+- epipolar_depth.py
+- flow_matcher.py

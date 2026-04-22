@@ -2,4 +2,5 @@
 
 Stage runtime state, loss assembly, scheduler, and refine-side orchestration.
 
-This directory is the phase-0 skeleton for the direct pseudo_branch migration. Real file moves will follow docs/design/PSEUDO_BRANCH_LAYOUT.md.
+Phase 2 direct migration has landed: `pseudo_camera_state.py`, `pseudo_loss_v2.py`, and `pseudo_refine_scheduler.py` now live under this directory.
+Callers should import from `pseudo_branch.refine.*` rather than the retired top-level R~ paths.

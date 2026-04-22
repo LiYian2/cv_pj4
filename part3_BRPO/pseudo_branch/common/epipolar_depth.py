@@ -122,7 +122,7 @@ def compute_edp_depth(
         stats: statistics dict
         diag_extra: extra info for visualization (pts, epipolar_distances, etc.)
     """
-    from flow_matcher import FlowMatcher
+    from pseudo_branch.common.flow_matcher import FlowMatcher
     
     if flow_matcher is None:
         flow_matcher = FlowMatcher()

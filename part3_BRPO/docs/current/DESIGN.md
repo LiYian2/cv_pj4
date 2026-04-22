@@ -1,6 +1,6 @@
 # DESIGN.md - Part3 BRPO 设计文档
 
-> 更新时间：2026-04-22 04:22 (Asia/Shanghai)
+> 更新时间：2026-04-22 20:04 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只记录"设计原则、架构决策、接口定义"，不记录实验数据
@@ -57,11 +57,19 @@ Pipeline:
 
 ### 1.4 工程目录组织（第二轮整理）
 
-- `scripts/` 顶层只保留 live 入口、active builder 和仍在被当前 docs 消费的 utility；历史 compare / one-off runner 归档到 `scripts/archive_experiments/`
+- `scripts/` 顶层现在保留 8 个 live core 入口 + 1 个外部 CLI wrapper（`run_pseudo_refinement.py`）；历史 compare / one-off runner 归档到 `scripts/archive_experiments/`
+- 内部 compatibility boundary 已收进 `scripts/compat/`，内部调用不再直接依赖顶层 `run_pseudo_refinement.py`
+- non-live diagnostics / summary helper 已收进 `scripts/diagnostics/`
+- legacy prepare / historical utility 已收进 `scripts/legacy_prepare/`
 - `pseudo_branch/` 已建立 `common/ / observation/ / mask/ / target/ / gaussian_management/ / refine/` 六个骨架目录
 - G~ Phase 1 已落地：`local_gating/`、`spgm/`、`gaussian_param_groups.py` 已迁入 `pseudo_branch/gaussian_management/`，直接 caller 已切到新路径，旧 top-level G~ 路径已退役
-- 后续迁移继续按 direct migration 执行：每一轮都直接改 import / caller / doc 引用，不保留长期兼容 shim；下一步是 Phase 2 R~ 壳层迁移
-- 详细 mapping 与阶段顺序见 `docs/design/PSEUDO_BRANCH_LAYOUT.md`；本轮记录见 `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`
+- R~ Phase 2 已落地：`pseudo_camera_state.py`、`pseudo_loss_v2.py`、`pseudo_refine_scheduler.py` 已迁入 `pseudo_branch/refine/`，直接 caller 已切到新路径，旧 top-level R~ 路径已退役
+- Phase 3 已落地：observation / target 主干入口与直接衍生文件已迁入 `pseudo_branch/observation/` 与 `pseudo_branch/target/`，直接 caller 已切到新路径，旧 top-level T~/observation 路径已退役
+- Phase 4 已落地：`brpo_confidence_mask.py`、`brpo_train_mask.py`、`confidence_builder.py`、`joint_confidence.py`、`rgb_mask_inference.py` 已迁入 `pseudo_branch/mask/`，直接 caller 与 `brpo_v2_signal` package glue 已切到新路径，旧 top-level M~ 路径已退役
+- Phase 5 已落地：`align_depth_scale.py`、`build_pseudo_cache.py`、`diag_writer.py`、`epipolar_depth.py`、`flow_matcher.py` 已迁入 `pseudo_branch/common/`，直接 caller 与包入口已切到新路径，旧 top-level common 路径已退役
+- Phase 6 residual T~ cleanup 已落地：`brpo_depth_target.py`、`brpo_depth_densify.py`、`depth_target_builder.py` 已迁入 `pseudo_branch/target/`，直接 caller 与包入口已切到新路径，旧 top-level T~ flat paths 已退役
+- 第二轮迁移现已完整闭环：`pseudo_branch/` 顶层只剩 `__init__.py`，live 代码路径全部落到 `common/ / observation/ / mask/ / target/ / gaussian_management/ / refine/` 六层目录下
+- 详细 mapping 与阶段顺序见 `docs/design/PSEUDO_BRANCH_LAYOUT.md`；本轮记录见 `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`、`docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`、`docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md`、`docs/PSEUDO_BRANCH_M_MIGRATION_PHASE4_20260422.md`、`docs/PSEUDO_BRANCH_COMMON_MIGRATION_PHASE5_20260422.md` 与 `docs/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md`
 
 ---
 
@@ -166,6 +174,8 @@ Pipeline:
 - T4 compare 执行文档：[docs/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md]
 - pseudo_branch 目录迁移：[docs/design/PSEUDO_BRANCH_LAYOUT.md]
 - pseudo_branch G~ 迁移记录：[docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md]
+- pseudo_branch R~ 迁移记录：[docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md]
+- pseudo_branch T~/observation 迁移记录：[docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md]
 - M~ 详细：[MASK_DESIGN.md]
 - T~ 详细：[TARGET_DESIGN.md]
 - G~ 详细：[GAUSSIAN_MANAGEMENT_DESIGN.md]

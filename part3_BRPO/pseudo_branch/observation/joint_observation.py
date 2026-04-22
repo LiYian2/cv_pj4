@@ -7,7 +7,7 @@ from typing import Dict
 import numpy as np
 from PIL import Image
 
-from .depth_supervision_v2 import (
+from pseudo_branch.target.depth_supervision_v2 import (
     SOURCE_BOTH_WEIGHTED,
     SOURCE_LEFT,
     SOURCE_NONE,

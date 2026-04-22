@@ -1,6 +1,6 @@
 # STATUS.md - Part3 Stage1 当前状态
 
-> 更新时间：2026-04-22 04:22 (Asia/Shanghai)
+> 更新时间：2026-04-22 20:04 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只记录"现在"，不记录历史过程（过程在 CHANGELOG）
@@ -253,7 +253,7 @@ signal_v2/frame_<frame_id>/
   1. 把 exact M~/T~ winner 的 builder / loss contract 从当前 standalone 实验入口中抽成可复用 backend
   2. 保持 pseudo supervision 只进 mapping / backend refine，不回灌 tracking / frontend
   3. 用 fixed control 复核集成后是否还能复现 standalone winner 的增益
-  4. 在不改语义的前提下继续做工程整理：`scripts/` 顶层只保留 live 入口；`pseudo_branch/` 已完成 Phase 1 G~ direct migration（`local_gating/`、`spgm/`、`gaussian_param_groups.py` → `gaussian_management/`），下一步进入 Phase 2 R~ 壳层迁移
+  4. 在不改语义的前提下继续做工程整理：`pseudo_branch/` 第二轮 direct migration 已全部完成（G~ → `gaussian_management/`；R~ → `refine/`；observation → `observation/`；target → `target/`；mask → `mask/`；common → `common/`；residual T~ builder 也已全部收进 `target/`），顶层仅剩 `pseudo_branch/__init__.py`；scripts 侧 final audit 的 Stage 1 / 2 / 3 / 4 也已全部完成：non-live diagnostics 已收进 `scripts/diagnostics/`，legacy prepare 已收进 `scripts/legacy_prepare/`，内部 compatibility boundary 已收进 `scripts/compat/`，当前顶层 `scripts/` 最终收敛为 8 个 live core + 1 个外部 CLI wrapper。代码路径整理本身现在可以视为结束，后续重点应回到 backend-only integration 与 working-tree/commit 收尾，而不是继续做代码布局调整
 - 文档口径继续固定：
   1. G~ 使用 clean compare 口径，不再引用旧 `+0.0114` baseline
   2. 任何后续 compare 都固定 clean G~ / fixed T1 control，不再混入新的 G~ 改动
@@ -277,3 +277,5 @@ signal_v2/frame_<frame_id>/
 - T4 compare 执行文档：[docs/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md]
 - G~ clean compare 记录：[docs/archived/2026-04-experiments/G_BRPO_CLEAN_COMPARE_20260421.md]
 - pseudo_branch G~ 迁移进度：[docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md]
+- pseudo_branch R~ 迁移进度：[docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md]
+- pseudo_branch T~/observation 迁移进度：[docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md]

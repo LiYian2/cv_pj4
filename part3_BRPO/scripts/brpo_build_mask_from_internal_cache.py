@@ -10,20 +10,20 @@ from PIL import Image
 
 from utils.config_utils import load_config
 from utils.external_eval_utils import load_gaussians_from_ply
-from pseudo_branch.flow_matcher import FlowMatcher
-from pseudo_branch.brpo_reprojection_verify import (
+from pseudo_branch.common.flow_matcher import FlowMatcher
+from pseudo_branch.observation.brpo_reprojection_verify import (
     find_neighbor_kfs,
     render_depth_from_state,
     verify_single_branch,
     verify_single_branch_exact,
     save_float_map_png,
 )
-from pseudo_branch.brpo_confidence_mask import (
+from pseudo_branch.mask.brpo_confidence_mask import (
     build_brpo_confidence_mask,
     summarize_brpo_mask,
     write_frame_outputs,
 )
-from pseudo_branch.brpo_train_mask import build_train_confidence_masks
+from pseudo_branch.mask.brpo_train_mask import build_train_confidence_masks
 
 
 VERIFICATION_VERSION = "brpo-verify-v3-stageM3"

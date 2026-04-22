@@ -11,21 +11,21 @@ from types import SimpleNamespace
 import numpy as np
 import torch
 
-ROOT = Path(__file__).resolve().parents[1]
+ROOT = Path(__file__).resolve().parents[2]
 S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, S3PO_ROOT)
 sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
-from pseudo_branch.pseudo_camera_state import make_viewpoint_trainable
-from pseudo_branch.pseudo_loss_v2 import (
+from pseudo_branch.refine.pseudo_camera_state import make_viewpoint_trainable
+from pseudo_branch.refine.pseudo_loss_v2 import (
     build_stageA_loss,
     build_stageA_loss_source_aware,
 )
 
 
 def load_v1_module():
-    script = Path(__file__).parent / 'run_pseudo_refinement.py'
+    script = Path(__file__).resolve().parents[1] / 'compat' / 'run_pseudo_refinement.py'
     spec = importlib.util.spec_from_file_location('run_pseudo_refinement_v1', script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

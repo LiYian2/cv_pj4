@@ -16,7 +16,7 @@ from typing import Dict, Optional, Tuple
 import numpy as np
 from PIL import Image
 
-from pseudo_branch.brpo_reprojection_verify import (
+from pseudo_branch.observation.brpo_reprojection_verify import (
     get_intrinsic_matrix_from_state,
     pose_c2w_from_state,
 )

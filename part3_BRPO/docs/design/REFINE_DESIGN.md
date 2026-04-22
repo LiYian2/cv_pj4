@@ -234,8 +234,8 @@ Pipeline:
 | 文件 | 功能 | 关键函数 |
 |------|------|---------|
 | `scripts/run_pseudo_refinement_v2.py` | 主 loop | StageA loop, StageB loop, G~ timing |
-| `pseudo_branch/pseudo_loss_v2.py` | Loss 组装 | `build_stageA_loss`, `build_stageA_loss_source_aware`, `build_stageA_loss_exact_shared_cm` |
-| `pseudo_branch/pseudo_refine_scheduler.py` | Stage 协议 | iteration scheduling |
+| `pseudo_branch/refine/pseudo_loss_v2.py` | Loss 组装 | `build_stageA_loss`, `build_stageA_loss_source_aware`, `build_stageA_loss_exact_shared_cm` |
+| `pseudo_branch/refine/pseudo_refine_scheduler.py` | Stage 协议 | iteration scheduling |
 | `pseudo_branch/gaussian_management/local_gating/*` | G~ timing 介入点 | `maybe_apply_pseudo_local_gating` |
 
 ---

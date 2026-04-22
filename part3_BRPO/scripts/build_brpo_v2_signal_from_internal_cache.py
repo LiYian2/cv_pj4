@@ -9,26 +9,26 @@ from typing import Dict, List
 
 import numpy as np
 
-from pseudo_branch.flow_matcher import FlowMatcher
-from pseudo_branch.brpo_reprojection_verify import find_neighbor_kfs
-from pseudo_branch.brpo_v2_signal.rgb_mask_inference import (
+from pseudo_branch.common.flow_matcher import FlowMatcher
+from pseudo_branch.observation.brpo_reprojection_verify import find_neighbor_kfs
+from pseudo_branch.mask.rgb_mask_inference import (
     build_rgb_mask_from_correspondences,
     write_rgb_mask_outputs,
 )
-from pseudo_branch.brpo_v2_signal.depth_supervision_v2 import (
+from pseudo_branch.target.depth_supervision_v2 import (
     build_depth_supervision_v2,
     write_depth_supervision_outputs,
 )
-from pseudo_branch.brpo_v2_signal.joint_confidence import (
+from pseudo_branch.mask.joint_confidence import (
     build_joint_confidence_from_rgb_and_depth,
     build_joint_depth_target,
     write_joint_signal_outputs,
 )
-from pseudo_branch.brpo_v2_signal.joint_observation import (
+from pseudo_branch.observation.joint_observation import (
     build_joint_observation_from_candidates,
     write_joint_observation_outputs,
 )
-from pseudo_branch.brpo_v2_signal.pseudo_observation_brpo_style import (
+from pseudo_branch.observation.pseudo_observation_brpo_style import (
     build_brpo_direct_observation,
     build_brpo_style_observation,
     build_brpo_style_observation_v2,
@@ -46,7 +46,7 @@ from pseudo_branch.brpo_v2_signal.pseudo_observation_brpo_style import (
     write_exact_brpo_full_target_observation_outputs,
     write_exact_brpo_upstream_target_observation_outputs,
 )
-from pseudo_branch.brpo_v2_signal.support_expand import (
+from pseudo_branch.target.support_expand import (
     build_support_expand_from_a1,
     write_support_expand_outputs,
 )

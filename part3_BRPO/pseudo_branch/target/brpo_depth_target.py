@@ -6,7 +6,7 @@ from typing import Dict
 
 import numpy as np
 
-from pseudo_branch.brpo_depth_densify import (
+from .brpo_depth_densify import (
     build_depth_source_map_v2,
     build_sparse_log_depth_correction,
     densify_depth_correction_patchwise,

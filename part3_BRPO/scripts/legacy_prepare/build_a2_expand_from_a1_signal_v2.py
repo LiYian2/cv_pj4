@@ -15,7 +15,7 @@ from typing import Dict, List
 
 import numpy as np
 
-from pseudo_branch.brpo_v2_signal.support_expand import (
+from pseudo_branch.target.support_expand import (
     build_support_expand_from_a1,
     write_support_expand_outputs,
 )

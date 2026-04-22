@@ -9,7 +9,7 @@ from typing import Dict, List, Optional, Tuple
 
 import numpy as np
 
-from pseudo_branch.brpo_depth_target import build_blended_target_depth
+from pseudo_branch.target.brpo_depth_target import build_blended_target_depth
 
 SCHEMA_VERSION = "pseudo-cache-internal-v1.5"
 CAMERA_SCHEMA = "cam-internal-v1"
@@ -392,8 +392,8 @@ def stage_fusion(args, run_root: Path):
     from munch import munchify
     from utils.config_utils import load_config
     from utils.external_eval_utils import load_gaussians_from_ply
-    from pseudo_branch.brpo_reprojection_verify import render_depth_from_state
-    from pseudo_branch.pseudo_fusion import run_fusion_for_sample
+    from pseudo_branch.observation.brpo_reprojection_verify import render_depth_from_state
+    from pseudo_branch.observation.pseudo_fusion import run_fusion_for_sample
 
     internal_cache_root = Path(args.internal_cache_root)
     manifest, states_by_id, _, _ = load_internal_context(internal_cache_root, args.stage_tag)

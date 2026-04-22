@@ -1,0 +1,41 @@
+dataset_name: re10k
+checkpoint_path: null
+frame_limit: -1
+seed: 0
+nopo_enable: true
+n_views: 9
+sample_rate: 50
+nopo_checkpoint: re10k
+new_submap_every: 2
+frame_split:
+  mode: explicit
+  train_frame_ids: [0, 34, 69, 104, 139, 173, 208, 243, 278]
+  test_protocol: all_non_train
+  test_frame_ids: null
+aligner:
+  iterations: 150
+  cam_rot_lr: 0.0001
+  cam_trans_lr: 0.001
+  filter_alpha: true
+  alpha_thre: 0.95
+  soft_alpha: true
+  mask_invalid_depth: true
+  key_frame_pose: nopo
+  scale_min: 0.05
+  scale_max: 20.0
+  depth_valid_min: 0.05
+  scale_init_fallback: 1.0
+  mw2_warmup_iters: 20
+data:
+  input_path: /home/bzhang512/CV_Project/dataset/Re10k-1/part2
+  output_path: /home/bzhang512/CV_Project/output/part2/re10k_1/reggs_re10k1_re10k-ckpt_exact_sparse_part3_v0
+  scene_name: reggs_re10k1_fullseq_256
+cam:
+  H: 256
+  W: 256
+  fx: 1
+  fy: 1
+  cx: 1
+  cy: 1
+  crop_edge: 0
+  depth_scale: 5000.0

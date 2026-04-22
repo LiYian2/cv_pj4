@@ -7,7 +7,7 @@ from typing import Dict
 import numpy as np
 from PIL import Image
 
-from .depth_supervision_v2 import (
+from pseudo_branch.target.depth_supervision_v2 import (
     SOURCE_BOTH_WEIGHTED,
     SOURCE_LEFT,
     SOURCE_NONE,
@@ -727,7 +727,7 @@ def build_exact_brpo_upstream_target_observation(
     3. Continuous confidence from exact backend
     4. Provenance tracked throughout
     """    
-    from .depth_supervision_v2 import build_exact_upstream_depth_target
+    from pseudo_branch.target.depth_supervision_v2 import build_exact_upstream_depth_target
     
     # Build exact upstream depth target
     depth_result = build_exact_upstream_depth_target(

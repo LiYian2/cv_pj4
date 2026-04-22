@@ -2,7 +2,7 @@
 
 > 用途：Part3 BRPO 压缩/重启后的第一入口。先看这份，再按这里列的顺序继续。
 > 维护原则：只保留当前真实状态、当前执行顺序、关键文档入口和固定环境信息。
-> 更新时间：2026-04-22 06:19 (Asia/Shanghai)
+> 更新时间：2026-04-22 20:04 (Asia/Shanghai)
 
 ---
 
@@ -13,9 +13,16 @@
 2. `docs/current/STATUS.md`
 3. `docs/current/DESIGN.md`
 4. `docs/current/CHANGELOG.md`
-5. 如果要继续目录重整，先看 `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`，再看 `docs/design/PSEUDO_BRANCH_LAYOUT.md`
+5. 如果要继续工程整理，先看 `docs/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`，再看 `docs/SCRIPTS_FINAL_AUDIT_STAGE12_20260422.md`、`docs/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md` 与 `docs/design/PSEUDO_BRANCH_LAYOUT.md`
 6. 需要长文证据时再看：
    - `docs/archived/2026-04-experiments/G_BRPO_CLEAN_COMPARE_20260421.md`
+   - `docs/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`
+   - `docs/SCRIPTS_FINAL_AUDIT_STAGE12_20260422.md`
+   - `docs/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md`
+   - `docs/PSEUDO_BRANCH_COMMON_MIGRATION_PHASE5_20260422.md`
+   - `docs/PSEUDO_BRANCH_M_MIGRATION_PHASE4_20260422.md`
+   - `docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md`
+   - `docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`
    - `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`
    - `docs/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md`
    - `docs/design/` 下四个模块设计文档
@@ -38,9 +45,9 @@
 2. 把 builder / verifier backend / loss contract 抽成 backend-only 可复用模块
 3. 保持 pseudo supervision 只进 backend refine，不回灌 tracking / frontend
 4. 工程整理同步推进：
-   - `scripts/` 顶层只保留 live 入口，历史 compare runner 归档到 `scripts/archive_experiments/`
-   - `pseudo_branch/` 已完成 G~ Phase 1 direct migration：`local_gating/`、`spgm/`、`gaussian_param_groups.py` 已收进 `pseudo_branch/gaussian_management/`
-   - 下一步目录迁移是 Phase 2 R~ 壳层迁移，详见 `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md` 与 `docs/design/PSEUDO_BRANCH_LAYOUT.md`
+   - `scripts/` 顶层现只保留 8 个 live core + 1 个外部 CLI wrapper；内部 compatibility boundary 已收进 `scripts/compat/`，non-live diagnostics 已收进 `scripts/diagnostics/`，legacy prepare 已收进 `scripts/legacy_prepare/`，历史 compare runner 归档在 `scripts/archive_experiments/`
+   - `pseudo_branch/` 已完成 G~ Phase 1 + R~ Phase 2 + Phase 3 T~/observation + Phase 4 M~ + Phase 5 common + Phase 6 residual T~ cleanup：G~ 已收进 `pseudo_branch/gaussian_management/`，R~ 已收进 `pseudo_branch/refine/`，observation 主入口已收进 `pseudo_branch/observation/`，mask 主入口已收进 `pseudo_branch/mask/`，target 主入口与 residual T~ builder 已全部收进 `pseudo_branch/target/`，common 主入口已收进 `pseudo_branch/common/`
+   - `pseudo_branch/` 顶层现在只剩 `__init__.py`；scripts final audit 的 Stage 1 / 2 / 3 / 4 也已完成，代码路径整理本身可以视为结束；若还要继续工程收尾，重点应转向 backend-only integration 与 working-tree/commit hygiene，而不是再继续改布局；详见 `docs/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`
 
 ---
 
@@ -56,7 +63,7 @@
 
 ## 5. 一句话 handoff
 
-当前已经完成 T4 exact-upstream formal compare，standalone winner 固定为 `exact M~ + exact upstream T~ + clean summary G~ + T1`；G~ 只保留 side branch。工程整理这边已经完成 pseudo_branch 的 G~ Phase 1 direct migration，下一步是 backend-only integration 并继续 Phase 2 R~ 迁移。
+当前已经完成 T4 exact-upstream formal compare，standalone winner 固定为 `exact M~ + exact upstream T~ + clean summary G~ + T1`；G~ 只保留 side branch。工程整理这边 pseudo_branch 第二轮整理与 scripts final audit Stage 1 / 2 / 3 / 4 都已落地；代码路径整理现在可以视为完成，下一步回到 backend-only integration，并在最后统一处理 working-tree/commit 收尾。
 
 ---
 

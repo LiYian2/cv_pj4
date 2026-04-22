@@ -34,7 +34,7 @@ T~（Target）决定"监督目标的数值是什么"。**T~ 有 4 大类**：
 
 ### 2.1 信息源
 
-**代码位置**：`depth_supervision_v2.py` → `build_depth_supervision_v2()`
+**代码位置**：`pseudo_branch/target/depth_supervision_v2.py` → `build_depth_supervision_v2()`
 
 **输入**：
 - `projected_depth_left/right`：reference 投影到 pseudo-frame 的 depth
@@ -100,7 +100,7 @@ $$
 
 ### 3.1 信息源
 
-**代码位置**：`pseudo_observation_brpo_style.py` → `build_brpo_style_observation()`
+**代码位置**：`pseudo_branch/observation/pseudo_observation_brpo_style.py` → `build_brpo_style_observation()`
 
 **输入**：
 - `support_left/right`：matcher correspondence support
@@ -168,7 +168,7 @@ $$
 
 ### 4.1 信息源
 
-**代码位置**：`pseudo_observation_brpo_style.py` → `build_brpo_style_observation_v2()`
+**代码位置**：`pseudo_branch/observation/pseudo_observation_brpo_style.py` → `build_brpo_style_observation_v2()`
 
 **输入**：
 - T2 的所有输入
@@ -196,8 +196,8 @@ $$
 ### 5.1 信息源
 
 **代码位置**：
-- `depth_supervision_v2.py` → `build_exact_upstream_depth_target()`
-- `brpo_reprojection_verify.py` → `verify_single_branch_exact()`
+- `pseudo_branch/target/depth_supervision_v2.py` → `build_exact_upstream_depth_target()`
+- `pseudo_branch/observation/brpo_reprojection_verify.py` → `verify_single_branch_exact()`
 
 **输入**：
 - `support_left_exact/right_exact`：exact backend verified support
@@ -326,10 +326,10 @@ $$
 
 | 文件 | 功能 | T~ 类别 |
 |------|------|--------|
-| `pseudo_branch/brpo_v2_signal/depth_supervision_v2.py` | Old Pipeline + Exact Upstream | T1, T4 |
-| `pseudo_branch/brpo_v2_signal/pseudo_observation_brpo_style.py` | BRPO-style Proxy + Stable Blend | T2, T3 |
-| `pseudo_branch/brpo_reprojection_verify.py` | Exact backend verifier | T4 |
-| `pseudo_branch/pseudo_loss_v2.py` | Loss 消费 | 所有 |
+| `pseudo_branch/target/depth_supervision_v2.py` | Old Pipeline + Exact Upstream | T1, T4 |
+| `pseudo_branch/observation/pseudo_observation_brpo_style.py` | BRPO-style Proxy + Stable Blend | T2, T3 |
+| `pseudo_branch/observation/brpo_reprojection_verify.py` | Exact backend verifier | T4 |
+| `pseudo_branch/refine/pseudo_loss_v2.py` | Loss 消费 | 所有 |
 
 ---
 

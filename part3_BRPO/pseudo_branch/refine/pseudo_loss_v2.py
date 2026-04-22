@@ -5,7 +5,7 @@ from typing import Dict, Tuple
 import numpy as np
 import torch
 
-from pseudo_branch.pseudo_camera_state import current_w2c
+from pseudo_branch.refine.pseudo_camera_state import current_w2c
 from utils.pose_utils import SE3_log
 
 SEED_SOURCE_IDS = (1, 2, 3)

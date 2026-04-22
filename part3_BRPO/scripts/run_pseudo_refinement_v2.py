@@ -19,7 +19,7 @@ sys.path.insert(0, str(ROOT))
 sys.path.insert(0, S3PO_ROOT)
 sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
-from pseudo_branch.pseudo_camera_state import (
+from pseudo_branch.refine.pseudo_camera_state import (
     make_viewpoint_trainable,
     export_view_state,
     apply_pose_residual_,
@@ -27,8 +27,8 @@ from pseudo_branch.pseudo_camera_state import (
     apply_loaded_view_state_,
     summarize_true_pose_deltas,
 )
-from pseudo_branch.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware, build_stageA_loss_exact_shared_cm
-from pseudo_branch.pseudo_refine_scheduler import StageAConfig, StageA5Config, build_stageA_optimizer, build_stageA5_optimizers
+from pseudo_branch.refine.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware, build_stageA_loss_exact_shared_cm
+from pseudo_branch.refine.pseudo_refine_scheduler import StageAConfig, StageA5Config, build_stageA_optimizer, build_stageA5_optimizers
 from pseudo_branch.gaussian_management.gaussian_param_groups import build_micro_gaussian_param_groups
 from pseudo_branch.gaussian_management.local_gating import (
     PseudoLocalGatingConfig,
@@ -46,7 +46,7 @@ from pseudo_branch.gaussian_management.spgm import (
 
 
 def load_v1_module():
-    script = Path(__file__).parent / 'run_pseudo_refinement.py'
+    script = Path(__file__).parent / 'compat' / 'run_pseudo_refinement.py'
     spec = importlib.util.spec_from_file_location('run_pseudo_refinement_v1', script)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)

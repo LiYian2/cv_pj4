@@ -9,7 +9,9 @@ from PIL import Image
 from typing import Dict, Optional, Tuple
 import sys
 
-sys.path.insert(0, str(Path(__file__).parent))
+ROOT = Path(__file__).resolve().parents[2]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
 
 
 def load_depth(path, depth_scale=5000.0):
@@ -96,7 +98,7 @@ def find_ref_rgb_path(ref_rgb_dir, frame_id, scene_name):
 
 def write_diag_gt(sample_dir, target_depth, confidence, render_depth, stats, sparse_rgb_dir, refs, scene_name):
     """Write diag files for GT method (simpler, no flow/epipolar)."""
-    from diag_writer import write_depth_consistency_map
+    from pseudo_branch.common.diag_writer import write_depth_consistency_map
     
     sample_dir = Path(sample_dir)
     diag_dir = sample_dir / "diag"
@@ -201,8 +203,8 @@ def build_sample_gt_depth(sample_dir, sparse_depth_dir, sparse_rgb_dir, scene_na
 
 
 def build_sample_edp(sample_dir, sparse_rgb_dir, scene_name, flow_matcher, dry_run, size=512):
-    from epipolar_depth import compute_edp_depth
-    from diag_writer import write_full_diag
+    from pseudo_branch.common.epipolar_depth import compute_edp_depth
+    from pseudo_branch.common.diag_writer import write_full_diag
     
     camera_path = sample_dir / "camera.json"
     refs_path = sample_dir / "refs.json"
@@ -273,7 +275,7 @@ def build_sample_edp(sample_dir, sparse_rgb_dir, scene_name, flow_matcher, dry_r
         np.save(sample_dir / "conf_right.npy", conf_right)
         
         # RGB fusion
-        from pseudo_fusion import run_fusion_for_sample, get_fusion_diag_images
+        from pseudo_branch.observation.pseudo_fusion import run_fusion_for_sample, get_fusion_diag_images
         target_rgb_left_path = sample_dir / "target_rgb_left.png"
         target_rgb_right_path = sample_dir / "target_rgb_right.png"
         render_rgb_path = sample_dir / "render_rgb.png"
@@ -318,7 +320,7 @@ def main():
     
     flow_matcher = None
     if use_edp:
-        from flow_matcher import FlowMatcher
+        from pseudo_branch.common.flow_matcher import FlowMatcher
         flow_matcher = FlowMatcher()
         print("Using EDP")
     else:

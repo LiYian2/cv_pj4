@@ -1,5 +1,10 @@
 # mask
 
-Mask / confidence builders and legacy or exact C_m related helpers.
+Mask / confidence builders and exact or legacy C_m related helpers.
 
-This directory is the phase-0 skeleton for the direct pseudo_branch migration. Real file moves will follow docs/design/PSEUDO_BRANCH_LAYOUT.md.
+Live M~ entries now live here after the Phase 4 direct migration:
+- brpo_confidence_mask.py
+- brpo_train_mask.py
+- confidence_builder.py
+- joint_confidence.py
+- rgb_mask_inference.py

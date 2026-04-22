@@ -7,7 +7,7 @@ from pathlib import Path
 
 import numpy as np
 
-from pseudo_branch.brpo_depth_target import build_blended_target_depth_v2
+from pseudo_branch.target.brpo_depth_target import build_blended_target_depth_v2
 
 
 def parse_args():

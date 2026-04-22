@@ -2,4 +2,5 @@
 
 Joint M~/T~ observation builders, verifier glue, and fusion-side assembly.
 
-This directory is the phase-0 skeleton for the direct pseudo_branch migration. Real file moves will follow docs/design/PSEUDO_BRANCH_LAYOUT.md.
+Phase 3 direct migration has landed the current observation entrypoints: `pseudo_fusion.py`, `brpo_reprojection_verify.py`, `pseudo_observation_brpo_style.py`, `pseudo_observation_verifier.py`, and `joint_observation.py` now live under this directory.
+Callers should import from `pseudo_branch.observation.*` rather than the retired top-level observation paths.

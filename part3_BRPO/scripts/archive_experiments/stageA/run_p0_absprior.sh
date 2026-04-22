@@ -93,7 +93,7 @@ for idx in "${!labels[@]}"; do
     echo "[P0] replay already exists label=$label"
   fi
 
-  "$PY" "$PROJECT_ROOT/scripts/summarize_stageA_compare.py" \
+  "$PY" "$PROJECT_ROOT/scripts/diagnostics/summarize_stageA_compare.py" \
     --run-dirs "${run_dirs[@]}" \
     --output-root "$SUMMARY_DIR" \
     --reference-replay-json "$REF_JSON"
@@ -102,7 +102,7 @@ for idx in "${!labels[@]}"; do
 done
 
 echo "[P0] final summary refresh"
-"$PY" "$PROJECT_ROOT/scripts/summarize_stageA_compare.py" \
+"$PY" "$PROJECT_ROOT/scripts/diagnostics/summarize_stageA_compare.py" \
   --run-dirs "${run_dirs[@]}" \
   --output-root "$SUMMARY_DIR" \
   --reference-replay-json "$REF_JSON" \

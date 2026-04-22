@@ -21,17 +21,17 @@ if S3PO_ROOT not in sys.path:
 if f"{S3PO_ROOT}/gaussian_splatting" not in sys.path:
     sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
-from pseudo_branch.flow_matcher import FlowMatcher
-from pseudo_branch.brpo_reprojection_verify import (  # noqa: E402
+from pseudo_branch.common.flow_matcher import FlowMatcher
+from pseudo_branch.observation.brpo_reprojection_verify import (  # noqa: E402
     find_neighbor_kfs,
     render_depth_from_state,
     verify_single_branch,
 )
-from pseudo_branch.brpo_confidence_mask import (  # noqa: E402
+from pseudo_branch.mask.brpo_confidence_mask import (  # noqa: E402
     build_brpo_confidence_mask,
     summarize_brpo_mask,
 )
-from pseudo_branch.brpo_depth_target import build_blended_target_depth  # noqa: E402
+from pseudo_branch.target.brpo_depth_target import build_blended_target_depth  # noqa: E402
 from utils.config_utils import load_config  # noqa: E402
 from utils.external_eval_utils import load_gaussians_from_ply  # noqa: E402
 
