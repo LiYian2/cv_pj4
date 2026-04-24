@@ -4,12 +4,22 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from pathlib import Path
 from typing import Dict, List
 
 import numpy as np
 
-from pseudo_branch.common.flow_matcher import FlowMatcher
+ROOT = Path(__file__).resolve().parents[1]
+S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if S3PO_ROOT not in sys.path:
+    sys.path.insert(0, S3PO_ROOT)
+if f"{S3PO_ROOT}/gaussian_splatting" not in sys.path:
+    sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
+
+from pseudo_branch.common import DEFAULT_MODEL_NAME, build_pair_matcher
 from pseudo_branch.observation.brpo_reprojection_verify import find_neighbor_kfs
 from pseudo_branch.mask.rgb_mask_inference import (
     build_rgb_mask_from_correspondences,
@@ -60,6 +70,10 @@ def parse_args():
     p.add_argument("--output-root", default=None, help="Defaults to <prepare-root>/signal_v2")
     p.add_argument("--frame-ids", type=int, nargs="*", default=None)
     p.add_argument("--matcher-size", type=int, default=512)
+    p.add_argument("--matcher-mode", choices=["sparse_desc_2d", "dense_pts3d_3d"], default="sparse_desc_2d")
+    p.add_argument("--matcher-model-name", default=DEFAULT_MODEL_NAME)
+    p.add_argument("--matcher-device", default="cuda")
+    p.add_argument("--dense3d-conf-quantile", type=float, default=0.90)
     p.add_argument("--min-rgb-conf-for-depth", type=float, default=0.5)
     p.add_argument("--fallback-mode", choices=["render_depth", "none"], default="render_depth")
     p.add_argument("--both-mode", choices=["weighted_by_fusion"], default="weighted_by_fusion")
@@ -113,6 +127,14 @@ def main():
     if not records:
         raise RuntimeError("No records selected for BRPO v2 signal build")
 
+    matcher_config = {
+        "matcher_mode": args.matcher_mode,
+        "matcher_model_name": args.matcher_model_name,
+        "matcher_device": args.matcher_device,
+        "dense3d_conf_quantile": float(args.dense3d_conf_quantile),
+        "matcher_size": int(args.matcher_size),
+    }
+
     if args.dry_run:
         print(json.dumps({
             "prepare_root": str(prepare_root),
@@ -120,10 +142,16 @@ def main():
             "num_records": len(records),
             "frame_ids": [int(r["frame_id"]) for r in records],
             "use_a2_expand": args.use_a2_expand,
+            "matcher": matcher_config,
         }, indent=2))
         return
 
-    matcher = FlowMatcher()
+    matcher = build_pair_matcher(
+        matcher_mode=args.matcher_mode,
+        model_name=args.matcher_model_name,
+        device=args.matcher_device,
+        dense3d_conf_quantile=float(args.dense3d_conf_quantile),
+    )
     summary = []
 
     for rec in records:
@@ -174,6 +202,7 @@ def main():
             "right_ref_frame_id": right_ref_id,
             "summary": rgb_result["summary"],
             "matcher_meta": rgb_result["matcher_meta"],
+            "matcher_config": matcher_config,
             "signal_pipeline": "brpo_v2_rgbmask_from_fused_rgb",
         }
         write_rgb_mask_outputs(frame_out, rgb_result, rgb_meta)
@@ -584,6 +613,8 @@ def main():
             "frame_id": frame_id,
             "left_ref_frame_id": left_ref_id,
             "right_ref_frame_id": right_ref_id,
+            "matcher_config": matcher_config,
+            "rgb_matcher_meta": rgb_result["matcher_meta"],
             "rgb_mask_summary": rgb_result["summary"],
             "depth_summary": depth_result["summary"],
             "joint_summary": joint_result["summary"],
@@ -608,6 +639,7 @@ def main():
         "internal_cache_root": str(internal_cache_root.resolve()),
         "stage_tag": args.stage_tag,
         "frame_ids": [int(r["frame_id"]) for r in records],
+        "matcher": matcher_config,
         "matcher_size": int(args.matcher_size),
         "min_rgb_conf_for_depth": float(args.min_rgb_conf_for_depth),
         "fallback_mode": args.fallback_mode,

@@ -3,11 +3,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+
+ROOT = Path(__file__).resolve().parents[1]
+S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if S3PO_ROOT not in sys.path:
+    sys.path.insert(0, S3PO_ROOT)
+if f"{S3PO_ROOT}/gaussian_splatting" not in sys.path:
+    sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
 from pseudo_branch.target.brpo_depth_target import build_blended_target_depth
 
@@ -67,6 +77,7 @@ def parse_args():
     p.add_argument("--depth-both-mode", choices=["average"], default="average")
     p.add_argument("--fusion-use-exact-backend-confidence", action="store_true", help="Use exact backend confidence to replace proxy fusion weights when available")
     p.add_argument("--fusion-exact-backend-root", default=None, help="Path to exact backend root (contains frame_XXXX/confidence_left_exact.npy)")
+    p.add_argument("--sh-degree", type=int, default=None, help="Override SH degree for loading stage PLY; default auto-infer from PLY header")
 
     # Difix args
     p.add_argument("--prompt", type=str, default="remove degradation")
@@ -401,7 +412,7 @@ def stage_fusion(args, run_root: Path):
     config = load_config(str(internal_cache_root.parent / 'config.yml'))
     pipe = munchify(config['pipeline_params'])
     stage_ply = internal_cache_root / args.stage_tag / 'point_cloud' / 'point_cloud.ply'
-    gaussians = load_gaussians_from_ply(config, str(stage_ply))
+    gaussians = load_gaussians_from_ply(config, str(stage_ply), sh_degree=args.sh_degree)
     background = torch.tensor(manifest['background'], dtype=torch.float32, device='cuda')
 
     records = load_internal_records(run_root)
@@ -664,6 +675,8 @@ def stage_verify(args, run_root: Path):
         "--prop-tau-rel-depth", str(args.prop_tau_rel_depth),
         "--prop-tau-rgb-l1", str(args.prop_tau_rgb_l1),
     ]
+    if args.sh_degree is not None:
+        cmd += ["--sh-degree", str(args.sh_degree)]
 
     if args.dry_run:
         print("[dry-run]", " ".join(cmd))

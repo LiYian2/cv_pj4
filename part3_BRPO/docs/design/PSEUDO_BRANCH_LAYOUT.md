@@ -94,13 +94,13 @@ pseudo_branch/
 - 已迁：`local_gating/`、`spgm/`、`gaussian_param_groups.py` → `pseudo_branch/gaussian_management/`
 - 已改：`pseudo_branch/pseudo_refine_scheduler.py`、`scripts/run_pseudo_refinement_v2.py` import 已切到新路径
 - 已清：旧 top-level G~ 路径已删除，未保留 shim
-- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`
+- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`
 
 ### Phase 2：R~ 壳层迁移（已完成）
 - 已迁：`pseudo_camera_state.py`、`pseudo_loss_v2.py`、`pseudo_refine_scheduler.py` → `pseudo_branch/refine/`
 - 已改：`scripts/run_pseudo_refinement_v2.py`、两个 diagnose 脚本、`pseudo_branch/gaussian_management/spgm/stats.py` import 已切到新路径
 - 已清：旧 top-level R~ 路径已删除，未保留 shim
-- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`
+- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`
 
 ### Phase 3：T~/observation 主干迁移（已完成）
 - 先迁当前 T~ 主线真实入口：`pseudo_fusion.py`、`brpo_reprojection_verify.py`、`depth_supervision_v2.py`、`pseudo_observation_brpo_style.py`
@@ -111,19 +111,19 @@ pseudo_branch/
 - 已迁：`brpo_v2_signal/joint_confidence.py`、`brpo_v2_signal/rgb_mask_inference.py` → `pseudo_branch/mask/`
 - 已改：`scripts/brpo_build_mask_from_internal_cache.py`、`scripts/select_signal_aware_pseudos.py`、`scripts/build_brpo_v2_signal_from_internal_cache.py` 与 `pseudo_branch/brpo_v2_signal/__init__.py` import 已切到新路径
 - 已清：旧 top-level M~ 路径与 `brpo_v2_signal` 内对应平铺文件已删除，未保留 shim
-- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/PSEUDO_BRANCH_M_MIGRATION_PHASE4_20260422.md`
+- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_M_MIGRATION_PHASE4_20260422.md`
 
 ### Phase 5：common 收尾 + 清理旧平铺路径（已完成）
 - 已迁：`align_depth_scale.py`、`build_pseudo_cache.py`、`diag_writer.py`、`epipolar_depth.py`、`flow_matcher.py` → `pseudo_branch/common/`
 - 已改：`scripts/brpo_verify_single_branch.py`、`scripts/brpo_build_mask_from_internal_cache.py`、`scripts/select_signal_aware_pseudos.py`、`scripts/build_brpo_v2_signal_from_internal_cache.py` 与 `pseudo_branch/__init__.py` import 已切到新路径
 - 已清：旧 top-level common 路径已删除，未保留 shim
-- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/PSEUDO_BRANCH_COMMON_MIGRATION_PHASE5_20260422.md`
+- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_COMMON_MIGRATION_PHASE5_20260422.md`
 
 ### Phase 6：residual T~ builder cleanup（已完成）
 - 已迁：`brpo_depth_target.py`、`brpo_depth_densify.py`、`depth_target_builder.py` → `pseudo_branch/target/`
 - 已改：`scripts/materialize_m5_depth_targets.py`、`scripts/select_signal_aware_pseudos.py`、`scripts/prepare_stage1_difix_dataset_s3po_internal.py` 与 `pseudo_branch/__init__.py` import 已切到新路径
 - 已清：旧 top-level T~ flat paths 已删除，未保留 shim
-- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md`
+- 已验：`py_compile` + 最小 real import/smoke 已通过；详见 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md`
 
 ---
 

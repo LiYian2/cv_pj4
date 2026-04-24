@@ -2,11 +2,21 @@
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 
 import numpy as np
 import torch
 from munch import munchify
+
+ROOT = Path(__file__).resolve().parents[1]
+S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if S3PO_ROOT not in sys.path:
+    sys.path.insert(0, S3PO_ROOT)
+if f"{S3PO_ROOT}/gaussian_splatting" not in sys.path:
+    sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 
 from utils.config_utils import load_config
 from utils.external_eval_utils import load_gaussians_from_ply
@@ -29,6 +39,7 @@ def parse_args():
     p.add_argument("--output-root", default=None)
     p.add_argument("--tau-reproj-px", type=float, default=4.0)
     p.add_argument("--tau-rel-depth", type=float, default=0.15)
+    p.add_argument("--sh-degree", type=int, default=None, help="Override SH degree for loading stage PLY; default auto-infer from PLY header")
     return p.parse_args()
 
 
@@ -51,7 +62,7 @@ def main():
     background = torch.tensor(manifest["background"], dtype=torch.float32, device="cuda")
 
     stage_ply = cache_root / args.stage_tag / "point_cloud" / "point_cloud.ply"
-    gaussians = load_gaussians_from_ply(config, str(stage_ply))
+    gaussians = load_gaussians_from_ply(config, str(stage_ply), sh_degree=args.sh_degree)
     matcher = FlowMatcher()
 
     default_out = cache_root / "brpo_phaseB" / args.stage_tag / f"{args.ref_side}_branch"

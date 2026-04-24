@@ -8,51 +8,71 @@
 
 ---
 
+## 2026-04-24
+
+### M~ 3D 路线：live wiring + grounded live smoke + q0.80 consumer smoke
+- 已把 `build_pair_matcher()` 真正接入 `scripts/brpo_build_mask_from_internal_cache.py` 与 `scripts/build_brpo_v2_signal_from_internal_cache.py`，live builder / live signal 现在都支持 `--matcher-mode`、`--dense3d-conf-quantile`，并把 matcher config / matcher meta 落盘。
+- grounded 结果已从单帧 smoke 推进到 live path：frame 23 下 sparse backend exact `cm_nonzero_ratio=0.0164`，dense3d `q0.90=0.0576` / `q0.80=0.1261` / `q0.70=0.1921`；对应 signal `joint_nonzero_ratio=0.0200 / 0.0754 / 0.1531 / 0.2271`。8 帧 full smoke 中，dense3d `q0.80` 的 backend / signal mean 覆盖率达到 `0.1275 / 0.1591`，约为 sparse 的 `8.26x / 8.13x`。
+- `run_pseudo_refinement_v2.py` 的 q0.80 tiny consumer smoke 也已跑通，真实消费 `20260424_m3d_live_smoke_full/dense3d_q080_signal`，日志显示 `mean_mask_cov=0.1275`，StageB 1 iter 正常结束，说明新 signal 已被 consumer exact-upstream 路径接通。
+- 新的 grounded report 已写入 `docs/M3D_LIVE_WIRING_AND_SMOKE_20260424.md`；当前判断是 q0.80 适合作为第一轮主 smoke 配置，后续若继续扩实验，应补 q0.70 / q0.90 的 full compare 与多 quantile consumer compare。
+
+### M~ 3D 路线：step1/step2 代码落地 + 静态自检
+- 按规划先落地 `pseudo_branch/common/mast3r_pair_forward.py` 与 `pseudo_branch/common/mast3r_matchers.py`，把 shared MASt3R pair forward helper、`Dense3DMatcher`、`build_pair_matcher()` 先加入 `common/` 层；`common/__init__.py` 已同步导出这些新入口。
+- 当前实现边界是“先落 matcher infrastructure，不改 live script caller”：`scripts/build_brpo_v2_signal_from_internal_cache.py` 与 `scripts/brpo_build_mask_from_internal_cache.py` 还未切到新 matcher，因此这一步不改变任何线上实验行为。
+- 远端静态自检已通过：`py_compile` 覆盖 `common/__init__.py`、`mast3r_pair_forward.py`、`mast3r_matchers.py`；最小 import / factory smoke 成功导入 `MASt3RPairForward`、`Dense3DMatcher` 与 `build_pair_matcher()`。
+- 同步把 `~0.05` 覆盖率的解释写回 3D 规划文档：它来自保守 `q=0.90` candidate-pruning，不是 MASt3R 3D 调用坏掉；后续接通后的正式实验应把 `dense3d_conf_quantile` 作为主 sweep 轴。
+
+### M~ matching upgrade planning：dense2d 与 MASt3R 3D 两条落地文档
+- 基于 live code path 与远端 smoke，确认当前 exact M~ 的 support 入口仍是 `FlowMatcher + sparse 2D MASt3R reciprocal matching`；raw exact `C_m` coverage 落在 `~1.5%–2%` 属实现自然结果，不是额外异常。
+- 新增两份落地计划：`docs/BRPO_MASK_DENSE_2D_MATCHING_PLAN_20260424.md` 与 `docs/BRPO_MASK_MAST3R_3D_MATCHING_PLAN_20260424.md`，都明确保持 exact BRPO 离散三档 `C_m ∈ {1.0, 0.5, 0.0}`，只升级 matching layer。
+- 规划口径：dense2d 直接复用仓库现有 MASt3R descriptor + `bruteforce_reciprocal_nns`，作为低风险 control / side option；MASt3R 3D 则复用 `pts3d / pts3d_in_other_view + find_reciprocal_matches`，作为更值得优先落地的主线候选。
+- 单帧 smoke（frame 23）显示 fused exact `cm_nonzero_ratio` 约为：sparse `0.0164`、dense2d `0.0371`、dense3d `0.0576`；后续若继续实现，优先顺序应为 3D 主线、2D control。
+
 ## 2026-04-22
 
 ### 工程整理：scripts final audit Stage 3 / Stage 4
 - 完成 compat shim 收口：新增 `scripts/compat/run_pseudo_refinement.py` 作为内部 compatibility entry；顶层 `scripts/run_pseudo_refinement.py` 收窄为仅维持旧 CLI 路径稳定的外部 wrapper。
 - `scripts/run_pseudo_refinement_v2.py` 与 `scripts/diagnostics/diagnose_stageA_gradients.py` 已改为直接加载 `scripts/compat/run_pseudo_refinement.py`；内部调用不再依赖顶层 wrapper。
 - 远端验证通过：`py_compile` 覆盖 compat / wrapper / current refine / diagnostic caller；最小 real import / smoke 成功确认 v2 与 diagnose 路径都能经 compat 层拿到 legacy module。
-- 新增 `docs/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`；current/design/hermes/scripts README 同步改写为“scripts 侧代码整理已完成，后续只剩 backend-only integration 与 working-tree/commit 收尾”。
+- 新增 `docs/archived/2026-04-cleanup-records/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`；current/design/hermes/scripts README 同步改写为“scripts 侧代码整理已完成，后续只剩 backend-only integration 与 working-tree/commit 收尾”。
 
 ### 工程整理：scripts final audit Stage 1 / Stage 2
 - 完成 Stage 1 低风险 diagnostics 收纳：`analyze_m5_depth_signal.py`、`diagnose_stageA_gradients.py`、`diagnose_stageA_loss_contrib.py`、`summarize_stageA_compare.py` 已迁入 `scripts/diagnostics/`；同时修正 `diagnose_stageA_gradients.py` / `diagnose_stageA_loss_contrib.py` 的 repo-root 解析，并把 stageA archived shell runner 对 `summarize_stageA_compare.py` 的调用切到新路径。
 - 完成 Stage 2 legacy prepare 下沉：`prepare_stage1_difix_dataset.py`、`prepare_stage1_difix_dataset_s3po.py`、`build_a2_expand_from_a1_signal_v2.py` 已迁入 `scripts/legacy_prepare/`；顶层 `scripts/` 现只保留 live core + `run_pseudo_refinement.py` compat shim。
 - 远端验证通过：`py_compile` 覆盖 7 个新路径脚本 + `run_pseudo_refinement.py` / `run_pseudo_refinement_v2.py`；最小 real import / smoke 成功导入 diagnostics、legacy prepare、compat shim 与 current refine 入口。
-- 新增 `docs/SCRIPTS_FINAL_AUDIT_STAGE12_20260422.md` 作为本轮收尾记录；current/design/hermes 同步改写为“scripts Stage 1 / 2 已完成，下一步若继续只审 compat shim”。
+- 新增 `docs/archived/2026-04-cleanup-records/SCRIPTS_FINAL_AUDIT_STAGE12_20260422.md` 作为本轮收尾记录；current/design/hermes 同步改写为“scripts Stage 1 / 2 已完成，下一步若继续只审 compat shim”。
 
 ### 工程整理：pseudo_branch Phase 6（residual T~ top-level builder cleanup）
 - 完成 `brpo_depth_target.py`、`brpo_depth_densify.py`、`depth_target_builder.py` → `pseudo_branch/target/...` 的 direct migration；`scripts/materialize_m5_depth_targets.py`、`scripts/select_signal_aware_pseudos.py`、`scripts/prepare_stage1_difix_dataset_s3po_internal.py` 与 `pseudo_branch/__init__.py` 已切到新路径。
 - 远端验证通过：`py_compile` 覆盖三个 target residual 文件、`pseudo_branch/target/__init__.py`、`pseudo_branch/__init__.py` 和三个直接 caller；最小 real import / smoke 成功导入三个 caller、`pseudo_branch` 与 `pseudo_branch.target`，并真实执行 `build_blended_target_depth()`、`build_blended_target_depth_v2()`、`build_sparse_log_depth_correction()`、`densify_depth_correction_patchwise()`、`reconstruct_dense_depth_from_correction()`、`build_depth_source_map_v2()`、`load_depth()`、`get_intrinsic_matrix()`、`reproject_depth()`。
-- 新增 `docs/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“pseudo_branch 第二轮整理已正式收尾”。
+- 新增 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“pseudo_branch 第二轮整理已正式收尾”。
 - 本轮完成后，`pseudo_branch/` 顶层只剩 `__init__.py`；第二轮 direct migration 已完整闭环，后续若继续整理，应转向 `scripts/` 顶层 live 入口与历史 runner 的二次审计。
 
 ### 工程整理：pseudo_branch Phase 5（common direct migration）
 - 完成 `align_depth_scale.py`、`build_pseudo_cache.py`、`diag_writer.py`、`epipolar_depth.py`、`flow_matcher.py` → `pseudo_branch/common/...` 的 direct migration；`scripts/brpo_verify_single_branch.py`、`scripts/brpo_build_mask_from_internal_cache.py`、`scripts/select_signal_aware_pseudos.py`、`scripts/build_brpo_v2_signal_from_internal_cache.py` 与 `pseudo_branch/__init__.py` 已切到新路径。
 - 远端验证通过：`py_compile` 覆盖 common 下迁移文件、`pseudo_branch/__init__.py` 与四个直接 caller；最小 real import / smoke 成功导入四个 caller、`pseudo_branch` 与 `pseudo_branch.common`，并真实执行 `align_edp_depth()`、`load_depth()`、`get_intrinsic_matrix()`、`reproject_depth()`、`write_depth_consistency_map()`、`pose_c2w_to_w2c()`、`compute_fundamental_matrix()`、`compute_epipolar_distance()`。
-- 新增 `docs/PSEUDO_BRANCH_COMMON_MIGRATION_PHASE5_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 5 common 已完成，下一步处理 residual T~ top-level builder 收口”。
+- 新增 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_COMMON_MIGRATION_PHASE5_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 5 common 已完成，下一步处理 residual T~ top-level builder 收口”。
 - Phase 5 验收时额外发现：顶层 `pseudo_branch/` 还剩 `brpo_depth_target.py`、`brpo_depth_densify.py`、`depth_target_builder.py` 三个 residual T~ flat files，它们不属于本轮 common 迁移，但应作为下一步最终收口对象。
 
 ### 工程整理：pseudo_branch Phase 4（M~ direct migration）
 - 完成 `brpo_confidence_mask.py`、`brpo_train_mask.py`、`confidence_builder.py`、`joint_confidence.py`、`rgb_mask_inference.py` → `pseudo_branch/mask/...` 的 direct migration；`scripts/brpo_build_mask_from_internal_cache.py`、`scripts/select_signal_aware_pseudos.py`、`scripts/build_brpo_v2_signal_from_internal_cache.py` 与 `pseudo_branch/brpo_v2_signal/__init__.py` 已切到新路径。
 - 远端验证通过：`py_compile` 覆盖 mask 下迁移文件、`brpo_v2_signal` package glue 和三个直接 caller；最小 real import / smoke 成功导入三个 caller，并真实执行 `build_brpo_confidence_mask()`、`build_train_confidence_masks()`、`build_confidence_from_target_depth()`、`build_joint_confidence_from_rgb_and_depth()`、`build_rgb_mask_from_correspondences()`。
-- 新增 `docs/PSEUDO_BRANCH_M_MIGRATION_PHASE4_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 4 已完成，下一步 Phase 5 common”。
+- 新增 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_M_MIGRATION_PHASE4_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 4 已完成，下一步 Phase 5 common”。
 
 ### 工程整理：pseudo_branch Phase 3（T~/observation direct migration）
 - 完成 `pseudo_fusion.py`、`brpo_reprojection_verify.py`、`pseudo_observation_brpo_style.py`、`pseudo_observation_verifier.py`、`joint_observation.py` → `pseudo_branch/observation/...`，以及 `depth_supervision_v2.py`、`support_expand.py` → `pseudo_branch/target/...` 的 direct migration；相关 caller 与 `brpo_v2_signal` package glue 已切到新路径。
 - 远端验证通过：`py_compile` 覆盖迁移文件和直接 caller；最小 real import / smoke 成功导入 6 个 caller，并真实执行 verifier / fusion / target / observation / A2 expand 五类核心函数。
-- 新增 `docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 3 已完成，下一步 Phase 4 M~”。
+- 新增 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 3 已完成，下一步 Phase 4 M~”。
 
 ### 工程整理：pseudo_branch Phase 2（R~ direct migration）
 - 完成 `pseudo_branch/pseudo_camera_state.py`、`pseudo_branch/pseudo_loss_v2.py`、`pseudo_branch/pseudo_refine_scheduler.py` → `pseudo_branch/refine/...` 的 direct migration；`scripts/run_pseudo_refinement_v2.py`、两个 diagnose 脚本，以及 `pseudo_branch/gaussian_management/spgm/stats.py` 已切到新路径 import，未保留旧 top-level shim。
 - 远端验证通过：`py_compile` 覆盖迁移文件和直接 caller；最小 real import / smoke 成功导入三个 caller，并真实执行 `current_w2c()`、`build_stageA_optimizer()`、`masked_rgb_loss()`。
-- 新增 `docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 2 已完成，下一步 Phase 3 T~/observation”。
+- 新增 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 2 已完成，下一步 Phase 3 T~/observation”。
 
 ### 工程整理：pseudo_branch Phase 1（G~ direct migration）
 - 完成 `pseudo_branch/local_gating/*`、`pseudo_branch/spgm/*`、`pseudo_branch/gaussian_param_groups.py` → `pseudo_branch/gaussian_management/...` 的 direct migration；`pseudo_branch/pseudo_refine_scheduler.py` 与 `scripts/run_pseudo_refinement_v2.py` 已改为新路径 import，未保留旧 top-level shim。
 - 远端验证通过：`py_compile` 覆盖迁移文件和直接 caller；最小 real import / smoke 成功导入 `scripts/run_pseudo_refinement_v2.py` 与 `pseudo_branch.gaussian_management`，`build_micro_gaussian_param_groups()` / `build_spgm_grad_weights()` 已真实执行。
-- 新增 `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 1 已完成，下一步 Phase 2 R~”。
+- 新增 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md` 记录本轮范围、回滚备份与验证结论；layout/current/design/hermes 同步改写为“Phase 1 已完成，下一步 Phase 2 R~”。
 
 ### 工程整理：scripts 第二轮清理 + pseudo_branch 迁移骨架
 - 把历史 A1 / StageA / topology / legacy refine runner 统一收进 `scripts/archive_experiments/`，顶层 `scripts/` 只保留 live 入口、active builder 和仍在被当前 docs 消费的 utility。

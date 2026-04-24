@@ -1,6 +1,6 @@
 # T_direct_brpo_alignment_engineering_plan.md
 
-> 上位文档：`BRPO_A1_B3_reexploration_master_plan.md`、`part3_BRPO_A1_B3_vs_BRPO_detailed_analysis.md`
+> 上位文档：`docs/archived/2026-04-plans-landed/BRPO_A1_B3_reexploration_master_plan.md`、`docs/archived/2026-04-reference/part3_BRPO_A1_B3_vs_BRPO_detailed_analysis.md`
 > 相关现状：`docs/design/TARGET_DESIGN.md`、`docs/current/STATUS.md`、`docs/current/DESIGN.md`
 > 触发原因：用户明确要求 **T~ 也按 direct BRPO 路线规划**，不再把 `stable/fallback consumer-side 小修补` 当成主推进路线。
 > 执行顺序：**本计划在 G~ direct BRPO 主线完成首轮落地并拿到 compare 结论后再执行。**

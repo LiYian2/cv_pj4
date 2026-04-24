@@ -7,7 +7,7 @@
 
 ## 1. 本轮范围
 
-> 后续更新：Phase 2（R~ direct migration）已完成，见 `docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`。
+> 后续更新：Phase 2（R~ direct migration）已完成，见 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`。
 
 本轮只做 G~ 迁移，不改 M~/T~/R~ 语义，不保留旧 top-level shim。
 

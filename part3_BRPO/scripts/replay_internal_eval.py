@@ -2,12 +2,22 @@
 import argparse
 import json
 import os
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 import yaml
+
+ROOT = Path(__file__).resolve().parents[1]
+S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if S3PO_ROOT not in sys.path:
+    sys.path.insert(0, S3PO_ROOT)
+if f"{S3PO_ROOT}/gaussian_splatting" not in sys.path:
+    sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 from munch import munchify
 from PIL import Image
 from torchmetrics.image.lpip import LearnedPerceptualImagePatchSimilarity
@@ -33,6 +43,7 @@ def parse_args():
     p.add_argument("--save-render-rgb", action="store_true")
     p.add_argument("--save-render-depth", action="store_true")
     p.add_argument("--save-render-depth-npy", action="store_true")
+    p.add_argument("--sh-degree", type=int, default=None, help="Override SH degree for loading stage PLY; default auto-infer from PLY header")
     return p.parse_args()
 
 
@@ -147,6 +158,11 @@ def run_replay_eval(states_by_id, frame_ids, dataset, gaussians, pipe, backgroun
         pred_image = torch.clamp(render_pkg["render"], 0.0, 1.0)
         depth_map = render_pkg["depth"].squeeze()
 
+        if pred_image.shape != gt_image.shape:
+            raise ValueError(
+                f"Replay image shape mismatch for frame {int(idx):04d}: pred={tuple(pred_image.shape)} gt={tuple(gt_image.shape)} image_path={state.get('image_path')} config_source={config.get('model_params', {}).get('source_path', '')}. Rebuild the internal cache with a dataset/config that matches the replay resolution."
+            )
+
         valid_mask = gt_image > 0
         if torch.count_nonzero(valid_mask) > 0:
             psnr_score = psnr(pred_image[valid_mask].unsqueeze(0), gt_image[valid_mask].unsqueeze(0))
@@ -201,7 +217,7 @@ def main():
     dataset = load_dataset(model_params, model_params.get("source_path", ""), config=config)
     pipe = munchify(config["pipeline_params"])
     background = torch.tensor(manifest["background"], dtype=torch.float32, device="cuda")
-    gaussians = load_gaussians_from_ply(config, args.ply_path)
+    gaussians = load_gaussians_from_ply(config, args.ply_path, sh_degree=args.sh_degree)
 
     label = args.label or Path(args.ply_path).stem
     save_dir = Path(args.save_dir) if args.save_dir else cache_root / "replay_eval" / args.stage_tag / label

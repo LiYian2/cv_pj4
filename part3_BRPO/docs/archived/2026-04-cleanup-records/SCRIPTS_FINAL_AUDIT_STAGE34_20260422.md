@@ -31,7 +31,7 @@
 - `docs/agent/hermes.md`
 - `scripts/README.md`
 - 新增 `scripts/compat/README.md`
-- 新增本记录 `docs/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`
+- 新增本记录 `docs/archived/2026-04-cleanup-records/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`
 
 文档口径统一为：
 - 顶层 `scripts/` = 8 个 live core + 1 个外部 CLI wrapper

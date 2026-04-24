@@ -1,6 +1,6 @@
 # DESIGN.md - Part3 BRPO 设计文档
 
-> 更新时间：2026-04-22 20:04 (Asia/Shanghai)
+> 更新时间：2026-04-24 08:28 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只记录"设计原则、架构决策、接口定义"，不记录实验数据
@@ -69,7 +69,7 @@ Pipeline:
 - Phase 5 已落地：`align_depth_scale.py`、`build_pseudo_cache.py`、`diag_writer.py`、`epipolar_depth.py`、`flow_matcher.py` 已迁入 `pseudo_branch/common/`，直接 caller 与包入口已切到新路径，旧 top-level common 路径已退役
 - Phase 6 residual T~ cleanup 已落地：`brpo_depth_target.py`、`brpo_depth_densify.py`、`depth_target_builder.py` 已迁入 `pseudo_branch/target/`，直接 caller 与包入口已切到新路径，旧 top-level T~ flat paths 已退役
 - 第二轮迁移现已完整闭环：`pseudo_branch/` 顶层只剩 `__init__.py`，live 代码路径全部落到 `common/ / observation/ / mask/ / target/ / gaussian_management/ / refine/` 六层目录下
-- 详细 mapping 与阶段顺序见 `docs/design/PSEUDO_BRANCH_LAYOUT.md`；本轮记录见 `docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`、`docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`、`docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md`、`docs/PSEUDO_BRANCH_M_MIGRATION_PHASE4_20260422.md`、`docs/PSEUDO_BRANCH_COMMON_MIGRATION_PHASE5_20260422.md` 与 `docs/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md`
+- 详细 mapping 与阶段顺序见 `docs/design/PSEUDO_BRANCH_LAYOUT.md`；本轮记录见 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md`、`docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`、`docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md`、`docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_M_MIGRATION_PHASE4_20260422.md`、`docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_COMMON_MIGRATION_PHASE5_20260422.md` 与 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md`
 
 ---
 
@@ -97,7 +97,12 @@ Pipeline:
 ### 3.1 M~ 结论
 - exact M~ 与 old M~ 基本等价（差 < 1e-5 PSNR）
 - strict BRPO $C_m$ 已基本对齐
-- 剩余 gap 不在 M~
+- 当前 live exact `C_m` 的 matching layer 已支持两种入口：`sparse_desc_2d`（旧 `FlowMatcher`）与 `dense_pts3d_3d`（新 `Dense3DMatcher`）；升级点保持在 matching layer，自始至终不改 BRPO 离散三档语义
+- 落地方案仍分两条：`docs/BRPO_MASK_DENSE_2D_MATCHING_PLAN_20260424.md`（dense2d，低风险 control / side option）与 `docs/BRPO_MASK_MAST3R_3D_MATCHING_PLAN_20260424.md`（MASt3R 3D matching，更值得优先落地的主线候选）
+- 2026-04-24 已完成 M~ 3D live wiring：`scripts/brpo_build_mask_from_internal_cache.py` 与 `scripts/build_brpo_v2_signal_from_internal_cache.py` 已切到 matcher factory，并把 matcher config / matcher meta 写入产物
+- grounded 结果表明 coverage 提升不是单帧假象：frame 23 live sweep 下，backend exact `cm_nonzero_ratio` 从 sparse `0.0164` 升到 dense3d `q0.90=0.0576` / `q0.80=0.1261` / `q0.70=0.1921`；signal `joint_nonzero_ratio` 从 `0.0200` 升到 `0.0754 / 0.1531 / 0.2271`。8 帧 full smoke 中，dense3d `q0.80` 的 backend mean `cm_nonzero_ratio=0.1275`、signal mean `joint_nonzero_ratio=0.1591`，约为 sparse 的 `8.26x / 8.13x`
+- `dense3d q0.80` 已完成 tiny consumer smoke，说明新 signal 已被 `run_pseudo_refinement_v2.py` 的 exact-upstream consumer 路径真实消费，没有接口断裂
+- 剩余 gap 仍不在 M~ contract 本身，而在 matching coverage / matcher quality / quantile calibration
 
 ### 3.2 T~ 结论
 - `exact_brpo_full_target_v1` 证明：只做 proxy backend 下的 consumer-side exact 化，不足以赢 old A1
@@ -171,11 +176,11 @@ Pipeline:
 - 状态：[STATUS.md]
 - 过程：[CHANGELOG.md]
 - G~ clean compare：[docs/archived/2026-04-experiments/G_BRPO_CLEAN_COMPARE_20260421.md]
-- T4 compare 执行文档：[docs/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md]
+- T4 compare 执行文档：[docs/archived/2026-04-plans-landed/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md]
 - pseudo_branch 目录迁移：[docs/design/PSEUDO_BRANCH_LAYOUT.md]
-- pseudo_branch G~ 迁移记录：[docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md]
-- pseudo_branch R~ 迁移记录：[docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md]
-- pseudo_branch T~/observation 迁移记录：[docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md]
+- pseudo_branch G~ 迁移记录：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md]
+- pseudo_branch R~ 迁移记录：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md]
+- pseudo_branch T~/observation 迁移记录：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md]
 - M~ 详细：[MASK_DESIGN.md]
 - T~ 详细：[TARGET_DESIGN.md]
 - G~ 详细：[GAUSSIAN_MANAGEMENT_DESIGN.md]

@@ -23,8 +23,8 @@
 - `scripts/archive_experiments/stageA/run_p0_absprior.sh`
 - `scripts/archive_experiments/stageA/run_p1_stageA_signal_compare.sh`
 - `scripts/README.md`
-- `docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`
-- `docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md`
+- `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md`
+- `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md`
 - `docs/current/STATUS.md`
 - `docs/current/DESIGN.md`
 - `docs/current/CHANGELOG.md`
@@ -91,4 +91,4 @@
 
 - scripts final audit 的 Stage 1 / Stage 2 已完成
 - 顶层 `scripts/` 已基本收敛到 live core + 1 个 compat shim
-- 后续 Stage 3 / 4 已在 `docs/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md` 完成：`run_pseudo_refinement.py` 已收窄为外部 CLI wrapper，内部 compatibility boundary 已收进 `scripts/compat/`
+- 后续 Stage 3 / 4 已在 `docs/archived/2026-04-cleanup-records/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md` 完成：`run_pseudo_refinement.py` 已收窄为外部 CLI wrapper，内部 compatibility boundary 已收进 `scripts/compat/`

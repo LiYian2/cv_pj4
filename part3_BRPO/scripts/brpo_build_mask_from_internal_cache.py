@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import argparse
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -8,9 +9,18 @@ import torch
 from munch import munchify
 from PIL import Image
 
+ROOT = Path(__file__).resolve().parents[1]
+S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+if S3PO_ROOT not in sys.path:
+    sys.path.insert(0, S3PO_ROOT)
+if f"{S3PO_ROOT}/gaussian_splatting" not in sys.path:
+    sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
+
 from utils.config_utils import load_config
 from utils.external_eval_utils import load_gaussians_from_ply
-from pseudo_branch.common.flow_matcher import FlowMatcher
+from pseudo_branch.common import DEFAULT_MODEL_NAME, build_pair_matcher
 from pseudo_branch.observation.brpo_reprojection_verify import (
     find_neighbor_kfs,
     render_depth_from_state,
@@ -56,8 +66,13 @@ def parse_args():
     p.add_argument("--cont-tau-agree", type=float, default=0.10)
     p.add_argument("--verifier-backend-semantics", choices=["proxy_flow_v3", "exact_branch_native_v1"], default="proxy_flow_v3",
                    help="Verifier backend semantics: proxy_flow_v3 (current threshold) or exact_branch_native_v1 (provenance-aware)")
+    p.add_argument("--matcher-mode", choices=["sparse_desc_2d", "dense_pts3d_3d"], default="sparse_desc_2d")
+    p.add_argument("--matcher-model-name", default=DEFAULT_MODEL_NAME)
+    p.add_argument("--matcher-device", default="cuda")
+    p.add_argument("--dense3d-conf-quantile", type=float, default=0.90)
     p.add_argument("--exact-backend-output-dir", default=None,
                    help="Output directory for exact backend bundle (defaults to output_root/exact_backend_v1)")
+    p.add_argument("--sh-degree", type=int, default=None, help="Override SH degree for loading stage PLY; default auto-infer from PLY header")
     return p.parse_args()
 
 
@@ -107,6 +122,7 @@ def run_branch(side, frame_id, pseudo_state, ref_state, pseudo_rgb_path, pseudo_
     pseudo_depth = np.load(pseudo_depth_path).astype(np.float32)
     ref_depth = render_depth_from_state(gaussians, ref_state, pipe, background)
     pts_pseudo, pts_ref, _ = matcher.match_pair(str(branch_pseudo_rgb_path), str(ref_rgb_path), size=int(pseudo_state["image_width"]))
+    match_meta = matcher.get_last_match_meta() if hasattr(matcher, "get_last_match_meta") else {}
     if use_exact_backend:
         result = verify_single_branch_exact(
             pseudo_state=pseudo_state,
@@ -144,6 +160,7 @@ def run_branch(side, frame_id, pseudo_state, ref_state, pseudo_rgb_path, pseudo_
         "ref_rgb_path": str(ref_rgb_path),
         "stage_ply": str(stage_ply),
         "verification_version": VERIFICATION_VERSION,
+        "matcher_meta": match_meta,
         **result["stats"],
     }
     return result, meta, ref_depth
@@ -163,8 +180,19 @@ def main():
     background = torch.tensor(manifest["background"], dtype=torch.float32, device="cuda")
 
     stage_ply = cache_root / args.stage_tag / "point_cloud" / "point_cloud.ply"
-    gaussians = load_gaussians_from_ply(config, str(stage_ply))
-    matcher = FlowMatcher()
+    gaussians = load_gaussians_from_ply(config, str(stage_ply), sh_degree=args.sh_degree)
+    matcher_config = {
+        "matcher_mode": args.matcher_mode,
+        "matcher_model_name": args.matcher_model_name,
+        "matcher_device": args.matcher_device,
+        "dense3d_conf_quantile": float(args.dense3d_conf_quantile),
+    }
+    matcher = build_pair_matcher(
+        matcher_mode=args.matcher_mode,
+        model_name=args.matcher_model_name,
+        device=args.matcher_device,
+        dense3d_conf_quantile=float(args.dense3d_conf_quantile),
+    )
 
     default_out = cache_root / "brpo_phaseC" / args.stage_tag
     output_root = Path(args.output_root) if args.output_root else default_out
@@ -271,7 +299,8 @@ def main():
                 "cont_tau_agree": float(args.cont_tau_agree),
             },
             "matcher": {
-                "type": "FlowMatcher",
+                **matcher_config,
+                "type": type(matcher).__name__,
                 "branch_pseudo_rgb_inputs": {
                     "left_root": args.pseudo_left_root,
                     "right_root": args.pseudo_right_root,
@@ -373,6 +402,7 @@ def main():
                 "verifier_backend_semantics": "exact_branch_native_v1",
                 "target_proxy_semantics": "branch_native_exact",
                 "verification_mode": args.verification_mode,
+                "matcher": {**matcher_config, "type": type(matcher).__name__},
                 "left_ref_frame_id": int(left_kf),
                 "right_ref_frame_id": int(right_kf),
                 "tau_reproj_px": float(args.tau_reproj_px),
@@ -388,7 +418,6 @@ def main():
                 },
             }
             with open(exact_frame_out / "exact_backend_meta.json", "w") as f:
-                import json
                 json.dump(exact_meta, f, indent=2)
             
             frame_meta["exact_backend_bundle_path"] = str(exact_frame_out)
@@ -406,6 +435,7 @@ def main():
             "frame_ids": [int(x) for x in args.frame_ids],
             "verification_mode": args.verification_mode,
             "verifier_backend_semantics": args.verifier_backend_semantics,
+            "matcher": {**matcher_config, "type": type(matcher).__name__},
             "exact_backend_root": str(exact_backend_root) if exact_backend_root else None,
             "pseudo_left_root": args.pseudo_left_root,
             "pseudo_right_root": args.pseudo_right_root,

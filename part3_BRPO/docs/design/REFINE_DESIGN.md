@@ -91,7 +91,7 @@ $$
 其中 pseudo loss：
 
 $$
-L_{pseudo} = eta_{rgb} \cdot L_{rgb} + (1-eta_{rgb}) \cdot L_{depth} + \lambda_{pose} \cdot L_{pose\_reg} + \lambda_{exp} \cdot L_{exp\_reg}
+L_{pseudo} = \eta_{rgb} \cdot L_{rgb} + (1-\eta_{rgb}) \cdot L_{depth} + \lambda_{pose} \cdot L_{pose\_reg} + \lambda_{exp} \cdot L_{exp\_reg}
 $$
 
 ---

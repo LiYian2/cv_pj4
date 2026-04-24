@@ -54,7 +54,7 @@ $$
 
 **Target 区域划分**：
 $$
-egin{aligned}
+\begin{aligned}
 	ext{both} &= 	ext{valid}_{left} \land 	ext{valid}_{right} \
 	ext{left\_only} &= 	ext{valid}_{left} \land 
 eg 	ext{valid}_{right} \
@@ -68,7 +68,7 @@ $$
 
 **Target 数值生成**：
 $$
-d_{target}[	ext{both}] = rac{w_l \cdot d_l + w_r \cdot d_r}{w_l + w_r}
+d_{target}[	ext{both}] = \frac{w_l \cdot d_l + w_r \cdot d_r}{w_l + w_r}
 $$
 $$
 d_{target}[	ext{left\_only}] = d_l
@@ -120,7 +120,7 @@ $$
 
 **Target 数值生成**：
 $$
-d_{target}[	ext{verify\_both}] = rac{w_l \cdot d_l + w_r \cdot d_r}{w_l + w_r}
+d_{target}[	ext{verify\_both}] = \frac{w_l \cdot d_l + w_r \cdot d_r}{w_l + w_r}
 $$
 $$
 d_{target}[	ext{verify\_left\_only}] = d_l
@@ -178,7 +178,7 @@ $$
 ### 4.2 信号转换
 
 $$
-d_{target} = lpha \cdot d_{T2} + (1-lpha) \cdot d_{stable}
+d_{target} = \alpha \cdot d_{T2} + (1-\alpha) \cdot d_{stable}
 $$
 
 其中 $d_{stable}$ 来自 old T~ 或 render_depth fallback。
@@ -212,7 +212,7 @@ $$
 	ext{reproj\_err} = \|u_{reproj} - u_{pseudo}\|_2
 $$
 $$
-	ext{rel\_depth\_err} = rac{|z_{reproj} - z_{pseudo}|}{z_{pseudo}}
+	ext{rel\_depth\_err} = \frac{|z_{reproj} - z_{pseudo}|}{z_{pseudo}}
 $$
 
 **Binary support**：
@@ -222,18 +222,18 @@ $$
 
 **Continuous confidence（verifier-driven）**：
 $$
-C_{side} = \exp\left(-rac{	ext{reproj\_err}}{	au_{px}}
-ight) \cdot \exp\left(-rac{	ext{rel\_depth\_err}}{	au_d}
+C_{side} = \exp left(-\frac{	ext{reproj\_err}}{	au_{px}}
+ight) \cdot \exp left(-\frac{	ext{rel\_depth\_err}}{	au_d}
 ight)
 $$
 
 **Target 数值生成（verifier-driven weighted composition）**：
 $$
-d_{target}[i] = egin{cases}
-rac{C_l \cdot d_l + C_r \cdot d_r}{C_l + C_r} & 	ext{if both sides verified} \
-d_l & 	ext{if only left verified} \
-d_r & 	ext{if only right verified} \
-0 & 	ext{otherwise}
+d_{target}[i] = \begin{cases}
+\frac{C_l \cdot d_l + C_r \cdot d_r}{C_l + C_r} & \text{if both sides verified} \\
+d_l & \text{if only left verified} \\
+d_r & \text{if only right verified} \\
+0 & \text{otherwise}
 \end{cases}
 $$
 

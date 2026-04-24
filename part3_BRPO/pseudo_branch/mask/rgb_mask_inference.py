@@ -78,7 +78,9 @@ def build_rgb_mask_from_correspondences(
     h, w = fused_rgb.shape[:2]
 
     pts_fused_left, pts_left_ref, conf_left = matcher.match_pair(fused_rgb_path, left_ref_rgb_path, size=size)
+    left_match_meta = matcher.get_last_match_meta() if hasattr(matcher, 'get_last_match_meta') else {}
     pts_fused_right, pts_right_ref, conf_right = matcher.match_pair(fused_rgb_path, right_ref_rgb_path, size=size)
+    right_match_meta = matcher.get_last_match_meta() if hasattr(matcher, 'get_last_match_meta') else {}
 
     left_maps = _accumulate_match_maps((h, w), pts_fused_left, conf_left)
     right_maps = _accumulate_match_maps((h, w), pts_fused_right, conf_right)
@@ -130,9 +132,12 @@ def build_rgb_mask_from_correspondences(
         'summary': summary,
         'matcher_meta': {
             'size': int(size),
+            'matcher_backend': type(matcher).__name__,
             'fused_rgb_path': str(Path(fused_rgb_path)),
             'left_ref_rgb_path': str(Path(left_ref_rgb_path)),
             'right_ref_rgb_path': str(Path(right_ref_rgb_path)),
+            'left_match_meta': left_match_meta,
+            'right_match_meta': right_match_meta,
         },
     }
 

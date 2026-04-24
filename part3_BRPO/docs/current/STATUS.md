@@ -1,6 +1,6 @@
 # STATUS.md - Part3 Stage1 当前状态
 
-> 更新时间：2026-04-22 20:04 (Asia/Shanghai)
+> 更新时间：2026-04-24 08:28 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只记录"现在"，不记录历史过程（过程在 CHANGELOG）
@@ -249,6 +249,9 @@ signal_v2/frame_<frame_id>/
 - G~：clean compare 定位不变：direct current-step 只有小幅正向，legacy delayed opacity 明确负向；G~ 维持 side branch，不再继续优先做 O2a/b / aggressive 调参。
 
 ### 下一阶段 ⏳
+- M~ matching upgrade planning 已落地：`docs/BRPO_MASK_DENSE_2D_MATCHING_PLAN_20260424.md` 与 `docs/BRPO_MASK_MAST3R_3D_MATCHING_PLAN_20260424.md`。当前口径仍是 dense2d 作为低风险 control / side option，MASt3R 3D matching 作为更值得优先落地的主线候选；两条都保持 exact BRPO 离散 `C_m ∈ {1.0, 0.5, 0.0}`。
+- M~ 3D 路线现在已经完成 live wiring：`scripts/brpo_build_mask_from_internal_cache.py` 与 `scripts/build_brpo_v2_signal_from_internal_cache.py` 已接通 `build_pair_matcher()`。grounded 结果见 `docs/M3D_LIVE_WIRING_AND_SMOKE_20260424.md`：frame 23 单帧 live sweep 下，backend exact `cm_nonzero_ratio` 从 sparse `0.0164` 依次升到 dense3d `q0.90=0.0576` / `q0.80=0.1261` / `q0.70=0.1921`；signal `joint_nonzero_ratio` 对应从 `0.0200` 升到 `0.0754 / 0.1531 / 0.2271`。8 帧 full smoke 里，dense3d `q0.80` 的 backend mean `cm_nonzero_ratio=0.1275`、signal mean `joint_nonzero_ratio=0.1591`，约为 sparse 的 `8.26x / 8.13x`。
+- `dense3d q0.80` 的 tiny consumer smoke 也已跑通：`run_pseudo_refinement_v2.py` 已真实消费 `20260424_m3d_live_smoke_full/dense3d_q080_signal`，日志显示 `mean_mask_cov=0.1275`，StageB 1 iter 正常结束。因此这一步已经完成“接通 + live smoke + tiny consumer smoke”；若继续下一轮，优先补 `q0.70 / q0.90` 的 full 8-frame compare，再决定是否扩成多 quantile consumer compare。
 - 大工程主线从 standalone compare 转向 **S3PO backend-only integration**，优先做：
   1. 把 exact M~/T~ winner 的 builder / loss contract 从当前 standalone 实验入口中抽成可复用 backend
   2. 保持 pseudo supervision 只进 mapping / backend refine，不回灌 tracking / frontend
@@ -273,9 +276,9 @@ signal_v2/frame_<frame_id>/
 - 过程记录：[CHANGELOG.md]
 - A1 细化分析：[MASK_DESIGN.md]
 - B3 / refine 设计：[REFINE_DESIGN.md]
-- T~ 落地文档：[docs/T_direct_brpo_alignment_engineering_plan.md]
-- T4 compare 执行文档：[docs/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md]
+- T~ 落地文档：[docs/archived/2026-04-plans-landed/T_direct_brpo_alignment_engineering_plan.md]
+- T4 compare 执行文档：[docs/archived/2026-04-plans-landed/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md]
 - G~ clean compare 记录：[docs/archived/2026-04-experiments/G_BRPO_CLEAN_COMPARE_20260421.md]
-- pseudo_branch G~ 迁移进度：[docs/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md]
-- pseudo_branch R~ 迁移进度：[docs/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md]
-- pseudo_branch T~/observation 迁移进度：[docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md]
+- pseudo_branch G~ 迁移进度：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md]
+- pseudo_branch R~ 迁移进度：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md]
+- pseudo_branch T~/observation 迁移进度：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md]

@@ -3,7 +3,7 @@
 > 角色：T~ exact-upstream compare 执行文档
 > 范围：定义 Phase T4 的完整执行顺序，分成 `T4.0 smoke` 与 `T4.1 formal compare`
 > 目的：在不混入新 G~/R~ 改动的前提下，先确认 exact-upstream path 真正被端到端消费，再做固定 control 的 formal replay compare
-> 上位文档：`docs/T_direct_brpo_alignment_engineering_plan.md`
+> 上位文档：`docs/archived/2026-04-plans-landed/T_direct_brpo_alignment_engineering_plan.md`
 > 相关 authority：`docs/current/STATUS.md`、`docs/current/DESIGN.md`、`docs/current/CHANGELOG.md`
 
 ---

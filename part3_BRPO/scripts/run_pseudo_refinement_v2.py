@@ -648,7 +648,7 @@ def load_stageA_pseudo_views(args):
             if depth_target_mode in {'auto', 'blended_depth', 'blended_depth_m5'}:
                 depth_target_mode = 'brpo_v2'
 
-        if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1'}:
+        if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1', 'exact_brpo_upstream_target_v1'}:
             if signal_v2_frame_dir is None:
                 raise FileNotFoundError(f'No signal_v2 frame dir found for frame_id={frame_id} under sample_dir={sample_dir}')
             if pseudo_observation_mode == 'brpo_joint_v1':

@@ -53,9 +53,9 @@ G~ 的上游信息来自每个 Gaussian 的 **scene statistics**：
 **核心 stats**：
 
 $$
-egin{aligned}
+\begin{aligned}
 s_i &= 	ext{support\_count} — 	ext{accepted pseudo support 次数} \
-	ilde{s}_i &= 	ext{population\_support\_count} — 	ext{current train window support 次数} \
+\tilde{s}_i &= 	ext{population\_support\_count} — 	ext{current train window support 次数} \
 z_i &= 	ext{depth\_value} — 	ext{平均深度} \
 
 ho_i &= 	ext{density\_proxy} — 	ext{密度代理} \

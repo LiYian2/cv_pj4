@@ -21,12 +21,19 @@ class FlowMatcher:
         self,
         model_name: str = "naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric",
         device: str = "cuda",
+        subsample_or_initxy1: int = 8,
     ):
         self.device = device
+        self.model_name = model_name
+        self.subsample_or_initxy1 = int(subsample_or_initxy1)
+        self._last_match_meta = {}
         print("Loading MASt3R model...")
         self.model = AsymmetricMASt3R.from_pretrained(model_name).to(device)
         self.model.eval()
         print("MASt3R model loaded.")
+
+    def get_last_match_meta(self):
+        return dict(self._last_match_meta)
 
     def match_pair(self, img1_path: str, img2_path: str, size: int = 512):
         """Return reciprocal matches (pts1, pts2, conf)."""
@@ -42,23 +49,45 @@ class FlowMatcher:
         matches_im0, matches_im1 = fast_reciprocal_NNs(
             desc1,
             desc2,
-            subsample_or_initxy1=8,
+            subsample_or_initxy1=self.subsample_or_initxy1,
             device=self.device,
             dist="dot",
             block_size=2**13,
         )
 
+        conf_map = pred1["desc_conf"].squeeze(0).detach().cpu().numpy()  # (H, W)
+        H, W = conf_map.shape
+        self._last_match_meta = {
+            "matcher_mode": "sparse_desc_2d",
+            "matcher_backend": "FlowMatcher",
+            "model_name": self.model_name,
+            "device": self.device,
+            "subsample_or_initxy1": int(self.subsample_or_initxy1),
+            "query_image_path": str(img1_path),
+            "ref_image_path": str(img2_path),
+            "matcher_size": int(size),
+            "image_height": int(H),
+            "image_width": int(W),
+        }
+
         if matches_im0 is None or len(matches_im0) == 0:
+            self._last_match_meta.update({
+                "num_matches": 0,
+                "desc_conf_mean": 0.0,
+                "desc_conf_q90": 0.0,
+            })
             return np.zeros((0, 2), dtype=np.float32), np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=np.float32)
 
         matches_im0 = np.asarray(matches_im0, dtype=np.float32)
         matches_im1 = np.asarray(matches_im1, dtype=np.float32)
 
-        # confidence from descriptor confidence map at matched pixels
-        conf_map = pred1["desc_conf"].squeeze(0).detach().cpu().numpy()  # (H, W)
-        H, W = conf_map.shape
         xi = np.clip(np.round(matches_im0[:, 0]).astype(int), 0, W - 1)
         yi = np.clip(np.round(matches_im0[:, 1]).astype(int), 0, H - 1)
         conf = conf_map[yi, xi].astype(np.float32)
+        self._last_match_meta.update({
+            "num_matches": int(matches_im0.shape[0]),
+            "desc_conf_mean": float(conf.mean()) if conf.size else 0.0,
+            "desc_conf_q90": float(np.quantile(conf, 0.90)) if conf.size else 0.0,
+        })
 
         return matches_im0, matches_im1, conf

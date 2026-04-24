@@ -1,6 +1,6 @@
 # MASK_DESIGN.md - M~ Mask 设计文档
 
-> 更新时间：2026-04-22 13:45 (Asia/Shanghai)
+> 更新时间：2026-04-24 08:28 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只讲 M~（mask/confidence）：信息从哪里来、怎么转换成 confidence、怎么被下游消费
@@ -47,7 +47,7 @@ $$
 
 **Depth 链（geometry tier）**：
 $$
-	ext{geometry\_tier}[i] = egin{cases}
+	ext{geometry\_tier}[i] = \begin{cases}
 1.0 & 	ext{if source\_map}[i] = 	ext{BOTH} \
 0.5 & 	ext{if source\_map}[i] = 	ext{LEFT or RIGHT} \
 0.0 & 	ext{otherwise}
@@ -240,7 +240,14 @@ $$
 ## 9. 当前状态
 
 - **M2 已对齐**：`exact_brpo_cm_old_target_v1 ≈ old A1`
-- **不是主瓶颈**：M~ 已完成对齐，下一步在 T~ upstream backend
+- **不是主瓶颈**：M~ contract 本身已完成对齐，当前剩余变量主要在 support seed / matching layer
+- 当前 live exact `C_m` support 入口已从单一 `pseudo_branch/common/flow_matcher.py` 扩成可切换 matcher factory：`sparse_desc_2d` 继续走旧 `FlowMatcher`，`dense_pts3d_3d` 走新 `Dense3DMatcher`
+- 为后续 M~ matching upgrade，step1/step2 代码已落地到 `pseudo_branch/common/`：
+  - `mast3r_pair_forward.py`：shared MASt3R pair forward helper
+  - `mast3r_matchers.py`：reusable matcher layer，当前已实现 `Dense3DMatcher` 与 `build_pair_matcher()`
+- 2026-04-24 已完成 live wiring：`scripts/brpo_build_mask_from_internal_cache.py` 与 `scripts/build_brpo_v2_signal_from_internal_cache.py` 都已支持 `--matcher-mode` / `--dense3d-conf-quantile`，并把 matcher config / meta 落盘
+- grounded live smoke 显示：frame 23 下 sparse backend exact `cm_nonzero_ratio=0.0164`，dense3d `q0.90=0.0576` / `q0.80=0.1261` / `q0.70=0.1921`；对应 signal `joint_nonzero_ratio=0.0200 / 0.0754 / 0.1531 / 0.2271`。8 帧 full smoke 中，dense3d `q0.80` 的 backend mean `cm_nonzero_ratio=0.1275`、signal mean `joint_nonzero_ratio=0.1591`，约为 sparse 的 `8.26x / 8.13x`
+- 因此 MASt3R 3D 路线并非“只能做出 ~5% 覆盖”；`~0.05` 只是保守 `q=0.90` candidate-pruning + reciprocal + exact verify + left/right BRPO 融合的结果。后续正式实验仍应把 `dense3d_conf_quantile` 当作主实验轴，而不是只测一个固定值
 
 ---
 

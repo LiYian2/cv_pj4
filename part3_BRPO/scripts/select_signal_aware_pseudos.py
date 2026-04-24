@@ -59,6 +59,7 @@ def parse_args():
     p.add_argument("--topk-per-gap", type=int, default=1)
     p.add_argument("--allocation-policy", default="score_topk")
     p.add_argument("--limit-gaps", type=int, default=None)
+    p.add_argument("--sh-degree", type=int, default=None, help="Override SH degree for loading stage PLY; default auto-infer from PLY header")
     return p.parse_args()
 
 
@@ -301,7 +302,7 @@ def main():
     pipe = munchify(config["pipeline_params"])
     background = torch.tensor(manifest["background"], dtype=torch.float32, device="cuda")
     stage_ply = internal_cache_root / args.stage_tag / "point_cloud" / "point_cloud.ply"
-    gaussians = load_gaussians_from_ply(config, str(stage_ply))
+    gaussians = load_gaussians_from_ply(config, str(stage_ply), sh_degree=args.sh_degree)
     matcher = FlowMatcher()
 
     weights = {

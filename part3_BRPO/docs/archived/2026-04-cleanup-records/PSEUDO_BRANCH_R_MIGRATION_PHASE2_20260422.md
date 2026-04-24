@@ -7,7 +7,7 @@
 
 ## 1. 本轮范围
 
-> 后续更新：Phase 3（T~/observation direct migration）已完成，见 `docs/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md`。
+> 后续更新：Phase 3（T~/observation direct migration）已完成，见 `docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md`。
 
 本轮只做 R~ 壳层迁移，不改 M~/T~/G~ 语义，不保留旧 top-level shim。
 
