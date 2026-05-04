@@ -24,6 +24,22 @@ from .pseudo_refine_scheduler import (
     build_stageA_optimizer,
     build_stageA5_optimizers,
 )
+from .backend_pseudo_bundle import (
+    LoadedPseudoBundleSample,
+    PseudoBundleSample,
+    PseudoBundleBatch,
+    load_pseudo_bundle_from_stageA_history,
+)
+from .backend_pseudo_view_loader import (
+    BackendPseudoViewRecord,
+    build_record_from_loaded_sample,
+    build_records_from_pseudo_bundle,
+    normalize_stageA_pseudo_views,
+)
+from .backend_pseudo_loss import (
+    BackendPseudoLossConfig,
+    compute_backend_pseudo_exact_loss,
+)
 
 __all__ = [
     'ExportedPseudoCameraState',
@@ -44,4 +60,14 @@ __all__ = [
     'StageA5Config',
     'build_stageA_optimizer',
     'build_stageA5_optimizers',
+    'LoadedPseudoBundleSample',
+    'PseudoBundleSample',
+    'PseudoBundleBatch',
+    'load_pseudo_bundle_from_stageA_history',
+    'BackendPseudoViewRecord',
+    'build_record_from_loaded_sample',
+    'build_records_from_pseudo_bundle',
+    'normalize_stageA_pseudo_views',
+    'BackendPseudoLossConfig',
+    'compute_backend_pseudo_exact_loss',
 ]

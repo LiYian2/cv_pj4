@@ -1,6 +1,6 @@
 # TARGET_DESIGN.md - T~ Target 设计文档
 
-> 更新时间：2026-04-22 03:39 (Asia/Shanghai)
+> 更新时间：2026-05-04 14:20 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只讲 T~（target）：信息从哪里来、怎么转换成 target 数值、怎么被下游消费
@@ -13,7 +13,7 @@
 
 ## 1. 概览
 
-T~（Target）决定"监督目标的数值是什么"。**T~ 有 4 大类**：
+T~（Target）决定"监督目标的数值是什么"。**T~ 有 5 大类**：
 
 | 类别 | Verifier Backend | Composition 权重 | Fallback | 与 BRPO 论文对齐度 |
 |------|-----------------|-----------------|---------|------------------|
@@ -21,12 +21,14 @@ T~（Target）决定"监督目标的数值是什么"。**T~ 有 4 大类**：
 | **T2: BRPO-style Proxy** | Proxy backend（单向 matcher） | fusion_weight | 无（隐式有问题） | 中（形态对，backend 不够强） |
 | **T3: Stable Blend** | 同 T2 + stable fallback | stable blend | stable fallback | 低（工程 hybrid） |
 | **T4: Exact Upstream** | Exact backend（mutual NN + geometric） | continuous confidence | **no_render_fallback=true** | **最高** |
+| **T5: Paper-realign Depth-only** | light geometry-only bidirectional projection | fusion_weight + depth-only confidence | **no_render_fallback=true** | 中高（producer 解耦，但比 T4 更轻） |
 
 **关键结论**：
 - T4 不只是最接近 BRPO 论文 semantics 的 T~ variant，**它也已经在 fixed clean G~ / fixed T1 formal compare 中成为当前 winner**
 - T2 / `exact_brpo_full_target_v1` 的负结果说明：命名 `brpo_style` 或 consumer-side exact 化本身不等于真正对齐 BRPO target path
 - 真正决定 replay 转正的增益来自 T~ 的 verifier backend（Layer B）与 projected-depth / target field 的 upstream 对齐
 - 当前 T~ 主线应固定为：`exact_brpo_upstream_target_v1 + exact_shared_cm_v1`
+- `paper_brpo_target_v1` 已作为 paper-realign compare branch 落地：它验证了“去掉 RGB gate / 去掉 render fallback、把 T~ 拆成 depth-only producer”这条结构能跑通，但 first full9 compare 还不足以让它替代 T4 mainline。
 
 ---
 
@@ -286,7 +288,46 @@ $$
 
 ---
 
-## 6. T~ 与 M~ 的命名约定
+## 6. T5: Paper-realign Depth-only（2026-05-04 新增）
+
+### 6.1 信息源
+
+**代码位置**：`pseudo_branch/target/depth_supervision_v2.py` → `build_paper_target_depth_v1()`
+
+**输入**：
+- `projected_depth_left/right`：左右 reference 投影到 fused pseudo-frame 的 depth
+- `projected_valid_left/right`：轻量几何有效域
+- `fusion_weight_left/right`：双侧融合权重
+- `tau_rel_depth`：双侧轻量一致性阈值
+
+### 6.2 信号转换
+
+T5 的核心不是再造一个 heavy verifier，而是把 T~ 拆成 **depth-only producer**：
+- `both`：左右都 valid 时，用 `fusion_weight_left/right` 做加权融合
+- `left_only / right_only`：只保留单边投影深度
+- `none`：直接 invalid，不再走 `render_depth` fallback
+- `target_confidence`：只来自 depth-side 双边一致性，不再读取 `raw_rgb_confidence`
+
+### 6.3 下游消费
+
+被 `build_paper_brpo_target_observation()` 包成 `paper_brpo_target_v1`：
+- `pseudo_depth_target_paper_brpo_target_v1.npy`
+- `pseudo_source_map_paper_brpo_target_v1.npy`
+- `pseudo_valid_mask_paper_brpo_target_v1.npy`
+- `pseudo_target_confidence_paper_brpo_target_v1.npy`
+
+再被 `paper_brpo_split_v1` / `paper_brpo_split_depthconf_v1` 消费：
+- `paper_brpo_split_v1`：RGB 只用 `C_m`，depth 也只用 `C_m`
+- `paper_brpo_split_depthconf_v1`：RGB 只用 `C_m`，depth 用 `C_m × depth-only target_confidence`
+
+### 6.4 特点
+
+- **优点**：producer 语义更接近“RGB mask 与 depth target 解耦”的 paper-realign 目标；T~ 不再被 RGB gate 提前裁死
+- **缺点**：它比 T4 更轻，没有 exact backend 的 mutual NN + reprojection verification，因此 target field 更宽但也更容易引入 single-side / weakly-supported supervision
+- **当前判断**：T5 已完成 live code、full signal 与 full9 compare，证明这条 depth-only producer 结构可运行；但 current verdict 仍是 **T4 exact-upstream 继续做 mainline，T5 保留为 compare branch**。
+
+
+## 7. T~ 与 M~ 的命名约定
 
 `pseudo_observation_mode` 命名反映了 M~ + T~ 组合：
 
@@ -294,6 +335,8 @@ $$
 |-------------|--------|--------|
 | `brpo_style_v1` | M2 | T2 |
 | `brpo_style_v2` | M2 | T3 |
+| `paper_brpo_cm_old_target_v1` | M2 Paper | T1 |
+| `paper_brpo_target_v1` | M2 Paper | T5 |
 | `exact_brpo_cm_old_target_v1` | M2 Exact | T1 |
 | `exact_brpo_cm_full_target_v1` | M2 Exact | T2 |
 | `exact_brpo_cm_stable_target_v1` | M2 Exact | T3 |
@@ -303,15 +346,15 @@ $$
 
 ---
 
-## 7. 各类与 BRPO 论文对齐分析
+## 8. 各类与 BRPO 论文对齐分析
 
-### 7.1 BRPO 论文 T~ 定义
+### 8.1 BRPO 论文 T~ 定义
 
 - **Verifier**：pseudo-frame 与 reference 的 mutual nearest-neighbor + geometric verification
 - **Composition 权重**：verifier-driven confidence
 - **Fallback**：无（不监督区域保持 invalid）
 
-### 7.2 各类对齐度
+### 8.2 各类对齐度
 
 | 类别 | Verifier Backend | Composition 权重 | Fallback | 与 BRPO 论文对齐度 |
 |------|-----------------|-----------------|---------|------------------|
@@ -319,25 +362,27 @@ $$
 | T2 | Proxy（单向 matcher）⚠️ | fusion_weight（proxy）⚠️ | 无 ✅ | 中 |
 | T3 | 同 T2 | stable blend | stable fallback | 低 |
 | T4 | Exact（mutual NN + geometric）✅ | continuous confidence（verifier-driven）✅ | no_render_fallback=true ✅ | **最高** |
+| T5 | light geometry-only bidirectional projection | fusion_weight + depth-only confidence | no_render_fallback=true ✅ | 中高 |
 
 ---
 
-## 8. 代码位置索引
+## 9. 代码位置索引
 
 | 文件 | 功能 | T~ 类别 |
 |------|------|--------|
-| `pseudo_branch/target/depth_supervision_v2.py` | Old Pipeline + Exact Upstream | T1, T4 |
-| `pseudo_branch/observation/pseudo_observation_brpo_style.py` | BRPO-style Proxy + Stable Blend | T2, T3 |
+| `pseudo_branch/target/depth_supervision_v2.py` | Old Pipeline + Exact Upstream + Paper-realign depth-only | T1, T4, T5 |
+| `pseudo_branch/observation/pseudo_observation_brpo_style.py` | BRPO-style Proxy + Stable Blend + Paper target observation | T2, T3, T5 |
 | `pseudo_branch/observation/brpo_reprojection_verify.py` | Exact backend verifier | T4 |
 | `pseudo_branch/refine/pseudo_loss_v2.py` | Loss 消费 | 所有 |
 
 ---
 
-## 9. 当前状态
+## 10. 当前状态
 
 - **T4 semantic path 已完全落地**：exact backend / exact target field / exact loss contract / consumer path 都已打通
 - **T4 formal compare 已完成**：`exact_brpo_upstream_target_v1` 在 fixed clean G~ / fixed T1 replay compare 中赢过 old A1、exact-oldtarget、exact-fulltarget
 - **当前 T~ 主线已更新**：`exact_brpo_upstream_target_v1 + exact_shared_cm_v1`
+- **T5 compare branch 已落地**：`paper_brpo_target_v1` 与 `paper_brpo_split_*` 已完成 full9 compare，但当前仍停留在 compare/diagnostics 身份
 - **结构性教训已固化**：T~ 的主瓶颈确实在 Layer B verifier/backend / projected-depth field，而不是继续做 proxy-backend 下的 consumer-side exact 化
 
 ---

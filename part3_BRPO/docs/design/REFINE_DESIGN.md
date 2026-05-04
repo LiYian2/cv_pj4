@@ -1,6 +1,6 @@
 # REFINE_DESIGN.md - R~ Joint Refine 设计文档
 
-> 更新时间：2026-04-22 04:22 (Asia/Shanghai)
+> 更新时间：2026-05-04 14:20 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只讲 R~（Joint Refine）：信息从哪里来、怎么组装成 joint loss、backward timing 如何
@@ -10,14 +10,42 @@
 
 ---
 
+## 0. 文档口径更新（2026-04-30）
+
+本文件原本描述的是 **legacy standalone R~**：`run_pseudo_refinement_v2.py` 里的 StageA / StageB / `brpo_joint_v1`。这部分内容现在仍保留，因为它还是历史 compare 与 replay 的 reference。
+
+但从 2026-04-30 开始，R~ 的工程主线已经切到 **S3PO backend continuation**：
+- supervision 语义仍来自 exact upstream pseudo bundle；
+- execution shell 改为 `third_party/S3PO-GS/utils/slam_backend_brpo.py`；
+- opt-in 入口已挂到 `third_party/S3PO-GS/slam.py::_maybe_run_brpo_pseudo_continuation()`；
+- actual hook smoke 已通过，产物根为 `/data/bzhang512/tmp/s3po_brpo_hook_manual_smoke/`。
+
+因此下面第 2–8 节应理解为：**它们描述的是 legacy standalone refine contract，不再是未来主 refine 引擎。**
+
+---
+
+## 1.1 新 backend continuation 已落地的最小结构
+
+当前已经 landed 的新 R~ 组件是：
+- `pseudo_branch/refine/backend_pseudo_bundle.py`：把 `stageA_history.json` / sample artifacts 解析成 backend 可用的 pseudo bundle；
+- `pseudo_branch/refine/backend_pseudo_view_loader.py`：把 pseudo bundle 重建成 backend 可消费的 pseudo viewpoints；
+- `pseudo_branch/refine/backend_pseudo_loss.py`：把 exact shared-C_m loss 封成 backend 可直接调用的 pseudo exact RGB-D loss；
+- `third_party/S3PO-GS/utils/slam_backend_brpo.py`：real-window-centered joint continuation runner；
+- `third_party/S3PO-GS/slam.py`：新增 `_maybe_run_brpo_pseudo_continuation()` hook；
+- `third_party/S3PO-GS/utils/slam_backend.py`：新增 `S3PO_COLOR_REFINEMENT_ITERS` override，允许把默认 26k color refinement 缩到 smoke/debug 范围。
+
+一句话：R~ 现在已经不只是“joint loss 怎么组装”，而是“exact pseudo supervision 如何接进 S3PO backend optimizer”。
+
+---
+
 ## 1. 概览
 
-R~（Joint Refine）决定"pseudo loss 和 real loss 怎么在同一 iteration 内组装、backward、更新"。当前系统支持 **2 种 topology mode + 3 种 depth_loss_mode**。
+R~（Joint Refine）现在需要区分两层：legacy standalone refine，以及新的 backend continuation refine。legacy 路径仍描述“pseudo loss 和 real loss 怎样在同一 iteration 内组装”，而新路径更进一步，要求把 pseudo exact supervision 直接接到 S3PO backend 的 real-window-centered optimization loop。
 
-**关键结论**：
-- `brpo_joint_v1`（T1）是当前 topology 主线
-- Stage 协议固定为 `post40_lr03_120`
-- G~ timing 是 delayed（与 BRPO 论文不同）
+**当前关键结论**：
+- `run_pseudo_refinement_v2.py` 里的 `brpo_joint_v1` 现在只保留为 legacy reference，不再是未来主 refine 引擎；
+- 新的 landed 主线是 `slam_backend_brpo.py` + `slam.py::_maybe_run_brpo_pseudo_continuation()`；
+- legacy G~ timing 仍是 delayed，而 backend continuation 的目标是把 pseudo supervision 直接并入 S3PO backend，而不是继续围绕 standalone StageB 调旋钮。
 
 ---
 
@@ -36,7 +64,9 @@ R~（Joint Refine）决定"pseudo loss 和 real loss 怎么在同一 iteration �
 |------|---------------------|---------|---------------------|
 | `legacy` | RGB/depth 可分离 mask | render_depth fallback | 通用 |
 | `source_aware` | RGB/depth 可分离 mask + tier | seed/dense/fallback tier | `old T~` |
-| `exact_shared_cm_v1` | **RGB/depth 共用 C_m** | **无 fallback** | `exact_brpo_upstream_target_v1` |
+| `exact_shared_cm_v1` | **RGB/depth 共用 C_m × target_confidence** | **无 fallback** | `exact_brpo_upstream_target_v1` |
+| `paper_brpo_split_v1` | **RGB 只用 C_m；depth 只用 C_m** | **无 fallback** | `paper_brpo_target_v1` / `paper_brpo_cm_old_target_v1` |
+| `paper_brpo_split_depthconf_v1` | **RGB 只用 C_m；depth 用 C_m × depth-only target_confidence** | **无 fallback** | `paper_brpo_target_v1` / `paper_brpo_cm_old_target_v1` |
 
 ---
 
@@ -136,6 +166,29 @@ $$
 **代码位置**：`pseudo_loss_v2.py` → `build_stageA_loss_exact_shared_cm()`
 
 ---
+
+### 4.6 Paper split loss（2026-05-04 新增）
+
+`paper_brpo_split_v1`：
+$$
+L_{rgb} = C_m \cdot |I_{render} - I_{target}|
+$$
+$$
+L_{depth} = C_m \cdot |d_{render} - d_{target}|
+$$
+
+`paper_brpo_split_depthconf_v1`：
+$$
+L_{rgb} = C_m \cdot |I_{render} - I_{target}|
+$$
+$$
+L_{depth} = C_m \cdot C^{depth}_{target} \cdot |d_{render} - d_{target}|
+$$
+
+**关键特点**：
+- RGB 端固定只吃离散 `C_m`，不再让 depth-side `valid_mask / target_confidence` 回流去 gate RGB
+- depth 端是否乘连续 confidence，变成一个独立 ablation，而不是 shared contract 的副作用
+- 这两个 mode 当前定位为 **paper-realign compare contract**：它们已经完成 full9 compare，但还没有取代 `exact_shared_cm_v1` 成为 current mainline consumer
 
 ## 5. Backward timing 层
 

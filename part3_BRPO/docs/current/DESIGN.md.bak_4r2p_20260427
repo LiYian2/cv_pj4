@@ -1,6 +1,6 @@
 # DESIGN.md - Part3 BRPO 设计文档
 
-> 更新时间：2026-05-04 21:30 (Asia/Shanghai)
+> 更新时间：2026-04-24 21:41 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只记录"设计原则、架构决策、接口定义"，不记录实验数据
@@ -55,21 +55,6 @@ Pipeline:
 
 **设计结论**：T~ 的决定性增益来自 upstream verifier/backend/target field 的整体对齐，而不是继续在 proxy backend 上做 consumer-side exact 化。
 
-**并行 compare branch（2026-05-04 新增）**：
-- `paper_brpo_target_v1`：把 T~ 改成 depth-only producer，取消 `raw_rgb_confidence` gating 与 `render_depth` fallback，只保留 `projected_depth_left/right + projected_valid + fusion_weight + light tau_rel_depth`。
-- `paper_brpo_split_v1` / `paper_brpo_split_depthconf_v1`：把 consumer 改成 RGB 只用 `C_m`，depth 再决定是否乘 depth-only `target_confidence`。
-- 当前判断：这条 paper-realign 分支已经落成可复现 compare branch，但 first full9 compare 尚未推翻 `exact_brpo_upstream_target_v1 + exact_shared_cm_v1` 的 mainline verdict。
-
-### 1.3 R~ 重构状态（2026-05-04）
-
-R~ 当前必须区分成三层：
-
-1. **legacy standalone R~**：`run_pseudo_refinement_v2.py` 里的 `brpo_joint_v1` / StageA / StageB。它仍是历史 compare 与 replay baseline，但不再代表未来 refine 主线。
-2. **backend continuation R~**：`third_party/S3PO-GS/utils/slam_backend_brpo.py` + `third_party/S3PO-GS/slam.py::_maybe_run_brpo_pseudo_continuation()`。这条路径现在降级为 after_opt control / bridge route，不再是最终 landing 目标。
-3. **online mapping R~**：`pseudo_branch/integration/*.py` + `third_party/S3PO-GS/utils/slam_frontend.py` + `third_party/S3PO-GS/utils/slam_backend.py`。当前工程主线是把 exact pseudo supervision 放进 backend keyframe event 内部的 runtime slot activation / runtime bundle build / backend debug-export shell，并进一步接入 conservative pseudo-aware mapping block。
-
-当前 landed 结论：supervision 语义保留，但 refine 执行器已经进一步从 continuation 壳转向 online mapping 壳。`run_pseudo_refinement_v2.py` 与 `after_opt continuation` 现在都只保留 reference/control 身份；当前 live landing 已经从“只建 bundle”推进到“single-gap pseudo 真正进入 backend mapping loop”。
-
 ### 1.4 工程目录组织（第二轮整理）
 
 - `scripts/` 顶层现在保留 8 个 live core 入口 + 1 个外部 CLI wrapper（`run_pseudo_refinement.py`）；历史 compare / one-off runner 归档到 `scripts/archive_experiments/`
@@ -101,11 +86,9 @@ R~ 当前必须区分成三层：
 | M~ | exact M~ | 已基本对齐 BRPO semantics；`exact_brpo_cm_old_target_v1` 保留为 semantics-clean control |
 | T~ | exact upstream T~ | T4 formal compare 已证实这是当前 winning target path |
 | G~ | clean summary G~ | clean compare 证明 G~ 不是当前主瓶颈 |
-| R~ | online backend mapping shell | 当前 live 主线已从 keyframe-event runtime slot activation + runtime exact bundle/signal/record build，推进到 conservative single-gap pseudo-aware mapping block；当前验证通过的是 `both_only` + small-iter smoke，不是 full online compare |
+| R~ | T1 (brpo_joint_v1) | 当前 topology 主线 |
 
-**当前主线判断**：standalone best 仍是 `exact M~ + exact upstream T~ + clean summary G~ + T1`，但工程主线已经切到 **S3PO online backend mapping shell**；`after_opt continuation` 与 standalone 现在都只保留 control / replay / reference 身份。
-
-**Paper-realign 分支状态**：`paper_cm_only / paper_brpo_target_v1 / paper_brpo_split_*` 已经真实接通并完成 full9 compare，但当前只保留为 diagnostics / compare branch，尚未升为 standalone 或 backend mapping 主线。
+**当前主线判断**：`exact M~ + exact upstream T~ + clean summary G~ + T1` 是当前 standalone 最优组合；`exact M~ + old T~ + clean summary G~ + T1` 与 `old A1 + new T1` 保留为对照 control。
 
 ---
 
@@ -139,12 +122,9 @@ R~ 当前必须区分成三层：
 - 因此 G~ 应定位为：**语义已对齐、收益有限的 side branch**；下一步不优先继续扩 G~，而是转到 T~ upstream
 
 ### 3.4 R~ 结论
-- `run_pseudo_refinement_v2.py` 里的 T1 (`brpo_joint_v1`) 现在只应被视为 **legacy standalone topology**，不是未来 refine 主引擎。
-- `third_party/S3PO-GS/utils/slam_backend_brpo.py` + `slam.py::_maybe_run_brpo_pseudo_continuation()` 仍保留，但角色已经降级为 after_opt control / bridge route，而不是最终 landing 目标。
-- 2026-05-04 已新增 `pseudo_branch/integration/` runtime package，并把 `third_party/S3PO-GS/utils/slam_frontend.py` / `utils/slam_backend.py` 接到 keyframe-event runtime slot activation path：backend 现在可以在真实 keyframe 事件里直接构建 exact backend bundle、exact-upstream signal 和 `BackendPseudoViewRecord`。
-- 同日已把 `third_party/S3PO-GS/utils/slam_backend_brpo.py` 提升为 shared pseudo-aware backend engine 的第一版：保留 `run_brpo_pseudo_continuation(...)` control 入口，同时新增 `run_brpo_pseudo_mapping(...)` 供 online mapping 路径直接消费 runtime pseudo records；`utils/slam_backend.py` 也已在 keyframe path 里真正调用该 mapping block，而不再只停留在 bundle/debug export。
-- 已完成 three-step grounding：1) `frame_0023` exact-upstream parity 五个核心数组 bitwise 一致；2) `current_window=[0,34]` 的 backend trigger smoke 成功激活 midpoint pseudo slot `frame_id=17`，并在 `enable_pseudo_gradient=false`、`pseudo_map_iters=0` 下保持 Gaussian `xyz` 完全不变；3) conservative Phase 3 smoke 在同一 gap 上成功执行 `pseudo_map_iters=2` 的在线 pseudo-aware mapping，history 同时写出 `loss_real / loss_pseudo / loss_pseudo_pose / loss_pseudo_scene`，Gaussian `xyz max_abs_delta≈0.01921`，且 `update_real_pose=false` 下 real pose 没有被误更新。
-- 因此 R~ 当前设计判断已经更新为：**保留 exact supervision，主壳切到 S3PO online backend mapping；先完成 runtime slot/bundle shell，再在下一阶段把 pseudo 真正接进 mapping iterations。**
+- T1 (brpo_joint_v1) 是稳定 topology 主线
+- 与 BRPO sequential topology 结构不同但有效
+- G~ timing：T1 delayed，BRPO current-step
 
 ### 3.5 refine forensic 结论
 - `docs/REFINE_FORENSICS_MASTER_20260425.md` 已把当前 refine forensic 六步完整落盘，并与 archived M3D 报告形成主从关系：master doc 负责当前结论与恢复入口，执行长文留在 `docs/archived/2026-04-m3d-experiments/`。
@@ -152,9 +132,6 @@ R~ 当前必须区分成三层：
 - 但 dense3d 已证明“把 coverage 做大”并不足以自动转成更好 replay。更强 pseudo route 的失败表现为：`iter020` 前可略有正收益，`20 -> 40` 后开始持续恶化；`pose_only` 与 `gaussians_only` 都不会单独复现这一点，因此当前更像 joint pseudo pose + Gaussian feedback instability。
 - 同一轮 forensic 还说明坏 route 同时具备三件事：初始 target mismatch 更大、single-branch effective supervision mass 更高、以及 real anchor 太弱。最关键的证据是：real-train RGB loss 可以继续下降，而 replay 明显变差。
 - 因而当前设计判断应继续保持：不要把 repair 方向简化成“默认 dense3d”或“把离散 `C_m` 改成 continuous mask”。更合理的第一修复轴是 both-vs-single contract、single-branch target composition、pseudo/real balance 与 stronger pseudo route 的稳定化。
-- 2026-04-27 的 `dense q070 + 4real+2pseudo` follow-up 又把这个判断收紧了一步：单纯提高 real view 数、降低 pseudo view 数，并不能让 current exact dense contract 自然转正；`current_4r2p_exact` 与 `rgb_only_4r2p_exact` 都比旧 `2+4` dense q070 controls 更差。只有当 pseudo contract 被进一步弱化成 `all-ones + RGB-only` 时，`4real+2pseudo` 才明显转正并达到 `24.1126 PSNR`。因此后续如果要继续修 dense exact route，优先级仍应放在 pseudo contract 本身，而不是先把 minibatch ratio 当主修复轴。
-- 同日追加的 `continuous-confidence + RGB-only` dense q0.70 follow-up 也没有改变这个判断：把离散 `C_m` 直接换成连续 `target_confidence` 后，`contconf_rgb_only_4r2p` 只有 `23.5406 PSNR`，相对离散 exact RGB-only 仅 `+0.0210 PSNR`，但仍明显落后于 `allones_rgb_only_4r2p`。因此当前更不该把修复方向理解成"只要从离散改成连续就会更好"；continuous confidence 在这里最多只是很弱的局部修正。
-- 2026-05-04 完成 `full8 dense3d q070 active mask compare`：StageB120 下 sparse replay `24.0045` vs dense3d q0.70 `23.9133`，sparse 仍胜 `+0.0912 PSNR`；active mask 统计确认 sparse mean `0.01523`（~1.5%）、dense3d mean `0.18760`（~18.8%）、dense3d 新增 `+0.17424`。这再次验证：dense3d 确实大幅提升 mask coverage，但 replay 未改善，与前序结论一致。问题不是 coverage 本身，而是 supervision composition 与 joint coupling instability。
 
 ---
 
@@ -167,7 +144,6 @@ R~ 当前必须区分成三层：
 | old | rgb + geometry tier min | joint_confidence_v2.npy |
 | new | score_stack 派生 | pseudo_confidence_joint_v1.npy |
 | hybrid | support sets | pseudo_confidence_brpo_style_v1.npy |
-| paper | fused-domain direct support sets（no geometry verifier） | pseudo_confidence_paper_brpo_*.npy |
 | exact | strict BRPO semantics | pseudo_confidence_exact_brpo_*.npy |
 
 ### 4.2 T~ 接口
@@ -177,7 +153,6 @@ R~ 当前必须区分成三层：
 | old | projected depth + rgb gate | target_depth_for_refine_v2_brpo.npy |
 | new | score_prob weighted | pseudo_depth_target_joint_v1.npy |
 | hybrid | verified composition | pseudo_depth_target_brpo_style_v1.npy |
-| paper | light geometry-only bidirectional projection（depth-only） | pseudo_depth_target_paper_brpo_target_v1.npy |
 | exact | strict BRPO target | pseudo_depth_target_exact_brpo_full_target_v1.npy |
 
 ### 4.3 G~ 接口

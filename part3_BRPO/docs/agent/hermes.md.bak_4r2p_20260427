@@ -2,7 +2,7 @@
 
 > 用途：Part3 BRPO 压缩/重启后的第一入口。先看这份，再按这里列的顺序继续。
 > 维护原则：只保留当前真实状态、当前执行顺序、关键文档入口和固定环境信息。
-> 更新时间：2026-04-30 20:18 (Asia/Shanghai)
+> 更新时间：2026-04-27 01:53 (Asia/Shanghai)
 
 ---
 
@@ -14,7 +14,7 @@
 3. `docs/current/DESIGN.md`
 4. `docs/current/CHANGELOG.md`
 5. 如果要继续工程整理，先看 `docs/archived/2026-04-cleanup-records/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`，再看 `docs/archived/2026-04-cleanup-records/SCRIPTS_FINAL_AUDIT_STAGE12_20260422.md`、`docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_RESIDUAL_CLEANUP_PHASE6_20260422.md` 与 `docs/design/PSEUDO_BRANCH_LAYOUT.md`
-6. 如果要继续做 refine 结构重构，先看 `docs/REFINE_SLAM_STYLE_AUDIT_20260430.md` 与 `docs/REFINE_SLAM_STYLE_EXEC_PLAN_20260430.md`；如果要继续 forensic，再看 `docs/REFINE_FORENSICS_MASTER_20260425.md`；如果要补 matching 升级设计，再看 `docs/archived/2026-04-m3d-experiments/BRPO_MASK_MAST3R_3D_MATCHING_PLAN_20260424.md` 与 `docs/archived/2026-04-m3d-experiments/BRPO_MASK_DENSE_2D_MATCHING_PLAN_20260424.md`
+6. 如果要继续做 M~ / refine 问题排查，先看 `docs/REFINE_FORENSICS_MASTER_20260425.md`；如果要补 matching 升级设计，再看 `docs/archived/2026-04-m3d-experiments/BRPO_MASK_MAST3R_3D_MATCHING_PLAN_20260424.md` 与 `docs/archived/2026-04-m3d-experiments/BRPO_MASK_DENSE_2D_MATCHING_PLAN_20260424.md`
 7. 需要长文证据时再看：
    - `docs/archived/2026-04-experiments/G_BRPO_CLEAN_COMPARE_20260421.md`
    - `docs/archived/2026-04-cleanup-records/SCRIPTS_FINAL_AUDIT_STAGE34_20260422.md`
@@ -33,16 +33,11 @@
 ## 2. 当前固定结论
 
 - 当前 standalone winner 已更新为：`exact M~ + exact upstream T~ + clean summary G~ + T1`
-- refine 的工程主线已经从 standalone consumer shell 切到 **S3PO backend continuation**；`run_pseudo_refinement_v2.py` 只保留 reference 身份。
-- Phase 1 / Phase 2 已经 landed：pseudo bundle / pseudo loss backend 模块已加入 live repo，`slam_backend_brpo.py` 与 `slam.py` hook 已接通。
-- 已完成 actual hook smoke，产物根为 `/data/bzhang512/tmp/s3po_brpo_hook_manual_smoke/`；当前验证边界是 hook-level after_opt smoke，不是 full frontend rerun compare。
 - `exact_brpo_upstream_target_v1 + exact_shared_cm_v1` 已在 fixed clean G~ / fixed T1 compare 中赢过 `old A1`、`exact_brpo_cm_old_target_v1`、`exact_brpo_full_target_v1`
 - `old A1 + new T1` 与 `exact_brpo_cm_old_target_v1 + clean summary G~ + T1` 现在都只保留为 control
 - G~ clean compare 结论不变：direct BRPO current-step 只有小幅正向；legacy delayed opacity 明确负向；G~ 冻结为 side branch
 - `cm_only` 与 `rgb_only` 两个 consumer-side ablation 都已完成：去掉 `target_confidence` 不能修复 dense，完全关掉 pseudo depth loss 也不能修复 dense；后者还会明显伤 sparse。因此 dense3d 当前主问题不能简化成“confidence 多余”或“depth loss 质量差”。
 - 当前 refine forensic 主结论已固定：旧 live M~ 的低 coverage 确实来自 sparse 2D reciprocal matching，但 replay 真正恶化的根因不是 coverage 本身，而是 stronger pseudo route 下更大的 target mismatch、更高的 single-branch 占比、弱 real anchor，以及 joint pseudo pose + Gaussian feedback 的渐进式失稳。
-- 新的 `4real+2pseudo` dense q070 follow-up 已完成：只改 batch ratio 并不能救回 current exact dense route；`current_4r2p_exact` 与 `rgb_only_4r2p_exact` 都比旧 `2+4` q070 controls 更差。唯一强阳性的 arm 是 `allones_rgb_only_4r2p`（`24.1126 PSNR`），因此接下来应优先怀疑 exact pseudo contract，而不是把 minibatch ratio 当成主修复方向。
-- 同步补做的 `continuous-confidence + RGB-only` dense q070 arm 也没有翻盘：`contconf_rgb_only_4r2p = 23.5406 PSNR`，只比离散 exact RGB-only 高 `+0.0210`，但显著低于 `allones_rgb_only_4r2p`。这与更早连续/hybrid M 线历史偏弱的记录一致。
 
 ---
 

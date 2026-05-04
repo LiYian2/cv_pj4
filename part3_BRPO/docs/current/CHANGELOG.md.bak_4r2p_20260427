@@ -8,57 +8,6 @@
 
 ---
 
-## 2026-05-04
-
-### M~/T~/R~：paper-realign compare branch 首轮落地（`paper_cm_only` / `paper_brpo_target_v1` / `paper_brpo_split_*`）
-- 围绕“更接近 BRPO 论文、减弱 RGB/depth 过度互相绑死”的目标，新增 fused-domain `paper_cm_only` M~ producer、depth-only `paper_brpo_target_v1` T~ producer，以及 `paper_brpo_split_v1` / `paper_brpo_split_depthconf_v1` consumer split loss。
-- `paper_brpo_target_v1` 明确取消 `raw_rgb_confidence` gating 与 `render_depth` fallback，改为只基于 `projected_depth_left/right + projected_valid + fusion_weight + light tau_rel_depth` 生成 `target_depth / valid_mask / target_confidence / source_map`。
-- `run_pseudo_refinement_v2.py`、`backend_pseudo_bundle.py` 和 `build_brpo_v2_signal_from_internal_cache.py` 已真实消费新 mode；1-frame 与 3-frame smoke 都通过，确认这条 paper-realign 分支不是纸面接线。
-- 结论：paper-realign 现在已经是 live code + live signal + live consumer 的真实 compare branch，可被完整实验消费，但它还不是 current mainline verdict。
-
-### M~/T~/R~：DL3DV-2 `paper_target_compare_full9` 首轮完整 compare
-- 在 `/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/2026-05-04_paper_target_compare_full9` 上完成 9 pseudo views 的完整 compare：复用旧 `stageA80_stageB_post40_lr03_120` 壳，串行跑 `paper_brpo_split_v1` 与 `paper_brpo_split_depthconf_v1`，并统一接 `replay_internal_eval.py`。
-- 结构性问题被明确：新分支把 pseudo coverage / depth supervision 大幅撑开，`mean_depth_verified` 不再是 exact-upstream control 的极稀状态，说明 paper-style target producer 的确在改 supervision composition。
-- 但 first full9 compare 没有把 replay 指标推过旧 `exact_brpo_upstream_target_v1 + exact_shared_cm_v1` control；`split_v1` 与 `split_depthconf_v1` 之间也只看到极小差异。
-- 结论：当前问题已经从“paper branch 能不能跑”转成“为什么 support/target 变多但 replay 没转正”；后续优先级应是结果解剖，而不是继续盲加 mode。
-
-### R~：S3PO online mapping Phase 1 / Phase 2 落地 + runtime parity / backend trigger smoke
-- 不再继续把 `after_opt continuation` 当未来主线，而是直接按新计划把 Part3 pseudo optimization 往 S3PO backend keyframe path 里推：新增 `pseudo_branch/integration/runtime_slot_selector.py`、`runtime_exact_backend.py`、`runtime_signal_builder.py`、`runtime_pseudo_builder.py`、`runtime_debug_export.py`，把 exact backend / exact-upstream signal / backend pseudo record 提纯成 runtime library。
-- 先做 Phase 1 grounded parity：基于历史 `20260424_m3d_live_smoke_full/sparse_backend/frame_0023 + sparse_signal/frame_0023` reference，运行 `rebuild_runtime_exact_signal_from_existing_roots(...)` 重建 exact-upstream signal，`pseudo_depth_target / pseudo_confidence / pseudo_source_map / pseudo_valid_mask / pseudo_target_confidence` 五个核心数组全部 bitwise 一致。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase12/phase1_parity/`。
-- 然后做 Phase 2 backend trigger/no-op smoke：`third_party/S3PO-GS/utils/slam_frontend.py` 新增 runtime camera-state cache 并把它随 keyframe message 发给 backend；`utils/slam_backend.py` 新增 `_maybe_prepare_brpo_runtime_slots()`，在 keyframe path 内部直接激活 midpoint pseudo slot、构建 `exact_backend_v1/`、`signal_v2/`、`runtime_pseudo_record/` 和 `event_summary.json`。
-- 直接 smoke 使用 `current_window=[0,34]`，系统自动选择 newly-closed gap midpoint pseudo `frame_id=17`，left/right refs 为 `(0,34)`；同时设置 `enable_pseudo_gradient=false`、`pseudo_map_iters=0`，结果 Gaussian `xyz max_abs_delta=0.0`，说明新 shell 本身没有偷偷改坏 baseline scene。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase12/phase2_backend_smoke/event_kf_0034/`。
-- 结论：Phase 1/2 现在不只是设计文档，而是已经有真实 live code、真实 parity compare 和真实 keyframe-event trigger smoke；下一步再进入 Phase 3，把 pseudo 真正接进 mapping iterations，而不是再回去扩 standalone 或 continuation 小修。
-
-### R~：S3PO online mapping Phase 3 conservative single-gap landing
-- 把 `third_party/S3PO-GS/utils/slam_backend_brpo.py` 从 continuation-specific runner 提升为 shared pseudo-aware backend engine 的第一版：在保留 `run_brpo_pseudo_continuation(...)` 的同时，新增 `BRPOMappingConfig` 与 `run_brpo_pseudo_mapping(...)`，直接消费 runtime pseudo records 而不依赖 `stageA_history.json`。
-- `third_party/S3PO-GS/utils/slam_backend.py` 继续保留 Phase 2 的 runtime slot/bundle shell，但现在在 keyframe path 里会在 `_maybe_prepare_brpo_runtime_slots()` 之后调用 `_run_brpo_runtime_pseudo_mapping()`；因此 per-event debug root 不再只有 `exact_backend_v1/ / signal_v2/ / runtime_pseudo_record/`，还会额外写出 `pseudo_mapping/brpo_pseudo_history.json` 与 `pseudo_mapping_summary.json`。
-- 首轮 direct smoke 使用 `current_window=[0,34]`、newly-closed midpoint pseudo `frame_id=17`、`pseudo_map_iters=2`、`pseudo_scene_mask_mode=both_only`，真实跑通了 online pseudo-aware mapping；history 中同时记录 `loss_real / loss_pseudo / loss_pseudo_pose / loss_pseudo_scene`，并产生 `gaussian_xyz_max_abs_delta≈0.01921`。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase3_smoke/event_kf_0034/`。
-- 本轮还顺手修正了一个真实 Phase 3 语义 bug：最初 `update_real_pose=false` 仍会把 real pose/exposure 参数塞进 joint optimizer，导致 smoke 中 real pose 出现非预期漂移；现已改为 online mapping block 下不再把 real pose/exposure加入该 pseudo mapping optimizer，复跑 smoke 后 `real_pose_max_abs_delta=0.0`。
-- 结论：截至 2026-05-04，pseudo supervision 已经不再只是 online shell 里的 artifact builder，而是已经真实进入 backend mapping loop。当前完成的是 conservative single-gap landing，不是 representative full online compare；下一步应继续做更长、更代表性的 online branch compare。
-
-### M~：full8 dense3d q070 active mask compare
-- 在 StageB120 下跑 sparse 与 dense3d q0.70 的 replay compare，同时收集 active mask 统计（mean coverage / dense 新增 coverage）。
-- 结果：sparse `24.0045 / 0.87177 / 0.08247`；dense3d q0.70 `23.9133 / 0.86923 / 0.08411`。Sparse 仍胜 `+0.0912 PSNR`。Active mask 统计：sparse mean `0.01523`（~1.5% 覆盖）、dense3d mean `0.18760`（~18.8% 覆盖）、dense3d 新增 `+0.17424`（~17.4% 新增）。
-- 这进一步确认：dense3d 确实大幅提升 mask coverage，但 replay 未改善。与前序 M3D_STAGEB120_REPLAY_COMPARE 结论一致，问题不是 coverage 本身而是 supervision composition 与 joint coupling instability。产物根：`output/part3_BRPO/experiments/20260504_full8_dense3d_q070_active_compare`。
-
-## 2026-04-30
-
-### R~：S3PO backend continuation Phase 1 / Phase 2 落地 + actual hook smoke
-- 按新的 SLAM-style 改造方向，先把 exact pseudo supervision 从 standalone consumer 壳中抽离：新增 `pseudo_branch/refine/backend_pseudo_bundle.py`、`backend_pseudo_view_loader.py`、`backend_pseudo_loss.py`，并更新 `pseudo_branch/refine/__init__.py`，使 exact upstream pseudo bundle / exact shared-C_m loss 能被 backend 直接复用。
-- 在 `third_party/S3PO-GS/utils/slam_backend_brpo.py` 中落地新的 backend continuation runner：它直接复用 `gaussians.optimizer`、real keyframe pose optimizer 和 real RGB-D mapping loss，再把 pseudo exact RGB-D supervision 接进同一 joint loop；同时在 `third_party/S3PO-GS/slam.py` 中加入 opt-in hook `_maybe_run_brpo_pseudo_continuation()`。
-- 执行 actual hook smoke 时，先尝试 full CLI smoke，发现主要瓶颈不是 hook 接线，而是 S3PO `color_refinement()` 固定 26000 iter 导致 smoke 成本过高。于是补加 `S3PO_COLOR_REFINEMENT_ITERS` override 到 `utils/slam_backend.py`，把 color refinement 变成可缩短的 debug/smoke 组件，而不改默认语义。
-- 在此基础上完成 **actual hook-level after_opt -> after_pseudo_opt smoke**：直接调用 `SLAM._maybe_run_brpo_pseudo_continuation()`，基于真实 after_opt point cloud + 真实 dataset cameras 成功写出 `after_pseudo_opt/brpo_pseudo_history.json` 和更新后的 point cloud。产物根：`/data/bzhang512/tmp/s3po_brpo_hook_manual_smoke/`。
-- 结论：Phase 2 的“主壳替换”已经不再只是设计文档，真实 hook 已接通、真实 backend joint loop 已跑过；但当前还不能把它宣称为 full compare 完成，因为验证仍是 hook-level smoke，而不是完整 frontend rerun 后的 canonical compare。
-
-## 2026-04-27
-
-### dense q070 follow-up：`4real+2pseudo` batch-ratio compare
-- 用户要求直接测试：在 dense3d q0.70 下，把 StageB 每 iter 采样从 `2 real + 4 pseudo` 改成 `4 real + 2 pseudo`，并做三臂 compare：1) exact mask + exact depth target，2) exact mask + RGB-only，3) all-ones mask + RGB-only。
-- 结果很清楚：单纯改 batch ratio 不能救 exact dense route。`current_4r2p_exact` 与 `rgb_only_4r2p_exact` 分别比旧 `2+4` q070 controls 再差约 `-0.1129 / -0.1449 PSNR`。
-- 真正转正的是 `allones_rgb_only_4r2p`：`24.1126 / 0.87379 / 0.08194`，相对 `current_4r2p_exact` 提升 `+0.5595 PSNR`，相对 sparse current control 也仍有 `+0.1081 PSNR`，但距 old best 还差 `-0.1515 PSNR`。
-- 结论：batch composition 是次级因素；主问题仍是当前 exact pseudo supervision contract，尤其 exact mask/depth 在 joint refine 中的参与方式。新报告：`docs/archived/2026-04-experiments/Q070_4REAL2PSEUDO_COMPARE_20260427.md`。
-- 同步补做 `continuous-confidence + RGB-only` follow-up：把 dense q0.70 exact signal 的离散 `pseudo_confidence_exact...` 替换成连续 `pseudo_target_confidence_exact...`，并保持 `4real+2pseudo` 与 no-depth。结果 `contconf_rgb_only_4r2p = 23.5406`，仅比离散 exact RGB-only 高 `+0.0210 PSNR`，但比 `allones_rgb_only_4r2p` 低 `-0.5720 PSNR`。这与更早 continuous/hybrid 历史记录一致：continuous confidence 本身不是当前主修复方向。新报告：`docs/archived/2026-04-experiments/Q070_CONTCONF_RGB_ONLY_4R2P_20260427.md`。
-
 ## 2026-04-24
 
 ### M~/R~ consumer ablation：rgb_only（完全移除 pseudo depth loss）

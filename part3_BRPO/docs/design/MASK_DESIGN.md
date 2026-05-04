@@ -1,6 +1,6 @@
 # MASK_DESIGN.md - M~ Mask 设计文档
 
-> 更新时间：2026-04-24 08:28 (Asia/Shanghai)
+> 更新时间：2026-05-04 14:20 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只讲 M~（mask/confidence）：信息从哪里来、怎么转换成 confidence、怎么被下游消费
@@ -25,6 +25,7 @@ M~（Mask/Confidence）决定"哪些像素被监督、监督强度如何"。**M~
 - M2 (BRPO-style) 已对齐 BRPO 论文 C_m semantics
 - `exact_brpo_cm_old_target_v1 ≈ old A1`（差 < 1e-5 PSNR），说明 M2 已不是主瓶颈
 - 主瓶颈在 T~ 的 verifier backend（Layer B）
+- 2026-05-04 新增的 `paper_cm_only` 已把 M2 再拆出一个更轻的 compare variant：直接在 fused pseudo domain 上和 left/right GT 做 support-set matching，不再让几何 verifier 参与定义 `C_m`。这条线已经可复现，但 first full9 compare 还不足以取代 current exact M~。
 
 ---
 
@@ -136,6 +137,24 @@ $$
 - `exact_brpo_cm_old_target_v1 ≈ old A1`（差 < 1e-5 PSNR）
 - 说明 M2 (BRPO-style C_m) 已基本对齐 BRPO semantics
 
+### 3.6 Paper C_m-only（M2 的轻量变体，2026-05-04 新增）
+
+**代码位置**：`scripts/brpo_build_mask_from_internal_cache.py --verification-mode paper_cm_only`
+
+**信息源**：
+- fused pseudo RGB
+- left / right GT ref RGB
+- reciprocal matcher（`sparse_desc_2d` 或 `dense_pts3d_3d`）
+
+**信号转换**：
+- 直接在 fused pseudo image domain 上分别得到 `M_left`、`M_right`
+- 不再调用 branch-native geometry verifier 去决定 support 是否成立
+- 仍然 rasterize 成同一个离散三档 `C_m`：`both -> 1.0`，`xor -> 0.5`，`none -> 0.0`
+
+**特点**：
+- 与论文里的集合语义更近：`C_m` 更像纯 matching support set，而不是 matching + heavy geometry contract 的混合物
+- 但它也更轻：缺少 exact backend 的 reprojection/depth consistency 约束，因此 current 定位是 compare branch，不是已经转正的 mainline M~
+
 ---
 
 ## 4. M3: Hybrid Geometry-gated
@@ -201,6 +220,8 @@ $$
 | 命名 pattern | M~ 部分 | T~ 部分 |
 |-------------|--------|--------|
 | `brpo_style_v1` | M2 (BRPO-style) | T2 (BRPO-style Proxy) |
+| `paper_brpo_cm_old_target_v1` | M2 Paper（fused-domain support sets） | T1 (Old) |
+| `paper_brpo_target_v1` | M2 Paper（fused-domain support sets） | T5 (Paper-realign depth-only) |
 | `exact_brpo_cm_old_target_v1` | M2 Exact | T1 (Old) |
 | `exact_brpo_cm_full_target_v1` | M2 Exact | T2 (BRPO-style Proxy) |
 | `exact_brpo_cm_stable_target_v1` | M2 Exact | T3 (Stable) |
@@ -217,7 +238,9 @@ $$
 |-----------|---------|-----------|---------|
 | `legacy` | `confidence_mask` 或 `rgb_confidence_mask` | `confidence_mask` 或 `depth_confidence_mask` | M1/M2/M3 |
 | `source_aware` | `rgb_confidence_mask` | `depth_confidence_mask` + source_map tier | M1 |
-| `exact_shared_cm_v1` | **shared C_m** | **shared C_m** | M2 Exact |
+| `exact_shared_cm_v1` | **shared C_m × target_confidence** | **shared C_m × target_confidence** | M2 Exact |
+| `paper_brpo_split_v1` | **shared C_m** | **shared C_m** | M2 Paper / M2 Exact |
+| `paper_brpo_split_depthconf_v1` | **shared C_m** | **shared C_m × depth-only target_confidence** | M2 Paper / M2 Exact |
 
 ---
 
@@ -246,8 +269,13 @@ $$
   - `mast3r_pair_forward.py`：shared MASt3R pair forward helper
   - `mast3r_matchers.py`：reusable matcher layer，当前已实现 `Dense3DMatcher` 与 `build_pair_matcher()`
 - 2026-04-24 已完成 live wiring：`scripts/brpo_build_mask_from_internal_cache.py` 与 `scripts/build_brpo_v2_signal_from_internal_cache.py` 都已支持 `--matcher-mode` / `--dense3d-conf-quantile`，并把 matcher config / meta 落盘
-- grounded live smoke 显示：frame 23 下 sparse backend exact `cm_nonzero_ratio=0.0164`，dense3d `q0.90=0.0576` / `q0.80=0.1261` / `q0.70=0.1921`；对应 signal `joint_nonzero_ratio=0.0200 / 0.0754 / 0.1531 / 0.2271`。8 帧 full smoke 中，dense3d `q0.80` 的 backend mean `cm_nonzero_ratio=0.1275`、signal mean `joint_nonzero_ratio=0.1591`，约为 sparse 的 `8.26x / 8.13x`
-- 因此 MASt3R 3D 路线并非“只能做出 ~5% 覆盖”；`~0.05` 只是保守 `q=0.90` candidate-pruning + reciprocal + exact verify + left/right BRPO 融合的结果。后续正式实验仍应把 `dense3d_conf_quantile` 当作主实验轴，而不是只测一个固定值
+- full mechanism validation 与后续 `StageB120 + replay` compare 已完成。结果已经很明确：dense3d 的 coverage 提升是真的，q0.70 也确实优于 q0.80，但在真正的长程 replay compare 里，sparse 仍然更好（PSNR 24.0045 > 23.6660 > 23.5816；SSIM 同样 sparse 最优）
+- 进一步的 structural forensic 表明：旧 live exact `C_m` 低 coverage 的直接原因就是 sparse 2D reciprocal matching，而不是额外 bug；同时 dense3d 接通后，`exact_brpo_upstream_target_v1` 的 target depth / target confidence / source map 也确实同步变化，因此问题不在于 target depth 没切过去。
+- 当前 M~ 的真实症结更像是新增 support 的组成：dense3d 新增 valid 区域主要是 single-branch，而不是 both-branch。以 q0.70 为例，新增 valid 区域里约 `64.1%` 属于 `C_m=0.5`，只有约 `35.9%` 属于 `C_m=1.0`；而 `exact_shared_cm_v1` 真正进 loss 的 effective mask 还会再乘 `target_confidence`，使新增区域单位质量偏弱。
+- 针对“是否应退回到只用裸 `C_m` 做 supervision”这一点，新的 `cm_only` StageB120+replay ablation 已给出否定结果：移除 `valid_mask / target_confidence` 后，sparse 与 q070 都小幅退化；而当前 live 导出中 `valid_mask` 并未额外裁掉 `C_m` 区域，因此真正不能简单移除的是 `target_confidence`。也就是说，当前问题不是 `target_confidence` 把好信号压坏了，而更像是它在替 single-heavy supervision 做必要抑制。
+- `rgb_only` StageB120+replay ablation 也已完成：在 fixed route 下用 `--stageA_disable_depth` 完全移除 pseudo depth loss 后，sparse 明显退化，而 q070 只得到极小表面变化且仍明显落后 sparse。因此 dense3d 的主要 gap 也不能简单归因于 depth 项本身。
+- 因此 MASt3R 3D 路线并非“没起作用”，而是“当前新增 coverage 没有转成更好的 downstream replay 结果”。真正的决策点已经从“3D 有没有用”变成“single/both contract、target depth composition 与 confidence weighting 是否与原方法存在偏差”。
+- 这意味着后续若继续推进 M~，应优先回到 BRPO 原始 method，对照检查 dense support 的有效性、single/both 组成、target depth composition 与 confidence weighting，而不是继续做同类 quantile 扫描
 
 ---
 

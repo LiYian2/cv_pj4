@@ -11,9 +11,15 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 
 ROOT = Path(__file__).resolve().parents[1]
+SCRIPTS_ROOT = ROOT / "scripts"
+LEGACY_SCRIPTS_ROOT = SCRIPTS_ROOT / "legacy_prepare"
 S3PO_ROOT = "/home/bzhang512/CV_Project/third_party/S3PO-GS"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
+if str(SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(SCRIPTS_ROOT))
+if str(LEGACY_SCRIPTS_ROOT) not in sys.path:
+    sys.path.insert(0, str(LEGACY_SCRIPTS_ROOT))
 if S3PO_ROOT not in sys.path:
     sys.path.insert(0, S3PO_ROOT)
 if f"{S3PO_ROOT}/gaussian_splatting" not in sys.path:
@@ -107,6 +113,14 @@ def ensure_dir(path: Path):
 
 
 def symlink_force(src: Path, dst: Path):
+    src_abs = str(src.absolute())
+    dst_abs = str(dst.absolute())
+    src_real = str(src.resolve(strict=False))
+    dst_real = str(dst.resolve(strict=False))
+    if src_abs == dst_abs:
+        raise ValueError(f"Refusing to symlink path to itself: {src_abs}")
+    if src_real == dst_real:
+        return
     dst.parent.mkdir(parents=True, exist_ok=True)
     if dst.exists() or dst.is_symlink():
         dst.unlink()
@@ -183,13 +197,13 @@ def build_record(
         left_ref_frame_id=int(left_ref),
         right_ref_frame_id=int(right_ref),
         image_name=cname,
-        render_rgb_path=str((internal_cache_root / stage_tag / "render_rgb" / f"{int(frame_id)}_pred.png").resolve()),
-        render_depth_path=str((internal_cache_root / stage_tag / "render_depth_npy" / f"{int(frame_id)}_pred.npy").resolve()),
-        render_input_path=str((run_root / "inputs" / "raw_render" / cname).resolve()),
-        left_ref_input_path=str((run_root / "inputs" / "left_ref" / cname).resolve()),
-        right_ref_input_path=str((run_root / "inputs" / "right_ref" / cname).resolve()),
-        left_fixed_path=str((run_root / "difix" / "left_fixed" / cname).resolve()),
-        right_fixed_path=str((run_root / "difix" / "right_fixed" / cname).resolve()),
+        render_rgb_path=str(internal_cache_root / stage_tag / "render_rgb" / f"{int(frame_id)}_pred.png"),
+        render_depth_path=str(internal_cache_root / stage_tag / "render_depth_npy" / f"{int(frame_id)}_pred.npy"),
+        render_input_path=str(run_root / "inputs" / "raw_render" / cname),
+        left_ref_input_path=str(run_root / "inputs" / "left_ref" / cname),
+        right_ref_input_path=str(run_root / "inputs" / "right_ref" / cname),
+        left_fixed_path=str(run_root / "difix" / "left_fixed" / cname),
+        right_fixed_path=str(run_root / "difix" / "right_fixed" / cname),
         gap_index=None if gap_index is None else int(gap_index),
         allocation_rank=None if allocation_rank is None else int(allocation_rank),
         allocation_policy=allocation_policy,

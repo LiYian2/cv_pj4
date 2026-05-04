@@ -27,7 +27,7 @@ from pseudo_branch.refine.pseudo_camera_state import (
     apply_loaded_view_state_,
     summarize_true_pose_deltas,
 )
-from pseudo_branch.refine.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware, build_stageA_loss_exact_shared_cm
+from pseudo_branch.refine.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware, build_stageA_loss_exact_shared_cm, build_stageA_loss_paper_brpo_split
 from pseudo_branch.refine.pseudo_refine_scheduler import StageAConfig, StageA5Config, build_stageA_optimizer, build_stageA5_optimizers
 from pseudo_branch.gaussian_management.gaussian_param_groups import build_micro_gaussian_param_groups
 from pseudo_branch.gaussian_management.local_gating import (
@@ -63,7 +63,7 @@ def parse_args():
     p.add_argument('--brpo_mask_root', default=None)
     p.add_argument('--signal_pipeline', choices=['legacy', 'brpo_v2'], default='legacy')
     p.add_argument('--signal_v2_root', default=None, help='Optional root containing signal_v2/frame_<id> artifacts; defaults to <prepare_root>/signal_v2 or <prepare_root>/signal_v2_* when discoverable.')
-    p.add_argument('--pseudo_observation_mode', choices=['off', 'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1', 'exact_brpo_upstream_target_v1'], default='off')
+    p.add_argument('--pseudo_observation_mode', choices=['off', 'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'paper_brpo_cm_old_target_v1', 'paper_brpo_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1', 'exact_brpo_upstream_target_v1'], default='off')
     p.add_argument('--stage_mode', choices=['stageA', 'stageA5', 'stageB'], default='stageA')
     p.add_argument('--joint_topology_mode', choices=['off', 'brpo_joint_v1'], default='off')
     p.add_argument('--stageA_iters', type=int, default=300)
@@ -100,7 +100,7 @@ def parse_args():
         default='blended_depth',
         help='Which depth target Stage A should actually consume.',
     )
-    p.add_argument('--stageA_depth_loss_mode', choices=['legacy', 'source_aware', 'exact_shared_cm_v1'], default='legacy')
+    p.add_argument('--stageA_depth_loss_mode', choices=['legacy', 'source_aware', 'exact_shared_cm_v1', 'exact_shared_cm_cm_only_v1', 'paper_brpo_split_v1', 'paper_brpo_split_depthconf_v1'], default='legacy')
     p.add_argument('--stageA_lambda_depth_seed', type=float, default=1.0)
     p.add_argument('--stageA_lambda_depth_dense', type=float, default=0.35)
     p.add_argument('--stageA_lambda_depth_fallback', type=float, default=0.0)
@@ -635,8 +635,8 @@ def load_stageA_pseudo_views(args):
         pseudo_observation_mode = str(getattr(args, 'pseudo_observation_mode', 'off') or 'off')
         if pseudo_observation_mode == 'exact_brpo_full_target_v1' and args.stageA_depth_loss_mode != 'legacy':
             raise ValueError('exact_brpo_full_target_v1 is reserved for full BRPO target-side semantics and must run with --stageA_depth_loss_mode legacy so RGB/depth share the same C_m without source-aware fallback tiers')
-        if pseudo_observation_mode == 'exact_brpo_upstream_target_v1' and args.stageA_depth_loss_mode != 'exact_shared_cm_v1':
-            raise ValueError('exact_brpo_upstream_target_v1 must run with --stageA_depth_loss_mode exact_shared_cm_v1 to enforce exact loss contract')
+        if pseudo_observation_mode == 'exact_brpo_upstream_target_v1' and args.stageA_depth_loss_mode not in {'exact_shared_cm_v1', 'exact_shared_cm_cm_only_v1', 'paper_brpo_split_v1', 'paper_brpo_split_depthconf_v1'}:
+            raise ValueError('exact_brpo_upstream_target_v1 must run with an exact-upstream-compatible depth loss mode: exact_shared_cm_v1, exact_shared_cm_cm_only_v1, paper_brpo_split_v1, or paper_brpo_split_depthconf_v1')
         rgb_mask_mode = args.stageA_rgb_mask_mode
         depth_mask_mode = args.stageA_depth_mask_mode
         depth_target_mode = args.stageA_target_depth_mode
@@ -648,7 +648,7 @@ def load_stageA_pseudo_views(args):
             if depth_target_mode in {'auto', 'blended_depth', 'blended_depth_m5'}:
                 depth_target_mode = 'brpo_v2'
 
-        if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1', 'exact_brpo_upstream_target_v1'}:
+        if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1', 'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'paper_brpo_cm_old_target_v1', 'paper_brpo_target_v1', 'exact_brpo_full_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1', 'exact_brpo_upstream_target_v1'}:
             if signal_v2_frame_dir is None:
                 raise FileNotFoundError(f'No signal_v2 frame dir found for frame_id={frame_id} under sample_dir={sample_dir}')
             if pseudo_observation_mode == 'brpo_joint_v1':
@@ -712,6 +712,8 @@ def load_stageA_pseudo_views(args):
             else:
                 exact_prefix_map = {
                     'exact_brpo_cm_old_target_v1': ('exact_brpo_cm_old_target_v1', 'exact_brpo_cm_old_target_meta_v1.json'),
+                    'paper_brpo_cm_old_target_v1': ('paper_brpo_cm_old_target_v1', 'paper_brpo_cm_old_target_meta_v1.json'),
+                    'paper_brpo_target_v1': ('paper_brpo_target_v1', 'paper_brpo_target_meta_v1.json'),
                     'exact_brpo_full_target_v1': ('exact_brpo_full_target_v1', 'exact_brpo_full_target_meta_v1.json'),
                     'exact_brpo_cm_hybrid_target_v1': ('exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_hybrid_target_meta_v1.json'),
                     'exact_brpo_cm_stable_target_v1': ('exact_brpo_cm_stable_target_v1', 'exact_brpo_cm_stable_target_meta_v1.json'),
@@ -731,10 +733,12 @@ def load_stageA_pseudo_views(args):
                 depth_kind = f'joint_depth_target_{prefix}'
                 depth_for_refine = signal_v2_frame_dir / f'pseudo_depth_target_{prefix}.npy'
                 source_map_path = signal_v2_frame_dir / f'pseudo_source_map_{prefix}.npy'
-                if pseudo_observation_mode == 'exact_brpo_upstream_target_v1':
-                    target_confidence_path = signal_v2_frame_dir / f'pseudo_target_confidence_{prefix}.npy'
-                    target_confidence = np.load(target_confidence_path).astype(np.float32) if target_confidence_path.exists() else bundle['confidence_joint']
+                target_confidence_path = signal_v2_frame_dir / f'pseudo_target_confidence_{prefix}.npy'
+                if target_confidence_path.exists():
+                    target_confidence = np.load(target_confidence_path).astype(np.float32)
                     view['exact_upstream_bundle'] = {'valid_mask': bundle['valid_mask'], 'target_confidence': target_confidence}
+                elif pseudo_observation_mode == 'exact_brpo_upstream_target_v1':
+                    view['exact_upstream_bundle'] = {'valid_mask': bundle['valid_mask'], 'target_confidence': bundle['confidence_joint']}
                 else:
                     view.pop('exact_upstream_bundle', None)
             rgb_conf_variant = 'continuous'
@@ -800,7 +804,7 @@ def load_stageA_pseudo_views(args):
         view['source_meta'] = source_meta
         view['depth_meta'] = depth_meta
         view['target_depth_for_refine_kind'] = depth_kind
-        view['stageA_target_depth_mode_effective'] = ('joint_depth_v1' if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1'} else (pseudo_observation_mode if pseudo_observation_mode in {'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1'} else _resolve_depth_mode_alias(depth_target_mode)))
+        view['stageA_target_depth_mode_effective'] = ('joint_depth_v1' if pseudo_observation_mode in {'brpo_joint_v1', 'brpo_verify_v1'} else (pseudo_observation_mode if pseudo_observation_mode in {'brpo_style_v1', 'brpo_style_v2', 'brpo_direct_v1', 'hybrid_brpo_cm_geo_v1', 'exact_brpo_cm_old_target_v1', 'paper_brpo_cm_old_target_v1', 'paper_brpo_target_v1', 'exact_brpo_cm_hybrid_target_v1', 'exact_brpo_cm_stable_target_v1'} else _resolve_depth_mode_alias(depth_target_mode)))
         view['target_depth_for_refine_path'] = str(depth_for_refine)
         view['target_depth_for_refine_source_map_path'] = str(source_map_path) if source_map_path is not None and Path(source_map_path).exists() else None
         view['target_depth_source_map'] = source_map
@@ -1634,10 +1638,17 @@ def main():
             sampled_views.append(view)
             pkg = render(view['vp'], gaussians, pipeline_params, bg)
             render_packages.append(pkg)
-            if args.stageA_depth_loss_mode == 'exact_shared_cm_v1':
+            if args.stageA_depth_loss_mode in {'exact_shared_cm_v1', 'exact_shared_cm_cm_only_v1'}:
                 exact_upstream_bundle = view.get('exact_upstream_bundle', {})
+                use_exact_gating = (args.stageA_depth_loss_mode == 'exact_shared_cm_v1')
                 loss, stats = build_stageA_loss_exact_shared_cm(
-                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth=args.stageA_lambda_depth_seed, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), valid_mask=exact_upstream_bundle.get('valid_mask'), target_confidence=exact_upstream_bundle.get('target_confidence'),
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth=args.stageA_lambda_depth_seed, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), valid_mask=exact_upstream_bundle.get('valid_mask') if use_exact_gating else None, target_confidence=exact_upstream_bundle.get('target_confidence') if use_exact_gating else None,
+                )
+            elif args.stageA_depth_loss_mode in {'paper_brpo_split_v1', 'paper_brpo_split_depthconf_v1'}:
+                exact_upstream_bundle = view.get('exact_upstream_bundle', {})
+                depth_confidence = exact_upstream_bundle.get('target_confidence') if args.stageA_depth_loss_mode == 'paper_brpo_split_depthconf_v1' else None
+                loss, stats = build_stageA_loss_paper_brpo_split(
+                    render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth=args.stageA_lambda_depth_seed, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), depth_confidence=depth_confidence,
                 )
             elif args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                 loss, stats = build_stageA_loss_source_aware(
@@ -1888,10 +1899,17 @@ def main():
                 else:
                     pkg = render(view['vp'], gaussians, pipeline_params, bg)
                 pseudo_render_packages.append(pkg)
-                if args.stageA_depth_loss_mode == 'exact_shared_cm_v1':
+                if args.stageA_depth_loss_mode in {'exact_shared_cm_v1', 'exact_shared_cm_cm_only_v1'}:
                     exact_upstream_bundle = view.get('exact_upstream_bundle', {})
+                    use_exact_gating = (args.stageA_depth_loss_mode == 'exact_shared_cm_v1')
                     loss, stats = build_stageA_loss_exact_shared_cm(
-                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth=args.stageA_lambda_depth_seed, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), valid_mask=exact_upstream_bundle.get('valid_mask'), target_confidence=exact_upstream_bundle.get('target_confidence'),
+                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth=args.stageA_lambda_depth_seed, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), valid_mask=exact_upstream_bundle.get('valid_mask') if use_exact_gating else None, target_confidence=exact_upstream_bundle.get('target_confidence') if use_exact_gating else None,
+                    )
+                elif args.stageA_depth_loss_mode in {'paper_brpo_split_v1', 'paper_brpo_split_depthconf_v1'}:
+                    exact_upstream_bundle = view.get('exact_upstream_bundle', {})
+                    depth_confidence = exact_upstream_bundle.get('target_confidence') if args.stageA_depth_loss_mode == 'paper_brpo_split_depthconf_v1' else None
+                    loss, stats = build_stageA_loss_paper_brpo_split(
+                        render_rgb=pkg['render'], render_depth=pkg['depth'], target_rgb=view['rgb'], target_depth=view['depth_for_refine'], confidence_mask=view['conf'], viewpoint=view['vp'], beta_rgb=cfg.beta_rgb, lambda_pose=cfg.lambda_pose, lambda_exp=cfg.lambda_exp, trans_weight=cfg.trans_reg_weight, lambda_depth=args.stageA_lambda_depth_seed, use_depth=not args.stageA_disable_depth, lambda_abs_pose=cfg.lambda_abs_pose, lambda_abs_t=cfg.lambda_abs_t, lambda_abs_r=cfg.lambda_abs_r, abs_pose_robust=cfg.abs_pose_robust, scene_scale=view.get('stageA_scene_scale', 1.0), depth_confidence=depth_confidence,
                     )
                 elif args.stageA_depth_loss_mode == 'source_aware' and view.get('target_depth_source_map') is not None:
                     loss, stats = build_stageA_loss_source_aware(

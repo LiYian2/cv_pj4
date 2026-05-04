@@ -1,6 +1,6 @@
 # STATUS.md - Part3 Stage1 当前状态
 
-> 更新时间：2026-05-04 21:30 (Asia/Shanghai)
+> 更新时间：2026-04-24 21:41 (Asia/Shanghai)
 
 > **书写规范**：
 > 1. 只记录"现在"，不记录历史过程（过程在 CHANGELOG）
@@ -8,22 +8,6 @@
 > 3. 不写实验数据（数值在 CHANGELOG / compare json），只写结构/状态/判断
 > 4. 状态用 ✅ ⚠️ ❌ 标记，"已完成"不重复列出
 > 5. 更新后修改文档顶部时间戳
-
----
-
-## 0. S3PO online mapping 状态（2026-05-04）
-
-当前 refine / pseudo optimization 的工程主线已经进一步从 **post-after_opt backend continuation** 转到 **S3PO backend keyframe path 内的 online mapping integration**。
-
-- ✅ Phase 1 已完成 runtime builder 提纯：新增 `pseudo_branch/integration/runtime_slot_selector.py`、`runtime_exact_backend.py`、`runtime_signal_builder.py`、`runtime_pseudo_builder.py`、`runtime_debug_export.py`。exact backend / exact-upstream signal / backend pseudo record 现在都可以走 in-memory runtime path，不再依赖 `stageA_history.json`。
-- ✅ Phase 1 parity smoke 已通过：基于历史 `sparse_backend/frame_0023 + sparse_signal/frame_0023` reference，runtime rebuild 后 `pseudo_depth_target / pseudo_confidence / pseudo_source_map / pseudo_valid_mask / pseudo_target_confidence` 五个 exact-upstream核心数组全部 bitwise 一致。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase12/phase1_parity/`。
-- ✅ Phase 2 已接入 backend keyframe event：`third_party/S3PO-GS/utils/slam_frontend.py` 新增 runtime camera-state cache 并随 keyframe message 传给 backend；`third_party/S3PO-GS/utils/slam_backend.py` 已在 keyframe path 内加入 pseudo slot activation + runtime bundle/debug export。
-- ✅ Phase 2 backend trigger smoke 已通过：在 `current_window=[0,34]` 的 keyframe 事件下，系统自动激活 newly-closed gap midpoint pseudo slot `frame_id=17`，并成功写出 `exact_backend_v1/`、`signal_v2/`、`runtime_pseudo_record/` 与 `event_summary.json`。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase12/phase2_backend_smoke/event_kf_0034/`。
-- ✅ no-op shell safety 已满足当前 Phase 2 目标：本轮 `enable_pseudo_gradient=false`、`pseudo_map_iters=0`，Gaussian `xyz` 在 smoke 中 `max_abs_delta=0.0`，说明新 keyframe-shell 本身没有偷偷改坏 baseline scene。
-- ✅ Phase 3 第一版 pseudo-aware mapping block 已落地：`third_party/S3PO-GS/utils/slam_backend_brpo.py` 现在同时支持 `run_brpo_pseudo_continuation(...)` 与 `run_brpo_pseudo_mapping(...)` 两个入口；`utils/slam_backend.py` 已在 keyframe path 中把 runtime pseudo record 真正接进 mapping iterations，并把 per-event `brpo_pseudo_history.json` / `pseudo_mapping_summary.json` 回写到对应 debug root。
-- ✅ Phase 3 single-gap online pseudo smoke 已通过：在 `current_window=[0,34]`、slot=`frame_id=17`、`pseudo_map_iters=2`、`pseudo_scene_mask_mode=both_only` 的 direct backend harness 下，pseudo-aware mapping 真正执行成功，history 同时记录了 `loss_real / loss_pseudo / loss_pseudo_pose / loss_pseudo_scene`，并产生 `gaussian_xyz_max_abs_delta≈0.01921`。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase3_smoke/event_kf_0034/`。
-- ⚠️ 当前已完成的是 **Phase 3 conservative single-gap landing**，还不是代表性 full online compare：这一步已经证明 pseudo supervision 不再只是 shell/build artifact，而是确实进入了 backend mapping loop；下一步应继续做更长、更代表性的 online branch compare，而不是回到 standalone/continuation 修补。
-- ❌ `run_pseudo_refinement_v2.py` 与 `after_opt continuation` 不再是未来主 refine 引擎；它们现在只保留 reference / replay baseline / control 身份。
 
 ---
 
@@ -67,7 +51,7 @@ A/T/B 主线现在更明确了：
 | 数据集 | 当前状态 | 当前判断 |
 |------|------|------|
 | Re10k-1 | ✅ A1/T1 收敛，✅ exact BRPO-C_m compare 已完成，✅ exact BRPO target-side compare 已完成，✅ G~ clean compare 已完成，✅ T4 exact-upstream formal compare 已完成 | 当前 standalone 最优组合已更新为 `exact M~ + exact upstream T~ + clean summary G~ + T1`；`exact_brpo_cm_old_target_v1 ≈ old A1` 继续成立，而 `exact_brpo_upstream_target_v1` 在 fixed clean G~ / fixed T1 compare 下已赢过 `old A1`、`exact_brpo_cm_old_target_v1`、`exact_brpo_full_target_v1`，说明 decisive gain 来自更 upstream 的 verifier backend / projected-depth / target field 对齐 |
-| DL3DV-2 | ✅ canonical baseline + repair A 已打通，✅ exact-upstream control 已跑通，✅ paper-realign compare branch 已完成首轮 full9 compare | 当前 standalone winner 仍是 exact-upstream control；`paper_cm_only / paper_brpo_target_v1 / paper_brpo_split_*` 已经是可复现实验分支，但尚未升为主线 |
+| DL3DV-2 | ✅ canonical baseline + repair A 已打通 | 暂未平移 strict BRPO A1 target-contract 路线 / B3 |
 
 ---
 
@@ -176,9 +160,6 @@ signal_v2/frame_<frame_id>/
 | A1 exact BRPO-C_m + hybrid target：`exact_brpo_cm_hybrid_target_v1` | ⚠️ | 已完成 compare；仍属于 exact-upstream 落地前的过渡 target contract 对照 |
 | A1 exact BRPO-C_m + stable target：`exact_brpo_cm_stable_target_v1` | ⚠️ | 已完成 compare；保留为 stable-target contract 对照 |
 | A1 exact BRPO upstream target：`exact_brpo_upstream_target_v1` | ✅ | T4 formal compare 已完成；在 fixed clean G~ / fixed T1 protocol 下赢过 old A1 / exact-oldtarget / exact-fulltarget，已升为当前 T~ 主线 |
-| A1 paper fused-domain C_m：`paper_cm_only` / `paper_brpo_cm_old_target_v1` | ✅ | fused-domain support-set builder + signal + consumer 已接通，并完成 full9 compare；当前保留为 compare branch |
-| T~ paper depth-only target：`paper_brpo_target_v1` | ✅ | depth-only target producer + observation + target_confidence 已接通，并完成 full9 compare；当前保留为 compare branch |
-| R~ paper split consumer：`paper_brpo_split_v1` / `paper_brpo_split_depthconf_v1` | ✅ | 两个 split loss mode 已落地并完成 full9 compare；当前差异很小，尚未升 mainline |
 | T1：`joint_topology_mode=brpo_joint_v1` | ✅ | topology mode + compare + confirmation 已完成 |
 | T1 orchestration：StageA.5 optional warmup/control | ✅ | 角色已经固化 |
 | A2 geometry-constrained expand | ❌ | 当前 widening 方案不作为主线 |
@@ -202,7 +183,6 @@ signal_v2/frame_<frame_id>/
 | A1 参考主线 | observation semantics | `joint_confidence_v2 + joint_depth_v2` |
 | T1 主线 | topology | `joint_topology_mode=brpo_joint_v1` |
 | 当前默认候选主线 | observation + target + topology | `exact_brpo_upstream_target_v1 + exact_shared_cm_v1 + clean summary G~ + brpo_joint_v1` |
-| Paper-realign compare branch | observation + target + topology | `paper_brpo_target_v1 + paper_brpo_split_{v1,depthconf_v1} + brpo_joint_v1`（已跑 full9 compare，未升主线） |
 | A1/T~ 当前 control | semantics-clean control | `exact_brpo_cm_old_target_v1 + brpo_joint_v1 + clean summary G~` |
 | A1/T~ 历史强基线 | historical control | `old A1 + new T1` |
 | StageA.5 role | orchestration | optional warmup / control |
@@ -269,17 +249,11 @@ signal_v2/frame_<frame_id>/
 - G~：clean compare 定位不变：direct current-step 只有小幅正向，legacy delayed opacity 明确负向；G~ 维持 side branch，不再继续优先做 O2a/b / aggressive 调参。
 
 ### 下一阶段 ⏳
-- M~ matching upgrade planning 已落地：`docs/archived/2026-04-m3d-experiments/BRPO_MASK_DENSE_2D_MATCHING_PLAN_20260424.md` 与 `docs/archived/2026-04-m3d-experiments/BRPO_MASK_MAST3R_3D_MATCHING_PLAN_20260424.md`。当前口径仍是 dense2d 作为低风险 control / side option，MASt3R 3D matching 作为更值得优先落地的主线候选；两条都保持 exact BRPO 离散 `C_m ∈ {1.0, 0.5, 0.0}`。
-- M~ 3D 路线的长程 `StageB120 + replay` compare 与后续 structural forensic 已完成，详见 `docs/archived/2026-04-m3d-experiments/M3D_STAGEB120_REPLAY_COMPARE_20260424.md` 与 `docs/archived/2026-04-m3d-experiments/M3D_STRUCTURAL_FORENSICS_20260424.md`。结论已进一步收敛：虽然 dense3d 在 mechanism 层显著增密，且 `q0.70` 仍是 dense 内部最优候选，但真正的 replay winner 仍然是 sparse；更关键的是，旧 live M~ 的低 coverage 确实来自 sparse 2D MASt3R reciprocal matching，而 dense3d 接通后 exact-upstream target depth / target confidence / source map 也确实同步变化，不存在“只改 C_m、target depth 没同步”的简单接线问题。
+- M~ matching upgrade planning 已落地：`docs/BRPO_MASK_DENSE_2D_MATCHING_PLAN_20260424.md` 与 `docs/BRPO_MASK_MAST3R_3D_MATCHING_PLAN_20260424.md`。当前口径仍是 dense2d 作为低风险 control / side option，MASt3R 3D matching 作为更值得优先落地的主线候选；两条都保持 exact BRPO 离散 `C_m ∈ {1.0, 0.5, 0.0}`。
+- M~ 3D 路线的长程 `StageB120 + replay` compare 与后续 structural forensic 已完成，详见 `docs/M3D_STAGEB120_REPLAY_COMPARE_20260424.md` 与 `docs/M3D_STRUCTURAL_FORENSICS_20260424.md`。结论已进一步收敛：虽然 dense3d 在 mechanism 层显著增密，且 `q0.70` 仍是 dense 内部最优候选，但真正的 replay winner 仍然是 sparse；更关键的是，旧 live M~ 的低 coverage 确实来自 sparse 2D MASt3R reciprocal matching，而 dense3d 接通后 exact-upstream target depth / target confidence / source map 也确实同步变化，不存在“只改 C_m、target depth 没同步”的简单接线问题。
 - 当前更像是 supervision composition 问题：以 q0.70 为例，新增 valid 区域里约 `64.1%` 是 single-branch、仅约 `35.9%` 是 both-branch；而 `exact_shared_cm_v1` 真正送进 loss 的 effective mask（`C_m × valid_mask × target_confidence`）在 valid 区域上的均值也低于 sparse（q0.70 `0.403` vs sparse `0.480`）。这与 StageB120 中 dense arm 更高的 pseudo/depth loss 和更差 replay 一致。
-- 已完成 consumer-side `cm_only` ablation（`docs/archived/2026-04-m3d-experiments/M3D_CM_ONLY_STAGEB120_REPLAY_COMPARE_20260424.md`）：把 `exact_shared_cm_v1` 改成“只用裸 `C_m`，不乘 `valid_mask` / `target_confidence`”后，无论 sparse 还是 q070 都更差。Replay 变化为 sparse `-0.0027 PSNR`、q070 `-0.0092 PSNR`，且 RGB/depth/pseudo loss 全部上升。由于当前 live exact-upstream 里 `C_m>0` 与 `valid_mask>0` 实际重合，这次退化基本可以归因于去掉 `target_confidence` 后把监督过度放大。
-- 已完成 consumer-side `rgb_only` ablation（`docs/archived/2026-04-m3d-experiments/M3D_RGB_ONLY_STAGEB120_REPLAY_COMPARE_20260424.md`）：在 fixed-route 下直接加 `--stageA_disable_depth`，完全移除 pseudo depth loss 后，sparse 明显退化（PSNR `-0.0792`），q070 仅有极小表面变化（PSNR `-0.0015`，SSIM/LPIPS 略好）但仍明显落后 sparse。这说明 dense3d 的主要 replay gap 不能简单归因于 “depth loss 本身质量差”。
-- 已完成 `docs/REFINE_FORENSICS_MASTER_20260425.md` 六步 refine forensic，并已把 dense / M3D 执行长文统一归档到 `docs/archived/2026-04-m3d-experiments/`。当前最关键的新结论是：问题不能再概括成“coverage 太低”本身。旧 live M~ 的低 coverage 的确来自 `FlowMatcher + fast_reciprocal_NNs(..., subsample_or_initxy1=8)` 这条 sparse 2D reciprocal matching 路径，天然只有约 `1.5%–2%` 支持；但在 stronger pseudo 路线下，真正让 replay 坍塌的是更大的 target mismatch、更高的 single-branch supervision 占比、以及 joint pseudo pose + Gaussian 反馈下的渐进式失稳，而不是“只要把 coverage 做大就会自动更好”。
-- refine forensic 还进一步锁定：坏 route 在 `iter020` 前并不差，真正退化从 `20 -> 40` 之后开始；`pose_only` 与 `gaussians_only` 都不会单独复现这一下降，说明主问题是 joint coupling。与此同时，real-train RGB loss 甚至可以继续变好但 replay 变坏，说明当前 real anchor 太弱，不能单靠现有 real branch 拒绝 harmful pseudo-driven updates。
-- 已完成 `dense3d q070 + 4real+2pseudo` follow-up（`docs/archived/2026-04-experiments/Q070_4REAL2PSEUDO_COMPARE_20260427.md`）。结论很关键：单纯把 StageB minibatch 从 `2 real + 4 pseudo` 改成 `4 real + 2 pseudo`，并不能救回当前 exact dense route；`current_4r2p_exact` 与 `rgb_only_4r2p_exact` 反而都比旧 `2+4` q070 controls 更差。真正强阳性的 arm 是 `allones_rgb_only_4r2p`（`24.1126 PSNR`），它甚至超过 sparse current control（`+0.1081 PSNR`），但仍略低于 old best（`-0.1515 PSNR`）。这说明 batch ratio 只是次级因素，主问题仍然是当前 exact mask/depth pseudo contract 本身。
-- 继续补做了 `dense3d q070 + continuous-confidence + RGB-only` follow-up（`docs/archived/2026-04-experiments/Q070_CONTCONF_RGB_ONLY_4R2P_20260427.md`）：把 dense q0.70 exact signal 的离散 `pseudo_confidence_exact...` 直接替换成连续 `pseudo_target_confidence_exact...`，并关闭 pseudo depth。结果 `contconf_rgb_only_4r2p = 23.5406 PSNR`，只比 `rgb_only_4r2p_exact` 高 `+0.0210 PSNR`，但比 `allones_rgb_only_4r2p` 低 `-0.5720 PSNR`。这与更早的 continuous/hybrid 历史记录一致：continuous confidence 本身不是当前主修复方向。
-- 已完成 `full8 dense3d q070 active mask compare`（`20260504_full8_dense3d_q070_active_compare`）：在 StageB120 下对比 sparse 与 dense3d q0.70 的 replay 与 active mask 统计。结果：sparse `24.0045 / 0.87177 / 0.08247`；dense3d q0.70 `23.9133 / 0.86923 / 0.08411`。Sparse 仍胜 `+0.0912 PSNR`。Active mask 统计确认：sparse mean `0.01523`（~1.5% 覆盖），dense3d mean `0.18760`（~18.8% 覆盖），dense3d 相对 sparse 新增 `+0.17424`（~17.4% 新增覆盖）。这进一步验证：dense3d 确实大幅提升了 mask coverage，但 replay 仍未改善，与前序 `M3D_STAGEB120_REPLAY_COMPARE` 结论一致。产物根：`output/part3_BRPO/experiments/20260504_full8_dense3d_q070_active_compare`。
-- 因此下一步若继续修 M~/T~/R~ 合同，优先级应从“继续扫 dense quantile / 改 continuous mask”转向：both-vs-single contract、single-branch target composition、pseudo/real balance、以及 stronger pseudo route 的稳定化策略。
+- 已完成 consumer-side `cm_only` ablation（`docs/M3D_CM_ONLY_STAGEB120_REPLAY_COMPARE_20260424.md`）：把 `exact_shared_cm_v1` 改成“只用裸 `C_m`，不乘 `valid_mask` / `target_confidence`”后，无论 sparse 还是 q070 都更差。Replay 变化为 sparse `-0.0027 PSNR`、q070 `-0.0092 PSNR`，且 RGB/depth/pseudo loss 全部上升。由于当前 live exact-upstream 里 `C_m>0` 与 `valid_mask>0` 实际重合，这次退化基本可以归因于去掉 `target_confidence` 后把监督过度放大。
+- 已完成 consumer-side `rgb_only` ablation（`docs/M3D_RGB_ONLY_STAGEB120_REPLAY_COMPARE_20260424.md`）：在 fixed-route 下直接加 `--stageA_disable_depth`，完全移除 pseudo depth loss 后，sparse 明显退化（PSNR `-0.0792`），q070 仅有极小表面变化（PSNR `-0.0015`，SSIM/LPIPS 略好）但仍明显落后 sparse。这说明 dense3d 的主要 replay gap 不能简单归因于 “depth loss 本身质量差”。
 - 因此下一步不应继续做 q0.70/q0.80 的同类 quantile sweep，也不应把 dense3d 默认化；更合理的是回到原始 BRPO method，对照 live 语义检查 M~/T~ 的 both-vs-single contract、single-branch target composition 与 confidence weighting 是否仍有方法级差异；若继续做 loss ablation，也应优先做 both-vs-single 的局部合同，而不是全局移除 depth 或 confidence。
 - 大工程主线从 standalone compare 转向 **S3PO backend-only integration**，优先做：
   1. 把 exact M~/T~ winner 的 builder / loss contract 从当前 standalone 实验入口中抽成可复用 backend

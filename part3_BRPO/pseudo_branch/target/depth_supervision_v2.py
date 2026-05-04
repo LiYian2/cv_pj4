@@ -178,6 +178,129 @@ def write_depth_supervision_outputs(
     with open(frame_out / 'depth_meta_v2_brpo.json', 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2)
 
+def build_paper_target_depth_v1(
+    projected_depth_left: np.ndarray,
+    projected_depth_right: np.ndarray,
+    fusion_weight_left: np.ndarray,
+    fusion_weight_right: np.ndarray,
+    projected_valid_left: np.ndarray | None = None,
+    projected_valid_right: np.ndarray | None = None,
+    tau_rel_depth: float = 0.15,
+    both_mode: str = 'weighted_by_fusion',
+    single_mode: str = 'single_branch_projected',
+) -> Dict[str, np.ndarray | Dict]:
+    projected_depth_left = np.asarray(projected_depth_left, dtype=np.float32)
+    projected_depth_right = np.asarray(projected_depth_right, dtype=np.float32)
+    fusion_weight_left = np.asarray(fusion_weight_left, dtype=np.float32)
+    fusion_weight_right = np.asarray(fusion_weight_right, dtype=np.float32)
+
+    valid_left = np.asarray(projected_valid_left, dtype=np.float32) > 0.5 if projected_valid_left is not None else projected_depth_left > 1e-6
+    valid_right = np.asarray(projected_valid_right, dtype=np.float32) > 0.5 if projected_valid_right is not None else projected_depth_right > 1e-6
+
+    both_candidate = valid_left & valid_right & (projected_depth_left > 1e-6) & (projected_depth_right > 1e-6)
+    left_only = valid_left & (~valid_right) & (projected_depth_left > 1e-6)
+    right_only = valid_right & (~valid_left) & (projected_depth_right > 1e-6)
+
+    rel_diff = np.zeros_like(projected_depth_left, dtype=np.float32)
+    denom = np.maximum(np.maximum(np.abs(projected_depth_left), np.abs(projected_depth_right)), 1e-6)
+    rel_diff[both_candidate] = np.abs(projected_depth_left[both_candidate] - projected_depth_right[both_candidate]) / denom[both_candidate]
+    both_consistency = np.zeros_like(projected_depth_left, dtype=np.float32)
+    if float(tau_rel_depth) <= 1e-8:
+        both_consistency[both_candidate] = 1.0
+    else:
+        both_consistency[both_candidate] = np.clip(1.0 - rel_diff[both_candidate] / float(tau_rel_depth), 0.0, 1.0)
+    both_consistent = both_candidate & (both_consistency > 0.0)
+
+    if both_mode != 'weighted_by_fusion':
+        raise ValueError(f'Unsupported both_mode={both_mode}')
+    if single_mode != 'single_branch_projected':
+        raise ValueError(f'Unsupported single_mode={single_mode}')
+
+    target = np.zeros_like(projected_depth_left, dtype=np.float32)
+    source_map = np.zeros_like(projected_depth_left, dtype=np.int16)
+    depth_conf = np.zeros_like(projected_depth_left, dtype=np.float32)
+
+    both_w_sum = fusion_weight_left + fusion_weight_right
+    both_w_valid = both_consistent & (both_w_sum > 1e-8)
+    target[both_w_valid] = (
+        fusion_weight_left[both_w_valid] * projected_depth_left[both_w_valid]
+        + fusion_weight_right[both_w_valid] * projected_depth_right[both_w_valid]
+    ) / both_w_sum[both_w_valid]
+    source_map[both_w_valid] = SOURCE_BOTH_WEIGHTED
+    depth_conf[both_w_valid] = 0.5 + 0.5 * both_consistency[both_w_valid]
+
+    target[left_only] = projected_depth_left[left_only]
+    target[right_only] = projected_depth_right[right_only]
+    source_map[left_only] = SOURCE_LEFT
+    source_map[right_only] = SOURCE_RIGHT
+    depth_conf[left_only] = 0.5
+    depth_conf[right_only] = 0.5
+
+    valid_mask = (source_map != SOURCE_NONE).astype(np.float32)
+    unsupported_both = both_candidate & (~both_consistent)
+
+    summary = {
+        'valid_ratio': float(valid_mask.mean()),
+        'both_candidate_ratio': float(both_candidate.mean()),
+        'both_consistent_ratio': float(both_consistent.mean()),
+        'both_rejected_ratio': float(unsupported_both.mean()),
+        'left_only_ratio': float(left_only.mean()),
+        'right_only_ratio': float(right_only.mean()),
+        'avg_depth_confidence': float(depth_conf[valid_mask > 0].mean()) if (valid_mask > 0).any() else 0.0,
+        'source_counts': {
+            'none': int((source_map == SOURCE_NONE).sum()),
+            'left': int((source_map == SOURCE_LEFT).sum()),
+            'right': int((source_map == SOURCE_RIGHT).sum()),
+            'both_weighted': int((source_map == SOURCE_BOTH_WEIGHTED).sum()),
+            'render_fallback': 0,
+        },
+        'policy': {
+            'tau_rel_depth': float(tau_rel_depth),
+            'both_mode': both_mode,
+            'single_mode': single_mode,
+            'fallback_mode': 'none',
+            'rgb_gate': 'disabled',
+        },
+    }
+
+    return {
+        'target_depth_for_refine_paper_brpo_target_v1': target.astype(np.float32),
+        'target_depth_source_map_paper_brpo_target_v1': source_map.astype(np.int16),
+        'depth_valid_mask_paper_brpo_target_v1': valid_mask.astype(np.float32),
+        'depth_confidence_paper_brpo_target_v1': depth_conf.astype(np.float32),
+        'depth_both_consistency_paper_brpo_target_v1': both_consistency.astype(np.float32),
+        'depth_rel_diff_paper_brpo_target_v1': rel_diff.astype(np.float32),
+        'summary': summary,
+    }
+
+
+def write_paper_target_depth_outputs(
+    frame_out: Path,
+    result: Dict,
+    meta: Dict,
+):
+    frame_out.mkdir(parents=True, exist_ok=True)
+    diag_dir = frame_out / 'diag'
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    np.save(frame_out / 'target_depth_for_refine_paper_brpo_target_v1.npy', result['target_depth_for_refine_paper_brpo_target_v1'])
+    np.save(frame_out / 'target_depth_source_map_paper_brpo_target_v1.npy', result['target_depth_source_map_paper_brpo_target_v1'])
+    np.save(frame_out / 'depth_valid_mask_paper_brpo_target_v1.npy', result['depth_valid_mask_paper_brpo_target_v1'])
+    np.save(frame_out / 'depth_confidence_paper_brpo_target_v1.npy', result['depth_confidence_paper_brpo_target_v1'])
+    np.save(frame_out / 'depth_both_consistency_paper_brpo_target_v1.npy', result['depth_both_consistency_paper_brpo_target_v1'])
+    np.save(frame_out / 'depth_rel_diff_paper_brpo_target_v1.npy', result['depth_rel_diff_paper_brpo_target_v1'])
+
+    _save_float_png(result['target_depth_for_refine_paper_brpo_target_v1'], frame_out / 'target_depth_for_refine_paper_brpo_target_v1.png')
+    _save_source_map_png(result['target_depth_source_map_paper_brpo_target_v1'], frame_out / 'target_depth_source_map_paper_brpo_target_v1.png')
+    _save_mask_png(result['depth_valid_mask_paper_brpo_target_v1'], frame_out / 'depth_valid_mask_paper_brpo_target_v1.png')
+    _save_float_png(result['depth_confidence_paper_brpo_target_v1'], diag_dir / 'depth_confidence_paper_brpo_target_v1.png', vmax=1.0)
+    _save_float_png(result['depth_both_consistency_paper_brpo_target_v1'], diag_dir / 'depth_both_consistency_paper_brpo_target_v1.png', vmax=1.0)
+    _save_float_png(result['depth_rel_diff_paper_brpo_target_v1'], diag_dir / 'depth_rel_diff_paper_brpo_target_v1.png')
+
+    with open(frame_out / 'paper_target_meta_v1.json', 'w', encoding='utf-8') as f:
+        json.dump(meta, f, indent=2)
+
+
 def build_exact_upstream_depth_target(
     support_left_exact: np.ndarray,
     support_right_exact: np.ndarray,

@@ -51,7 +51,7 @@ def parse_args():
                    help="Optional root containing branch-specific right repaired pseudo RGBs")
     p.add_argument("--pseudo-fused-root", default=None,
                    help="Optional root containing fused pseudo RGBs (target_rgb_fused.png layout or image_name files)")
-    p.add_argument("--verification-mode", choices=["branch_first", "fused_first"], default="branch_first")
+    p.add_argument("--verification-mode", choices=["branch_first", "fused_first", "paper_cm_only"], default="branch_first")
     p.add_argument("--tau-reproj-px", type=float, default=4.0)
     p.add_argument("--tau-rel-depth", type=float, default=0.15)
     p.add_argument("--mask-value-both", type=float, default=1.0)
@@ -107,6 +107,75 @@ def resolve_fused_pseudo_rgb(frame_id: int, image_name: str, default_path: Path,
         if cand.exists():
             return cand
     return default_path
+
+
+def run_match_only(side, frame_id, pseudo_state, ref_state, pseudo_rgb_path, matcher, pseudo_role="fused"):
+    ref_rgb_path = Path(ref_state["image_path"])
+    pts_pseudo, pts_ref, _ = matcher.match_pair(str(pseudo_rgb_path), str(ref_rgb_path), size=int(pseudo_state["image_width"]))
+    match_meta = matcher.get_last_match_meta() if hasattr(matcher, "get_last_match_meta") else {}
+
+    h = int(pseudo_state["image_height"])
+    w = int(pseudo_state["image_width"])
+    support_mask = np.zeros((h, w), dtype=np.float32)
+    match_density = np.zeros((h, w), dtype=np.float32)
+    reproj_error_map = np.zeros((h, w), dtype=np.float32)
+    rel_depth_error_map = np.zeros((h, w), dtype=np.float32)
+    projected_depth_map = np.zeros((h, w), dtype=np.float32)
+    projected_depth_valid_mask = np.zeros((h, w), dtype=np.float32)
+
+    if pts_pseudo is None:
+        pts_pseudo = np.zeros((0, 2), dtype=np.float32)
+    x = np.round(pts_pseudo[:, 0]).astype(int) if len(pts_pseudo) else np.zeros((0,), dtype=int)
+    y = np.round(pts_pseudo[:, 1]).astype(int) if len(pts_pseudo) else np.zeros((0,), dtype=int)
+    pix_valid = (x >= 0) & (x < w) & (y >= 0) & (y < h)
+    for i in np.where(pix_valid)[0]:
+        xi, yi = int(x[i]), int(y[i])
+        support_mask[yi, xi] = 1.0
+        match_density[yi, xi] += 1.0
+
+    num_support = int((support_mask > 0.5).sum())
+    stats = {
+        "num_matches": int(len(pts_pseudo)),
+        "num_valid_ref_depth": None,
+        "num_valid_pseudo_depth": None,
+        "num_support": num_support,
+        "num_projected_depth": 0,
+        "support_ratio_vs_matches": float(num_support / max(len(pts_pseudo), 1)),
+        "support_ratio_vs_image": float(num_support / float(h * w)),
+        "projected_depth_ratio_vs_image": 0.0,
+        "mean_reproj_error": None,
+        "mean_rel_depth_error": None,
+        "tau_reproj_px": None,
+        "tau_rel_depth": None,
+        "paper_cm_only": True,
+    }
+    result = {
+        "support_mask": support_mask,
+        "reproj_error_map": reproj_error_map,
+        "rel_depth_error_map": rel_depth_error_map,
+        "match_density": match_density,
+        "projected_depth_map": projected_depth_map,
+        "projected_depth_valid_mask": projected_depth_valid_mask,
+        "stats": stats,
+    }
+    meta = {
+        "frame_id": int(frame_id),
+        "ref_side": side,
+        "ref_frame_id": int(ref_state["frame_id"]),
+        "image_name": pseudo_state.get("image_name", f"{int(frame_id):05d}.png"),
+        "pseudo_rgb_path": str(pseudo_rgb_path),
+        "pseudo_rgb_default_path": str(pseudo_rgb_path),
+        "used_branch_override": False,
+        "pseudo_role": pseudo_role,
+        "pseudo_depth_path": None,
+        "ref_rgb_path": str(ref_rgb_path),
+        "stage_ply": None,
+        "verification_version": VERIFICATION_VERSION,
+        "matcher_meta": match_meta,
+        **stats,
+    }
+    ref_depth = np.zeros((h, w), dtype=np.float32)
+    return result, meta, ref_depth
 
 
 def run_branch(side, frame_id, pseudo_state, ref_state, pseudo_rgb_path, pseudo_depth_path, stage_ply, gaussians, pipe, background, matcher, tau_reproj_px, tau_rel_depth, pseudo_left_root=None, pseudo_right_root=None, pseudo_role="branch", use_exact_backend=False):
@@ -222,7 +291,14 @@ def main():
         image_name = pseudo_state.get("image_name", f"{int(frame_id):05d}.png")
         fused_pseudo_rgb_path = resolve_fused_pseudo_rgb(int(frame_id), image_name, Path(pseudo_rgb_path), args.pseudo_fused_root)
 
-        if args.verification_mode == "fused_first":
+        if args.verification_mode == "paper_cm_only":
+            left_result, left_meta, left_ref_depth = run_match_only(
+                "left", frame_id, pseudo_state, left_state, fused_pseudo_rgb_path, matcher, pseudo_role="fused"
+            )
+            right_result, right_meta, right_ref_depth = run_match_only(
+                "right", frame_id, pseudo_state, right_state, fused_pseudo_rgb_path, matcher, pseudo_role="fused"
+            )
+        elif args.verification_mode == "fused_first":
             left_result, left_meta, left_ref_depth = run_branch(
                 "left", frame_id, pseudo_state, left_state, fused_pseudo_rgb_path, pseudo_depth_path,
                 stage_ply, gaussians, pipe, background, matcher, args.tau_reproj_px, args.tau_rel_depth,
@@ -253,8 +329,8 @@ def main():
             value_both=args.mask_value_both,
             value_single=args.mask_value_single,
             value_none=args.mask_value_none,
-            left_result=left_result,
-            right_result=right_result,
+            left_result=None if args.verification_mode == "paper_cm_only" else left_result,
+            right_result=None if args.verification_mode == "paper_cm_only" else right_result,
             tau_reproj=args.cont_tau_reproj,
             tau_depth=args.cont_tau_depth,
             tau_agree=args.cont_tau_agree,
@@ -269,6 +345,8 @@ def main():
         frame_meta.update({
             "verification_version": VERIFICATION_VERSION,
             "verification_mode": args.verification_mode,
+            "paper_style_cm_only": bool(args.verification_mode == "paper_cm_only"),
+            "uses_geometry_verifier": bool(args.verification_mode != "paper_cm_only"),
             "stage_tag": args.stage_tag,
             "pseudo_rgb_path": str(pseudo_rgb_path),
             "fused_pseudo_rgb_path": str(fused_pseudo_rgb_path),
@@ -317,7 +395,7 @@ def main():
         })
 
         frame_out = output_root / f"frame_{int(frame_id):04d}"
-        pseudo_rgb_for_train = fused_pseudo_rgb_path if args.verification_mode == "fused_first" else pseudo_rgb_path
+        pseudo_rgb_for_train = fused_pseudo_rgb_path if args.verification_mode in {"fused_first", "paper_cm_only"} else pseudo_rgb_path
         pseudo_rgb_img = np.asarray(Image.open(pseudo_rgb_for_train).convert("RGB"), dtype=np.float32) / 255.0
         pseudo_depth_arr = np.load(pseudo_depth_path).astype(np.float32)
         train_masks = None

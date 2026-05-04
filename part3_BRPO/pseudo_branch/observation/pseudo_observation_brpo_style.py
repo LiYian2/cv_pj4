@@ -159,6 +159,74 @@ def build_exact_brpo_cm_old_target_observation(
     )
 
 
+def build_paper_brpo_cm_old_target_observation(
+    support_left: np.ndarray,
+    support_right: np.ndarray,
+    target_depth_for_refine_v2_brpo: np.ndarray,
+    target_depth_source_map_v2_brpo: np.ndarray,
+) -> Dict[str, np.ndarray | Dict]:
+    return _build_exact_brpo_cm_observation_with_target(
+        version='paper_brpo_cm_old_target_v1',
+        support_left=support_left,
+        support_right=support_right,
+        depth_target=target_depth_for_refine_v2_brpo,
+        source_map=target_depth_source_map_v2_brpo,
+        depth_target_rule='reuse target_depth_for_refine_v2_brpo and target_depth_source_map_v2_brpo; paper-style C_m comes from fused-domain correspondence support without branch-native exact verification',
+        strict_scope='paper_cm_only',
+    )
+
+
+def build_paper_brpo_target_observation(
+    support_left: np.ndarray,
+    support_right: np.ndarray,
+    depth_target: np.ndarray,
+    source_map: np.ndarray,
+    valid_mask: np.ndarray,
+    target_confidence: np.ndarray,
+) -> Dict[str, np.ndarray | Dict]:
+    verify = _build_exact_brpo_cm_support_sets(support_left=support_left, support_right=support_right)
+    depth_target = np.asarray(depth_target, dtype=np.float32)
+    source_map = np.asarray(source_map, dtype=np.int16)
+    valid_mask = np.asarray(valid_mask, dtype=np.float32)
+    target_confidence = np.asarray(target_confidence, dtype=np.float32)
+    confidence = verify['confidence'].astype(np.float32)
+
+    summary = {
+        'valid_ratio': float(valid_mask.mean()),
+        'cm_nonzero_ratio': float((confidence > 0).mean()),
+        'cm_mean_positive': float(confidence[confidence > 0].mean()) if (confidence > 0).any() else 0.0,
+        'cm_both_ratio': float(verify['verify_both'].mean()),
+        'cm_single_ratio': float(verify['verify_xor'].mean()),
+        'depth_target_filled_ratio': float((depth_target > 1e-6).mean()),
+        'avg_target_confidence': float(target_confidence[valid_mask > 0].mean()) if (valid_mask > 0).any() else 0.0,
+        'source_left_ratio': float((source_map == SOURCE_LEFT).mean()),
+        'source_right_ratio': float((source_map == SOURCE_RIGHT).mean()),
+        'source_both_ratio': float((source_map == SOURCE_BOTH_WEIGHTED).mean()),
+        'policy': {
+            'version': 'paper_brpo_target_v1',
+            'confidence_rule': 'strict BRPO-style C_m from fused pseudo-frame correspondence support sets only: both->1.0 xor->0.5 none->0.0',
+            'depth_target_rule': 'light geometry-only bidirectional projected depth target; no RGB gating; no render-depth fallback',
+            'strict_brpo_scope': 'cm_and_target_decoupled',
+            'target_confidence_same_source': True,
+            'target_confidence_depth_only': True,
+        },
+    }
+
+    return {
+        'pseudo_depth_target_paper_brpo_target_v1': depth_target.astype(np.float32),
+        'pseudo_confidence_paper_brpo_target_v1': confidence.astype(np.float32),
+        'pseudo_source_map_paper_brpo_target_v1': source_map.astype(np.int16),
+        'pseudo_valid_mask_paper_brpo_target_v1': valid_mask.astype(np.float32),
+        'pseudo_target_confidence_paper_brpo_target_v1': target_confidence.astype(np.float32),
+        'pseudo_verify_left_paper_brpo_target_v1': verify['support_left'].astype(np.float32),
+        'pseudo_verify_right_paper_brpo_target_v1': verify['support_right'].astype(np.float32),
+        'pseudo_verify_both_paper_brpo_target_v1': verify['verify_both'].astype(np.float32),
+        'pseudo_verify_xor_paper_brpo_target_v1': verify['verify_xor'].astype(np.float32),
+        'pseudo_verify_union_paper_brpo_target_v1': verify['verify_union'].astype(np.float32),
+        'summary': summary,
+    }
+
+
 def build_exact_brpo_cm_hybrid_target_observation(
     support_left: np.ndarray,
     support_right: np.ndarray,
@@ -670,6 +738,9 @@ def _write_basic_observation_outputs(frame_out: Path, result: Dict, meta: Dict, 
     np.save(diag_dir / f'pseudo_verify_both_{prefix}.npy', result[f'pseudo_verify_both_{prefix}'])
     np.save(diag_dir / f'pseudo_verify_xor_{prefix}.npy', result[f'pseudo_verify_xor_{prefix}'])
     np.save(diag_dir / f'pseudo_verify_union_{prefix}.npy', result[f'pseudo_verify_union_{prefix}'])
+    target_conf_key = f'pseudo_target_confidence_{prefix}'
+    if target_conf_key in result:
+        np.save(frame_out / f'{target_conf_key}.npy', result[target_conf_key])
 
     _save_float_png(result[f'pseudo_depth_target_{prefix}'], frame_out / f'pseudo_depth_target_{prefix}.png')
     _save_float_png(result[f'pseudo_confidence_{prefix}'], frame_out / f'pseudo_confidence_{prefix}.png', vmax=1.0)
@@ -680,6 +751,8 @@ def _write_basic_observation_outputs(frame_out: Path, result: Dict, meta: Dict, 
     _save_mask_png(result[f'pseudo_verify_both_{prefix}'], diag_dir / f'pseudo_verify_both_{prefix}.png')
     _save_mask_png(result[f'pseudo_verify_xor_{prefix}'], diag_dir / f'pseudo_verify_xor_{prefix}.png')
     _save_mask_png(result[f'pseudo_verify_union_{prefix}'], diag_dir / f'pseudo_verify_union_{prefix}.png')
+    if target_conf_key in result:
+        _save_float_png(result[target_conf_key], diag_dir / f'{target_conf_key}.png', vmax=1.0)
 
     with open(frame_out / meta_filename, 'w', encoding='utf-8') as f:
         json.dump(meta, f, indent=2)
@@ -687,6 +760,14 @@ def _write_basic_observation_outputs(frame_out: Path, result: Dict, meta: Dict, 
 
 def write_exact_brpo_cm_old_target_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
     _write_basic_observation_outputs(frame_out, result, meta, 'exact_brpo_cm_old_target_v1', 'exact_brpo_cm_old_target_meta_v1.json')
+
+
+def write_paper_brpo_cm_old_target_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
+    _write_basic_observation_outputs(frame_out, result, meta, 'paper_brpo_cm_old_target_v1', 'paper_brpo_cm_old_target_meta_v1.json')
+
+
+def write_paper_brpo_target_observation_outputs(frame_out: Path, result: Dict, meta: Dict):
+    _write_basic_observation_outputs(frame_out, result, meta, 'paper_brpo_target_v1', 'paper_brpo_target_meta_v1.json')
 
 
 def write_exact_brpo_cm_hybrid_target_observation_outputs(frame_out: Path, result: Dict, meta: Dict):

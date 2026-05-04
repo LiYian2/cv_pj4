@@ -472,6 +472,8 @@ def build_stageA_loss_exact_shared_cm(
             "exact_shared_cm_v1": True,
             "no_render_fallback": True,
             "rgb_depth_share_cm": True,
+            "use_valid_mask": bool(valid_mask is not None),
+            "use_target_confidence": bool(target_confidence is not None),
             "lambda_depth": float(lambda_depth),
             "effective_mask_mean": float(effective_mask.mean().item()),
             "effective_mask_nonzero_ratio": float((effective_mask > 0).float().mean().item()),
@@ -486,6 +488,118 @@ def build_stageA_loss_exact_shared_cm(
             "l_abs_pose": l_abs_pose,
             "l_exp": l_exp,
             "comps": comps,
+        }
+    return total, stats
+
+
+def build_stageA_loss_paper_brpo_split(
+    render_rgb,
+    render_depth,
+    target_rgb,
+    target_depth,
+    confidence_mask,  # RGB-side paper C_m
+    viewpoint,
+    beta_rgb: float,
+    lambda_pose: float,
+    lambda_exp: float,
+    trans_weight: float,
+    lambda_depth: float = 1.0,
+    use_depth: bool = True,
+    lambda_abs_pose: float = 0.0,
+    lambda_abs_t: float = 0.0,
+    lambda_abs_r: float = 0.0,
+    abs_pose_robust: str = "charbonnier",
+    scene_scale: float = 1.0,
+    return_terms: bool = False,
+    depth_confidence=None,  # depth-only optional weighting; never gates RGB
+    depth_valid_mask=None,  # optional depth-valid gate for unlocked diagnostics
+    depth_use_rgb_cm: bool = True,
+):
+    """Paper-realigned split contract.
+
+    RGB uses discrete C_m only.
+    Depth uses the same C_m, optionally reweighted by a depth-only confidence map.
+    Depth-side weighting must not flow back to RGB.
+    """
+    device = render_rgb.device
+    rgb_mask = to_torch(confidence_mask, device=device)
+    if depth_use_rgb_cm:
+        depth_mask = rgb_mask
+    else:
+        if depth_valid_mask is None:
+            depth_mask = torch.ones_like(rgb_mask)
+        else:
+            depth_mask = (to_torch(depth_valid_mask, device=device) > 0.5).float()
+    if depth_confidence is not None:
+        depth_mask = depth_mask * to_torch(depth_confidence, device=device)
+
+    l_rgb = masked_rgb_loss(render_rgb, target_rgb, rgb_mask, viewpoint)
+
+    if use_depth:
+        l_depth = masked_depth_loss(render_depth, target_depth, depth_mask)
+    else:
+        l_depth = torch.zeros((), device=device)
+
+    l_pose = pose_reg_loss(viewpoint, trans_weight)
+
+    if float(lambda_abs_t) != 0.0 or float(lambda_abs_r) != 0.0:
+        l_abs_pose, l_abs_t, l_abs_r, comps = absolute_pose_prior_loss_scaled(
+            viewpoint=viewpoint,
+            scene_scale=scene_scale,
+            lambda_abs_t=lambda_abs_t,
+            lambda_abs_r=lambda_abs_r,
+            robust_type=abs_pose_robust,
+        )
+    else:
+        legacy = absolute_pose_prior_loss(viewpoint)
+        l_abs_pose = float(lambda_abs_pose) * legacy
+        l_abs_t = l_abs_pose
+        l_abs_r = torch.zeros_like(l_abs_t)
+        comps = compute_abs_pose_components(viewpoint, scene_scale)
+
+    l_exp = exposure_reg_loss(viewpoint)
+    total = (
+        float(beta_rgb) * l_rgb
+        + float(lambda_depth) * l_depth
+        + float(lambda_pose) * l_pose
+        + l_abs_pose
+        + float(lambda_exp) * l_exp
+    )
+
+    stats = _build_stats_dict(
+        l_rgb=l_rgb,
+        l_depth=l_depth,
+        l_depth_seed=l_depth,
+        l_depth_dense=torch.zeros_like(l_depth),
+        l_depth_fallback=torch.zeros_like(l_depth),
+        l_pose=l_pose,
+        l_abs_pose=l_abs_pose,
+        l_abs_t=l_abs_t,
+        l_abs_r=l_abs_r,
+        l_exp=l_exp,
+        total=total,
+        comps=comps,
+        extra_stats={
+            'paper_brpo_split_v1': True,
+            'rgb_uses_cm_only': True,
+            'depth_uses_cm_only': bool(depth_confidence is None),
+            'depth_uses_target_confidence': bool(depth_confidence is not None),
+            'lambda_depth': float(lambda_depth),
+            'rgb_mask_mean': float(rgb_mask.mean().item()),
+            'rgb_mask_nonzero_ratio': float((rgb_mask > 0).float().mean().item()),
+            'depth_mask_mean': float(depth_mask.mean().item()),
+            'depth_mask_nonzero_ratio': float((depth_mask > 0).float().mean().item()),
+        }
+    )
+
+    if return_terms:
+        return total, stats, {
+            'l_rgb': l_rgb,
+            'l_depth': l_depth,
+            'l_pose': l_pose,
+            'l_abs_pose': l_abs_pose,
+            'l_exp': l_exp,
+            'comps': comps,
         }
     return total, stats
 
