@@ -69,6 +69,9 @@ def build_runtime_pseudo_record_bundle(
         target_depth_path=str(record_frame_out / "target_depth_runtime.npy"),
         confidence_path=str(record_frame_out / "confidence_mask_runtime.npy"),
         observation_meta_path=str(signal_bundle.signal_frame_out / "exact_brpo_upstream_target_observation_meta_v1.json"),
+        # Phase 2 fix: pass reference frame IDs
+        left_ref_frame_id=int(slot.left_ref_frame_id),
+        right_ref_frame_id=int(slot.right_ref_frame_id),
     )
     record_meta = {
         "frame_id": int(slot.frame_id),

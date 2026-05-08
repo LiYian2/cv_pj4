@@ -381,6 +381,14 @@ def load_pseudo_records(run_root: Path) -> List[PseudoRecord]:
 
 
 def load_difix_model(model_name: Optional[str], model_path: Optional[str], timestep: int):
+    import torch
+    import os
+    # In multiprocessing spawn child, CUDA_VISIBLE_DEVICES remaps GPU indices.
+    # If CUDA_VISIBLE_DEVICES=1, then cuda:0 in this process maps to physical GPU 1.
+    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
+    if cuda_visible is not None:
+        # Force cuda:0 to be the visible GPU (remapped by CUDA_VISIBLE_DEVICES)
+        torch.cuda.set_device(0)
     if model_name and not model_path:
         from diffusers import DiffusionPipeline
         custom_pipeline = "/home/bzhang512/CV_Project/third_party/Difix3D/src/pipeline_difix.py"
@@ -389,7 +397,19 @@ def load_difix_model(model_name: Optional[str], model_path: Optional[str], times
             custom_pipeline=custom_pipeline,
             trust_remote_code=True,
         )
-        pipe = pipe.to("cuda")
+        pipe = pipe.to(torch.device("cuda"))
+        # Make Difix VAE monkey-patched forward methods pickle-safe for multiprocessing spawn.
+        # Bound methods are reconstructed by name during unpickling, so expose stable aliases
+        # on the encoder/decoder instances themselves before this pipeline is sent to child processes.
+        vae = getattr(pipe, "vae", None)
+        encoder = getattr(vae, "encoder", None)
+        decoder = getattr(vae, "decoder", None)
+        if encoder is not None and hasattr(encoder, "forward") and not hasattr(encoder, "my_vae_encoder_fwd"):
+            if getattr(getattr(encoder, "forward", None), "__name__", "") == "my_vae_encoder_fwd":
+                encoder.my_vae_encoder_fwd = encoder.forward
+        if decoder is not None and hasattr(decoder, "forward") and not hasattr(decoder, "my_vae_decoder_fwd"):
+            if getattr(getattr(decoder, "forward", None), "__name__", "") == "my_vae_decoder_fwd":
+                decoder.my_vae_decoder_fwd = decoder.forward
         return {"kind": "hf_pipeline", "obj": pipe, "timestep": timestep}
     difix_src = Path("/home/bzhang512/CV_Project/third_party/Difix3D/src")
     if str(difix_src) not in sys.path:

@@ -7,6 +7,8 @@ from .pseudo_camera_state import (
     current_w2c,
     current_c2w,
     refresh_viewpoint_transforms_,
+    apply_pose_delta_before_render_,  # CRITICAL: Apply pose delta before render for gradient flow
+    restore_base_pose_after_render_,
     apply_pose_residual_,
     load_exported_view_states,
     apply_loaded_view_state_,
@@ -17,6 +19,7 @@ from .pseudo_loss_v2 import (
     build_stageA_loss,
     build_stageA_loss_source_aware,
     build_stageA_loss_exact_shared_cm,
+    scale_reg_loss,  # Scale regularization loss
 )
 from .pseudo_refine_scheduler import (
     StageAConfig,
@@ -40,6 +43,12 @@ from .backend_pseudo_loss import (
     BackendPseudoLossConfig,
     compute_backend_pseudo_exact_loss,
 )
+from .pose_gauss_newton import (
+    compute_pose_jacobian_fd,
+    gauss_newton_pose_update,
+    gauss_newton_batch_update,
+    GaussNewtonPoseOptimizer,
+)
 
 __all__ = [
     'ExportedPseudoCameraState',
@@ -48,6 +57,8 @@ __all__ = [
     'current_w2c',
     'current_c2w',
     'refresh_viewpoint_transforms_',
+    'apply_pose_delta_before_render_',  # CRITICAL: Apply pose delta before render
+    'restore_base_pose_after_render_',
     'apply_pose_residual_',
     'load_exported_view_states',
     'apply_loaded_view_state_',
@@ -56,6 +67,7 @@ __all__ = [
     'build_stageA_loss',
     'build_stageA_loss_source_aware',
     'build_stageA_loss_exact_shared_cm',
+    'scale_reg_loss',  # Scale regularization
     'StageAConfig',
     'StageA5Config',
     'build_stageA_optimizer',
@@ -70,4 +82,9 @@ __all__ = [
     'normalize_stageA_pseudo_views',
     'BackendPseudoLossConfig',
     'compute_backend_pseudo_exact_loss',
+    # Gauss-Newton pose optimization
+    'compute_pose_jacobian_fd',
+    'gauss_newton_pose_update',
+    'gauss_newton_batch_update',
+    'GaussNewtonPoseOptimizer',
 ]

@@ -1,313 +1,90 @@
-# STATUS.md - Part3 Stage1 当前状态
+# STATUS.md - Part3 BRPO Online Mapping 当前状态
 
-> 更新时间：2026-05-04 21:30 (Asia/Shanghai)
-
-> **书写规范**：
-> 1. 只记录"现在"，不记录历史过程（过程在 CHANGELOG）
-> 2. 覆盖式更新，直接修改对应版块，不追加
-> 3. 不写实验数据（数值在 CHANGELOG / compare json），只写结构/状态/判断
-> 4. 状态用 ✅ ⚠️ ❌ 标记，"已完成"不重复列出
-> 5. 更新后修改文档顶部时间戳
+> 更新时间：2026-05-06 16:30 (Asia/Shanghai)
 
 ---
 
-## 0. S3PO online mapping 状态（2026-05-04）
+## 0. 最新修改（2026-05-06）
 
-当前 refine / pseudo optimization 的工程主线已经进一步从 **post-after_opt backend continuation** 转到 **S3PO backend keyframe path 内的 online mapping integration**。
+### 0.1 KF0 Pose 跳过逻辑已移除
 
-- ✅ Phase 1 已完成 runtime builder 提纯：新增 `pseudo_branch/integration/runtime_slot_selector.py`、`runtime_exact_backend.py`、`runtime_signal_builder.py`、`runtime_pseudo_builder.py`、`runtime_debug_export.py`。exact backend / exact-upstream signal / backend pseudo record 现在都可以走 in-memory runtime path，不再依赖 `stageA_history.json`。
-- ✅ Phase 1 parity smoke 已通过：基于历史 `sparse_backend/frame_0023 + sparse_signal/frame_0023` reference，runtime rebuild 后 `pseudo_depth_target / pseudo_confidence / pseudo_source_map / pseudo_valid_mask / pseudo_target_confidence` 五个 exact-upstream核心数组全部 bitwise 一致。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase12/phase1_parity/`。
-- ✅ Phase 2 已接入 backend keyframe event：`third_party/S3PO-GS/utils/slam_frontend.py` 新增 runtime camera-state cache 并随 keyframe message 传给 backend；`third_party/S3PO-GS/utils/slam_backend.py` 已在 keyframe path 内加入 pseudo slot activation + runtime bundle/debug export。
-- ✅ Phase 2 backend trigger smoke 已通过：在 `current_window=[0,34]` 的 keyframe 事件下，系统自动激活 newly-closed gap midpoint pseudo slot `frame_id=17`，并成功写出 `exact_backend_v1/`、`signal_v2/`、`runtime_pseudo_record/` 与 `event_summary.json`。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase12/phase2_backend_smoke/event_kf_0034/`。
-- ✅ no-op shell safety 已满足当前 Phase 2 目标：本轮 `enable_pseudo_gradient=false`、`pseudo_map_iters=0`，Gaussian `xyz` 在 smoke 中 `max_abs_delta=0.0`，说明新 keyframe-shell 本身没有偷偷改坏 baseline scene。
-- ✅ Phase 3 第一版 pseudo-aware mapping block 已落地：`third_party/S3PO-GS/utils/slam_backend_brpo.py` 现在同时支持 `run_brpo_pseudo_continuation(...)` 与 `run_brpo_pseudo_mapping(...)` 两个入口；`utils/slam_backend.py` 已在 keyframe path 中把 runtime pseudo record 真正接进 mapping iterations，并把 per-event `brpo_pseudo_history.json` / `pseudo_mapping_summary.json` 回写到对应 debug root。
-- ✅ Phase 3 single-gap online pseudo smoke 已通过：在 `current_window=[0,34]`、slot=`frame_id=17`、`pseudo_map_iters=2`、`pseudo_scene_mask_mode=both_only` 的 direct backend harness 下，pseudo-aware mapping 真正执行成功，history 同时记录了 `loss_real / loss_pseudo / loss_pseudo_pose / loss_pseudo_scene`，并产生 `gaussian_xyz_max_abs_delta≈0.01921`。产物根：`/data/bzhang512/tmp/brpo_online_mapping_phase3_smoke/event_kf_0034/`。
-- ⚠️ 当前已完成的是 **Phase 3 conservative single-gap landing**，还不是代表性 full online compare：这一步已经证明 pseudo supervision 不再只是 shell/build artifact，而是确实进入了 backend mapping loop；下一步应继续做更长、更代表性的 online branch compare，而不是回到 standalone/continuation 修补。
-- ❌ `run_pseudo_refinement_v2.py` 与 `after_opt continuation` 不再是未来主 refine 引擎；它们现在只保留 reference / replay baseline / control 身份。
+**文件**：`third_party/S3PO-GS/utils/slam_backend.py`
+**修改**：删除第 631-632 行的 `if viewpoint.uid == 0: continue`
+**原因**：DL3DV 的 `cameras.json` 来自 COLMAP 重建，不是真实 GT，KF0 也需要优化
 
----
+**备份**：`slam_backend.py.bak_kf0_skip`
 
-## 1. 概览
+### 0.2 D5 实验配置已生成
 
-当前固定参照线仍是：**RGB-only v2 + gated_rgb0192 + post40_lr03_120**（canonical StageB protocol）。
+**文件**：`/home/bzhang512/CV_Project/part3_BRPO/configs/d5_online_mapping_fix.yaml`
 
-A/T/B 主线现在更明确了：
-- **exact_brpo_cm_old_target_v1 ≈ old A1** 仍成立：strict BRPO `C_m` 已基本对齐，M~ 不再是主瓶颈
-- **T4 formal compare 已完成并给出新 winner**：`exact_brpo_upstream_target_v1 + exact_shared_cm_v1` 在 fixed clean G~ / fixed T1 protocol 下赢过 `old A1`、`exact_brpo_cm_old_target_v1`、`exact_brpo_full_target_v1`
-- **old A1** 从 observation / target 主线降级为历史强 control；**new T1**（`joint_topology_mode=brpo_joint_v1`）仍是当前 topology 主线
-- **exact_brpo_full_target_v1** 的 negative result 仍有效：只做 consumer-side exact target contract 不够，真正增益来自更 upstream 的 verifier backend / projected-depth field
-- **A1 verify proxy（`brpo_verify_v1`）与 A1 BRPO-style v1 / v2** 都已完成其 probe 职责，不再是当前落地主线
-- **历史 `brpo_direct_v1` 已被重新定性为 hybrid 分支**：它应被理解为 `hybrid_brpo_cm_geo_v1`，不是 strict BRPO
-- **G~ clean compare verdict 不变**：direct current-step 仅小幅正向，legacy delayed opacity 明确负向；G~ 当前仍是“已完成语义对齐、但收益有限的 side branch”
-- **StageA.5** 继续只保留 optional warmup / control 地位
+**关键配置**：
+| 参数 | D5 值 | 说明 |
+|---|---|---|
+| placement_mode | quartile | 3 pseudo per gap |
+| update_real_pose | true | 允许真实 KF pose 更新 |
+| use_gauss_newton | true | 启用 GN |
+| lambda_scale | 0.1 | Scale 正则化 |
+| lambda_pseudo | 2.0 | 增强 pseudo 权重 |
+| dense3d_conf_quantile | 0.15 | 更宽松的 pseudo 选择 |
 
+### 0.3 待解决问题：22:1 Loss 比例失衡
 
-### 1.3 T~ Alignment 状态
+**现状**：
+| | 数量 | 像素覆盖 | 总监督 |
+|---|---|---|---|
+| Real | 10 frames | 100% | 10 单位 |
+| Pseudo | 3 frames | ~15% | 0.45 单位 |
 
-| Phase | 目标 | 状态 | 验收 |
-|-------|------|------|------|
-| T0 | 锁定 compare arms | ✅ 完成 | `exact_brpo_cm_old_target_v1` 作为 semantics-clean M~/T1 control |
-| T1 | exact verifier/backend bundle + branch-native input | ✅ 完成 | `exact_backend_v1/` 导出 + provenance/hit_count/occlusion_reason |
-| T2 | exact target field builder | ✅ 完成 | `exact_brpo_upstream_target_v1` + `no_render_fallback=true` |
-| T3 | exact loss contract | ✅ 完成 | `build_stageA_loss_exact_shared_cm` + 训练端集成 |
-| T4 | formal compare | ✅ 完成 | `exact_brpo_upstream_target_v1` 在 fixed clean G~ / fixed T1 compare 中赢过所有 control arms |
+**已执行**：
+- `lambda_pseudo = 2.0` ✓
+- `placement_mode = quartile` (3 pseudo) ✓
 
-**Phase T4 关键结论**：
-- compare root：`/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260422_t4_exact_upstream_compare_e1`
-- `oldA1_newT1_summary_only` arm 最终确认使用 `signal_v2_root=/data2/bzhang512/CV_Project/output/part3_BRPO/experiments/20260420_a1_full_brpo_target_signal_full`
-- `exactBrpoUpstreamTarget_v1_newT1_summary_only` 明确高于 `oldA1_newT1_summary_only`、`exactBrpoCm_oldTarget_v1_newT1_summary_only`、`exactBrpoFullTarget_v1_newT1_summary_only`
-- 当前 T~ 主线应更新为：`exact_brpo_upstream_target_v1 + exact_shared_cm_v1`
-
-一句话判断：**G~ clean compare 之后，真正把 strict BRPO 主线拉成正向 winner 的不是继续 consumer-side 微调，而是 T~ upstream exact backend / projected-depth / target field 的整体对齐。当前 standalone 最优组合已经更新为 `exact M~ + exact upstream T~ + clean summary G~ + T1`。**
-
-
-
-### 1.1 数据集 case 状态
-
-| 数据集 | 当前状态 | 当前判断 |
-|------|------|------|
-| Re10k-1 | ✅ A1/T1 收敛，✅ exact BRPO-C_m compare 已完成，✅ exact BRPO target-side compare 已完成，✅ G~ clean compare 已完成，✅ T4 exact-upstream formal compare 已完成 | 当前 standalone 最优组合已更新为 `exact M~ + exact upstream T~ + clean summary G~ + T1`；`exact_brpo_cm_old_target_v1 ≈ old A1` 继续成立，而 `exact_brpo_upstream_target_v1` 在 fixed clean G~ / fixed T1 compare 下已赢过 `old A1`、`exact_brpo_cm_old_target_v1`、`exact_brpo_full_target_v1`，说明 decisive gain 来自更 upstream 的 verifier backend / projected-depth / target field 对齐 |
-| DL3DV-2 | ✅ canonical baseline + repair A 已打通，✅ exact-upstream control 已跑通，✅ paper-realign compare branch 已完成首轮 full9 compare | 当前 standalone winner 仍是 exact-upstream control；`paper_cm_only / paper_brpo_target_v1 / paper_brpo_split_*` 已经是可复现实验分支，但尚未升为主线 |
+**待讨论**：
+- 方案 c：分离 pose/scene loss（pose loss 不受 mask 限制）
 
 ---
 
-## 2. 数据结构
+## 1. Config 传递 Bug（已修复 2026-05-05）
 
-### 2.1 Internal cache（源数据）
-
-```text
-<run_root>/internal_eval_cache/
-├── manifest.json
-├── camera_states.json
-├── before_opt/
-│   ├── point_cloud/point_cloud.ply
-│   ├── render_rgb/ / render_depth_npy/
-├── after_opt/
-│   ├── point_cloud/point_cloud.ply
-│   ├── render_rgb/ / render_depth_npy/
-```
-
-### 2.2 Pseudo cache（训练输入）
-
-```text
-internal_prepare/<prepare_key>/pseudo_cache/
-├── manifest.json
-└── samples/<frame_id>/
-    ├── render_rgb.png / render_depth.npy
-    ├── target_rgb_fused.png
-    ├── train_confidence_mask_brpo_*.npy
-    ├── target_depth_for_refine.npy
-    ├── target_depth_for_refine_v2.npy
-    ├── projected_depth_left/right.npy
-    └── signal_v2/（独立路径）
-```
-
-### 2.3 Signal v2（当前并存六条 A1 语义）
-
-```text
-signal_v2/frame_<frame_id>/
-├── raw_rgb_confidence_v2.npy
-├── target_depth_for_refine_v2_brpo.npy
-├── depth_supervision_mask_v2_brpo.npy
-├── joint_confidence_v2.npy
-├── joint_confidence_cont_v2.npy
-├── joint_depth_target_v2.npy
-├── pseudo_depth_target_joint_v1.npy
-├── pseudo_confidence_joint_v1.npy
-├── pseudo_confidence_rgb_joint_v1.npy
-├── pseudo_confidence_depth_joint_v1.npy
-├── pseudo_uncertainty_joint_v1.npy
-├── pseudo_source_map_joint_v1.npy
-├── pseudo_valid_mask_joint_v1.npy
-├── pseudo_confidence_verify_v1.npy
-├── pseudo_valid_mask_verify_v1.npy
-├── pseudo_depth_target_brpo_style_v1.npy
-├── pseudo_confidence_brpo_style_v1.npy
-├── pseudo_source_map_brpo_style_v1.npy
-├── pseudo_valid_mask_brpo_style_v1.npy
-├── pseudo_depth_target_brpo_style_v2.npy
-├── pseudo_confidence_brpo_style_v2.npy
-├── pseudo_source_map_brpo_style_v2.npy
-├── pseudo_valid_mask_brpo_style_v2.npy
-├── pseudo_depth_target_brpo_direct_v1.npy
-├── pseudo_confidence_brpo_direct_v1.npy
-├── pseudo_source_map_brpo_direct_v1.npy
-├── pseudo_valid_mask_brpo_direct_v1.npy
-└── rgb_mask_meta_v2.json / depth_meta_v2_brpo.json / joint_meta_v2.json /
-   joint_observation_meta_v1.json / pseudo_verify_meta_v1.json /
-   brpo_style_observation_meta_v1.json / brpo_style_observation_meta_v2.json /
-   brpo_direct_observation_meta_v1.json
-```
-
-说明：
-- **old A1**：`joint_confidence_v2 + joint_depth_target_v2`
-- **new A1**：`pseudo_*_joint_v1`
-- **verify proxy**：复用 `pseudo_depth_target_joint_v1`，只改 confidence
-- **BRPO-style v1**：`pseudo_confidence_brpo_style_v1 + pseudo_depth_target_brpo_style_v1 + pseudo_source_map_brpo_style_v1`
-- **BRPO-style v2**：`pseudo_confidence_brpo_style_v2 + pseudo_depth_target_brpo_style_v2 + pseudo_source_map_brpo_style_v2`
-- **direct BRPO v1**：`pseudo_confidence_brpo_direct_v1 + pseudo_depth_target_brpo_direct_v1 + pseudo_source_map_brpo_direct_v1`
+**问题**：`_resolve_brpo_online_mapping_cfg()` 遗漏读取关键参数
+**修复**：已在 `slam_backend.py` 中补全参数传递
 
 ---
 
-## 3. Pipeline 状态
+## 2. Gaussians 更新范围
 
-| 阶段 | 状态 | 说明 |
-|------|------|------|
-| Internal cache 导出 | ✅ | before/after PLY + render cache |
-| Same-ply replay | ✅ | 可用于 baseline/refined 比较 |
-| Prepare: select→difix→fusion→verify→pack | ✅ | canonical schema 打通 |
-| StageA: source-aware depth loss | ✅ | 闭环可用 |
-| StageA: abs prior | ✅ | 固定背景 λ_t=3.0, λ_r=0.1 |
-| StageA.5: local gating micro-tune | ⚠️ | 保留，但已降级为可选 warmup / 对照 |
-| StageB: bounded baseline | ✅ | post40_lr03_120 |
-| SPGM: repair A anchor | ✅ | 当前最稳 policy 配置 |
-| SPGM: B1/B2 | ✅ | manager shell + decoupled score + diagnostics 已接通 |
-| B3 旧版：xyz deterministic lr scaling | ❌ | 已降级为 diagnostic probe，不再当主线 |
-| B3 新版：deterministic participation controller | ⚠️ | boolean selector 路径已完成 conservative compare，但当前仍 weak-negative |
-| B3 O0/O1：`deterministic_opacity_participation` | ⚠️ | `participation_score` + opacity attenuation + delayed C1 compare 已完成；当前相对复用 controls 仍微弱负向，暂不进入 O2a/b |
-| A1 旧语义：joint support filter | ✅ | 当前 observation 主线 |
-| A1 新语义：joint observation rewrite | ⚠️ | 已完成并确认优于 control，但在固定 new T1 下仍低于 old A1 |
-| A1 verifier proxy：`brpo_verify_v1` | ❌ | 已完成 compare，当前 negative；保留为已验证过的失败 probe |
-| A1 BRPO-style v1：`brpo_style_v1` | ⚠️ | builder + consumer + compare 已完成；方向正确，但已被更严格的 exact / hybrid 分解分析取代 |
-| A1 BRPO-style v2：`brpo_style_v2` | ⚠️ | continuous quality + stable-blend 版 compare 已完成；现主要保留为 stable-target contract 对照 |
-| A1 hybrid BRPO-C_m 几何门控分支：historical `brpo_direct_v1` / semantic label `hybrid_brpo_cm_geo_v1` | ⚠️ | 已完成 builder + consumer + formal compare；这是 hybrid 分支，不再应被当作 strict BRPO |
-| A1 exact BRPO-C_m + old target：`exact_brpo_cm_old_target_v1` | ✅ | 与 old A1 基本等价，是当前 semantics-clean BRPO `C_m` control |
-| A1 exact BRPO target-side：`exact_brpo_full_target_v1` | ⚠️ | 已完成 exact target-side compare；结论已固化为“仅做 proxy backend 下的 consumer-side exact 化仍不足以赢 old A1” |
-| A1 exact BRPO-C_m + hybrid target：`exact_brpo_cm_hybrid_target_v1` | ⚠️ | 已完成 compare；仍属于 exact-upstream 落地前的过渡 target contract 对照 |
-| A1 exact BRPO-C_m + stable target：`exact_brpo_cm_stable_target_v1` | ⚠️ | 已完成 compare；保留为 stable-target contract 对照 |
-| A1 exact BRPO upstream target：`exact_brpo_upstream_target_v1` | ✅ | T4 formal compare 已完成；在 fixed clean G~ / fixed T1 protocol 下赢过 old A1 / exact-oldtarget / exact-fulltarget，已升为当前 T~ 主线 |
-| A1 paper fused-domain C_m：`paper_cm_only` / `paper_brpo_cm_old_target_v1` | ✅ | fused-domain support-set builder + signal + consumer 已接通，并完成 full9 compare；当前保留为 compare branch |
-| T~ paper depth-only target：`paper_brpo_target_v1` | ✅ | depth-only target producer + observation + target_confidence 已接通，并完成 full9 compare；当前保留为 compare branch |
-| R~ paper split consumer：`paper_brpo_split_v1` / `paper_brpo_split_depthconf_v1` | ✅ | 两个 split loss mode 已落地并完成 full9 compare；当前差异很小，尚未升 mainline |
-| T1：`joint_topology_mode=brpo_joint_v1` | ✅ | topology mode + compare + confirmation 已完成 |
-| T1 orchestration：StageA.5 optional warmup/control | ✅ | 角色已经固化 |
-| A2 geometry-constrained expand | ❌ | 当前 widening 方案不作为主线 |
-| B3 stochastic masking | ❌ | 暂未启动；需等待 deterministic participation 更稳的版本 |
-| G-BRPO universe control | ✅ |  已实现，与 BRPO 论文对齐 |
-| G-BRPO unified score | ✅ |  已实现，公式与 BRPO 论文一致 |
-| G-BRPO stochastic action | ✅ |  已实现，Bernoulli sampling 对齐 |
-| G-BRPO current-step timing | ✅ |  已实现，probe → action → formal render |
-| G-BRPO formal compare | ✅ | clean compare 已完成：`baseline_summary_only` 为 true summary-only control，`direct_brpo_current_step` 为 action-only clean direct BRPO compare；结论是 clean gain 仅小幅正向，legacy delayed opacity 明确负向，详见 `docs/archived/2026-04-experiments/G_BRPO_CLEAN_COMPARE_20260421.md` |
+**S3PO 主循环**：全部 6 个参数
+- `_xyz`, `_features_dc/_rest`, `_opacity`, `_scaling`, `_rotation`
+
+**Pseudo mapping**：
+- densify/prune/opacity_reset 默认关闭
+- 基本属性通过 gradient backward 更新
+- Phase 1 修复后梯度传递完整 ✓
 
 ---
 
-## 4. 当前锁定配置
+## 3. 关键文件
 
-| 类别 | 参数 | 当前值 |
-|------|------|--------|
-| Abs prior | lambda_abs_t / lambda_abs_r | 3.0 / 0.1 |
-| StageB baseline | schedule | post40_lr03_120 |
-| StageB baseline | upstream gate | gated_rgb0192 |
-| StageB baseline | signal pipeline | RGB-only v2 + depth-sidecar（control） |
-| A1 参考主线 | observation semantics | `joint_confidence_v2 + joint_depth_v2` |
-| T1 主线 | topology | `joint_topology_mode=brpo_joint_v1` |
-| 当前默认候选主线 | observation + target + topology | `exact_brpo_upstream_target_v1 + exact_shared_cm_v1 + clean summary G~ + brpo_joint_v1` |
-| Paper-realign compare branch | observation + target + topology | `paper_brpo_target_v1 + paper_brpo_split_{v1,depthconf_v1} + brpo_joint_v1`（已跑 full9 compare，未升主线） |
-| A1/T~ 当前 control | semantics-clean control | `exact_brpo_cm_old_target_v1 + brpo_joint_v1 + clean summary G~` |
-| A1/T~ 历史强基线 | historical control | `old A1 + new T1` |
-| StageA.5 role | orchestration | optional warmup / control |
-| SPGM repair A | keep / eta / weight_floor | (1,1,1) / 0.0 / 0.25 |
-| B3 v1 | manager mode | `deterministic_participation` |
-| B3 v1 | first tested keep | near=1.0 / mid=0.9 / far=0.75 |
-| B3 O1/C1 | manager mode | `deterministic_opacity_participation` |
-| B3 O1/C1 | last tested opacity floors | near=1.0 / mid=1.0 / far=0.9 |
+| 文件 | 用途 |
+|---|---|
+| `configs/d5_online_mapping_fix.yaml` | D5 实验配置 |
+| `third_party/S3PO-GS/utils/slam_backend.py` | KF0 跳过已移除 |
+| `pseudo_branch/refine/pseudo_camera_state.py` | pose delta 应用 |
+| `pseudo_branch/integration/runtime_slot_selector.py` | quartile 模式 |
 
 ---
 
-## 5. 当前判断
+## 4. 下一步
 
-### 5.1 StageA
-- 闭环已修，pose 可更新；StageA-only replay 不是判优指标。
-
-### 5.2 StageB / T1
-- `post40_lr03_120` 仍是固定 protocol。
-- `joint_topology_mode=brpo_joint_v1` 仍是当前稳定 topology 主线。
-
-### 5.3 StageA.5 角色
-- StageA.5 不再是默认主线必经阶段。
-- 当前工程定位仍是：**可选 warmup / 对照 / orchestration anchor**。
-
-### 5.4 A1 当前结论
-- **old A1** 仍可继续作为当前 observation control，但它已经不再是唯一的语义参考点。
-- **exact_brpo_cm_old_target_v1** 与 `old A1` 基本等价（约 `-6.4e-06 PSNR`），因此 strict BRPO-style `C_m` 在当前 fused pseudo-frame proxy 下已经对齐到足够接近 old A1 的水平。
-- **new A1** 已证明不是旧 A1 换壳，但在固定 `new T1` 下当前仍明显低于 old / exact-oldtarget control。
-- **verify proxy** 已完成 formal compare，当前结果比 old A1 和 current new A1 都更差，已经完成它的排错职责。
-- **BRPO-style v1 / v2** 仍然有价值，但现在它们更适合作为中间 builder / stable-target 对照，不再是主对齐入口。
-- **historical `brpo_direct_v1`** 现在应明确写成 hybrid：`hybrid_brpo_cm_geo_v1`。它不是 strict BRPO，因为它把 `C_m` 和 geometry gate 混在了一起。
-
-### 5.5 T~ 当前结论
-- `exact_brpo_full_target_v1` 的 negative result 继续有效：**只做 proxy backend 下的 consumer-side exact 化，不足以赢 old A1**。
-- T4 formal compare 已把结论推进了一步：**`exact_brpo_upstream_target_v1 + exact_shared_cm_v1` 在 fixed clean G~ / fixed T1 protocol 下赢过 `old A1`、`exact_brpo_cm_old_target_v1`、`exact_brpo_full_target_v1`。**
-- 这说明 strict BRPO target-side 的决定性收益不在 consumer-side 微调，而在更 upstream 的 verifier backend / projected-depth field / target field 整体对齐。
-- 因此当前 T~ 主线应从 “old T~ / exact-oldtarget control” 正式切换到 **exact upstream T~**；old A1 与 exact-oldtarget 继续只保留为 control。
-
-### 5.6 当前对 target-side 的更新判断
-- 当前证据已经支持把 `exact_brpo_upstream_target_v1` 升为新的 T~ control / mainline。
-- 更准确的说法是：**M~ 已基本对齐；proxy-backend exact target-side 证明了只改 consumer 不够；exact upstream compare 则证明把 verifier/backend/target field 整体拉齐之后，strict BRPO 路线可以转正。**
-- 因此 standalone 线上的下一步不应再继续做同口径的小型 T~ compare，而应冻结这套 winner，转向后续集成与复用。
-
-
-### 5.7 SPGM / G~
-- G~ clean compare 已经修干净：`summary_only` 现在是真正的 no-action control；direct BRPO arm 不再混 legacy grad-weight policy；current-step history 也是一 iter 一条记录。
-- clean compare 结果是：`direct_brpo_current_step` 相对 clean `baseline_summary_only` 只保留**小幅正向**；`legacy_delayed_opacity` 相对 clean baseline 为**明确负向**。
-- 因此当前 G~ 的工程定位应固定为：**语义对齐已完成，但收益有限；可以保留为 side branch，不再当主瓶颈突破口。**
-
-### 5.8 是否继续做完全 BRPO 版本
-- **G~ 方向本身不用回退，但也不值得继续优先扩。**
-- standalone 线上，当前更合理的动作不是继续在 G~ 或同口径 T~ compare 上打转，而是先**冻结 `exact M~ + exact upstream T~ + clean summary G~ + T1` 这套 winner**。
-- 后续大工程的主问题会从“standalone 是否能赢”切换成“这套 winner 怎样以 backend-only 方式集成回 S3PO，而不污染 tracking / frontend”。
-
-### 5.9 DL3DV case
-- 暂维持 canonical baseline + repair A 现状；不在 Re10k 的 A1/B3 还未稳定前贸然平移。
+| 优先级 | 任务 | 状态 |
+|-------|------|------|
+| P0 | 运行 D5 实验 | ❌ 待执行 |
+| P1 | 验证 KF0 pose 优化效果 | ❌ 待验证 |
+| P2 | 评估 22:1 比例改善 | ❌ 待评估 |
 
 ---
 
-## 6. 待办
+## 5. 一句话结论
 
-### 当前进行中 ⚠️
-- A1 / T~：冻结 `exact_brpo_upstream_target_v1 + exact_shared_cm_v1 + clean summary G~ + brpo_joint_v1` 这套 standalone winner；`exact_brpo_cm_old_target_v1` 与 `old A1` 继续仅作为 semantics-clean / historical controls。
-- G~：clean compare 定位不变：direct current-step 只有小幅正向，legacy delayed opacity 明确负向；G~ 维持 side branch，不再继续优先做 O2a/b / aggressive 调参。
-
-### 下一阶段 ⏳
-- M~ matching upgrade planning 已落地：`docs/archived/2026-04-m3d-experiments/BRPO_MASK_DENSE_2D_MATCHING_PLAN_20260424.md` 与 `docs/archived/2026-04-m3d-experiments/BRPO_MASK_MAST3R_3D_MATCHING_PLAN_20260424.md`。当前口径仍是 dense2d 作为低风险 control / side option，MASt3R 3D matching 作为更值得优先落地的主线候选；两条都保持 exact BRPO 离散 `C_m ∈ {1.0, 0.5, 0.0}`。
-- M~ 3D 路线的长程 `StageB120 + replay` compare 与后续 structural forensic 已完成，详见 `docs/archived/2026-04-m3d-experiments/M3D_STAGEB120_REPLAY_COMPARE_20260424.md` 与 `docs/archived/2026-04-m3d-experiments/M3D_STRUCTURAL_FORENSICS_20260424.md`。结论已进一步收敛：虽然 dense3d 在 mechanism 层显著增密，且 `q0.70` 仍是 dense 内部最优候选，但真正的 replay winner 仍然是 sparse；更关键的是，旧 live M~ 的低 coverage 确实来自 sparse 2D MASt3R reciprocal matching，而 dense3d 接通后 exact-upstream target depth / target confidence / source map 也确实同步变化，不存在“只改 C_m、target depth 没同步”的简单接线问题。
-- 当前更像是 supervision composition 问题：以 q0.70 为例，新增 valid 区域里约 `64.1%` 是 single-branch、仅约 `35.9%` 是 both-branch；而 `exact_shared_cm_v1` 真正送进 loss 的 effective mask（`C_m × valid_mask × target_confidence`）在 valid 区域上的均值也低于 sparse（q0.70 `0.403` vs sparse `0.480`）。这与 StageB120 中 dense arm 更高的 pseudo/depth loss 和更差 replay 一致。
-- 已完成 consumer-side `cm_only` ablation（`docs/archived/2026-04-m3d-experiments/M3D_CM_ONLY_STAGEB120_REPLAY_COMPARE_20260424.md`）：把 `exact_shared_cm_v1` 改成“只用裸 `C_m`，不乘 `valid_mask` / `target_confidence`”后，无论 sparse 还是 q070 都更差。Replay 变化为 sparse `-0.0027 PSNR`、q070 `-0.0092 PSNR`，且 RGB/depth/pseudo loss 全部上升。由于当前 live exact-upstream 里 `C_m>0` 与 `valid_mask>0` 实际重合，这次退化基本可以归因于去掉 `target_confidence` 后把监督过度放大。
-- 已完成 consumer-side `rgb_only` ablation（`docs/archived/2026-04-m3d-experiments/M3D_RGB_ONLY_STAGEB120_REPLAY_COMPARE_20260424.md`）：在 fixed-route 下直接加 `--stageA_disable_depth`，完全移除 pseudo depth loss 后，sparse 明显退化（PSNR `-0.0792`），q070 仅有极小表面变化（PSNR `-0.0015`，SSIM/LPIPS 略好）但仍明显落后 sparse。这说明 dense3d 的主要 replay gap 不能简单归因于 “depth loss 本身质量差”。
-- 已完成 `docs/REFINE_FORENSICS_MASTER_20260425.md` 六步 refine forensic，并已把 dense / M3D 执行长文统一归档到 `docs/archived/2026-04-m3d-experiments/`。当前最关键的新结论是：问题不能再概括成“coverage 太低”本身。旧 live M~ 的低 coverage 的确来自 `FlowMatcher + fast_reciprocal_NNs(..., subsample_or_initxy1=8)` 这条 sparse 2D reciprocal matching 路径，天然只有约 `1.5%–2%` 支持；但在 stronger pseudo 路线下，真正让 replay 坍塌的是更大的 target mismatch、更高的 single-branch supervision 占比、以及 joint pseudo pose + Gaussian 反馈下的渐进式失稳，而不是“只要把 coverage 做大就会自动更好”。
-- refine forensic 还进一步锁定：坏 route 在 `iter020` 前并不差，真正退化从 `20 -> 40` 之后开始；`pose_only` 与 `gaussians_only` 都不会单独复现这一下降，说明主问题是 joint coupling。与此同时，real-train RGB loss 甚至可以继续变好但 replay 变坏，说明当前 real anchor 太弱，不能单靠现有 real branch 拒绝 harmful pseudo-driven updates。
-- 已完成 `dense3d q070 + 4real+2pseudo` follow-up（`docs/archived/2026-04-experiments/Q070_4REAL2PSEUDO_COMPARE_20260427.md`）。结论很关键：单纯把 StageB minibatch 从 `2 real + 4 pseudo` 改成 `4 real + 2 pseudo`，并不能救回当前 exact dense route；`current_4r2p_exact` 与 `rgb_only_4r2p_exact` 反而都比旧 `2+4` q070 controls 更差。真正强阳性的 arm 是 `allones_rgb_only_4r2p`（`24.1126 PSNR`），它甚至超过 sparse current control（`+0.1081 PSNR`），但仍略低于 old best（`-0.1515 PSNR`）。这说明 batch ratio 只是次级因素，主问题仍然是当前 exact mask/depth pseudo contract 本身。
-- 继续补做了 `dense3d q070 + continuous-confidence + RGB-only` follow-up（`docs/archived/2026-04-experiments/Q070_CONTCONF_RGB_ONLY_4R2P_20260427.md`）：把 dense q0.70 exact signal 的离散 `pseudo_confidence_exact...` 直接替换成连续 `pseudo_target_confidence_exact...`，并关闭 pseudo depth。结果 `contconf_rgb_only_4r2p = 23.5406 PSNR`，只比 `rgb_only_4r2p_exact` 高 `+0.0210 PSNR`，但比 `allones_rgb_only_4r2p` 低 `-0.5720 PSNR`。这与更早的 continuous/hybrid 历史记录一致：continuous confidence 本身不是当前主修复方向。
-- 已完成 `full8 dense3d q070 active mask compare`（`20260504_full8_dense3d_q070_active_compare`）：在 StageB120 下对比 sparse 与 dense3d q0.70 的 replay 与 active mask 统计。结果：sparse `24.0045 / 0.87177 / 0.08247`；dense3d q0.70 `23.9133 / 0.86923 / 0.08411`。Sparse 仍胜 `+0.0912 PSNR`。Active mask 统计确认：sparse mean `0.01523`（~1.5% 覆盖），dense3d mean `0.18760`（~18.8% 覆盖），dense3d 相对 sparse 新增 `+0.17424`（~17.4% 新增覆盖）。这进一步验证：dense3d 确实大幅提升了 mask coverage，但 replay 仍未改善，与前序 `M3D_STAGEB120_REPLAY_COMPARE` 结论一致。产物根：`output/part3_BRPO/experiments/20260504_full8_dense3d_q070_active_compare`。
-- 因此下一步若继续修 M~/T~/R~ 合同，优先级应从“继续扫 dense quantile / 改 continuous mask”转向：both-vs-single contract、single-branch target composition、pseudo/real balance、以及 stronger pseudo route 的稳定化策略。
-- 因此下一步不应继续做 q0.70/q0.80 的同类 quantile sweep，也不应把 dense3d 默认化；更合理的是回到原始 BRPO method，对照 live 语义检查 M~/T~ 的 both-vs-single contract、single-branch target composition 与 confidence weighting 是否仍有方法级差异；若继续做 loss ablation，也应优先做 both-vs-single 的局部合同，而不是全局移除 depth 或 confidence。
-- 大工程主线从 standalone compare 转向 **S3PO backend-only integration**，优先做：
-  1. 把 exact M~/T~ winner 的 builder / loss contract 从当前 standalone 实验入口中抽成可复用 backend
-  2. 保持 pseudo supervision 只进 mapping / backend refine，不回灌 tracking / frontend
-  3. 用 fixed control 复核集成后是否还能复现 standalone winner 的增益
-  4. 在不改语义的前提下继续做工程整理：`pseudo_branch/` 第二轮 direct migration 已全部完成（G~ → `gaussian_management/`；R~ → `refine/`；observation → `observation/`；target → `target/`；mask → `mask/`；common → `common/`；residual T~ builder 也已全部收进 `target/`），顶层仅剩 `pseudo_branch/__init__.py`；scripts 侧 final audit 的 Stage 1 / 2 / 3 / 4 也已全部完成：non-live diagnostics 已收进 `scripts/diagnostics/`，legacy prepare 已收进 `scripts/legacy_prepare/`，内部 compatibility boundary 已收进 `scripts/compat/`，当前顶层 `scripts/` 最终收敛为 8 个 live core + 1 个外部 CLI wrapper。代码路径整理本身现在可以视为结束，后续重点应回到 backend-only integration 与 working-tree/commit 收尾，而不是继续做代码布局调整
-- 文档口径继续固定：
-  1. G~ 使用 clean compare 口径，不再引用旧 `+0.0114` baseline
-  2. 任何后续 compare 都固定 clean G~ / fixed T1 control，不再混入新的 G~ 改动
-
-### 明确不做 🚫
-- 不回去继续打磨 `brpo_verify_v1` proxy。
-- 不把当前 `brpo_direct_v1` 误写成完整 BRPO implementation。
-- 不把当前 A1 剩余 gap 简化成“只差 confidence”或“只差 depth target”单侧问题。
-- 不在 observation compare 里同时改 topology 或 G~。
-- 不再把 delayed opacity / C0-2 当作当前 G~ 主推进路线。
-
----
-
-## 7. 参考
-
-- 设计原则：[DESIGN.md]
-- 过程记录：[CHANGELOG.md]
-- A1 细化分析：[MASK_DESIGN.md]
-- B3 / refine 设计：[REFINE_DESIGN.md]
-- T~ 落地文档：[docs/archived/2026-04-plans-landed/T_direct_brpo_alignment_engineering_plan.md]
-- T4 compare 执行文档：[docs/archived/2026-04-plans-landed/T4_EXACT_UPSTREAM_COMPARE_PLAN_20260421.md]
-- G~ clean compare 记录：[docs/archived/2026-04-experiments/G_BRPO_CLEAN_COMPARE_20260421.md]
-- pseudo_branch G~ 迁移进度：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_G_MIGRATION_PHASE1_20260422.md]
-- pseudo_branch R~ 迁移进度：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_R_MIGRATION_PHASE2_20260422.md]
-- pseudo_branch T~/observation 迁移进度：[docs/archived/2026-04-cleanup-records/PSEUDO_BRANCH_T_OBSERVATION_MIGRATION_PHASE3_20260422.md]
+> **KF0 跳过已移除，D5 配置已生成（quartile + update_real_pose + GN）。下一步运行 D5 实验验证效果。**

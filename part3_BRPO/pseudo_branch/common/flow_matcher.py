@@ -19,7 +19,7 @@ from dust3r.utils.image import load_images
 class FlowMatcher:
     def __init__(
         self,
-        model_name: str = "naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric",
+        model_name: str = "/home/bzhang512/CV_Project/third_party/S3PO-GS/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth",
         device: str = "cuda",
         subsample_or_initxy1: int = 8,
     ):

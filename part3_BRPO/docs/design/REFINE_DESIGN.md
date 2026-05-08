@@ -1,316 +1,123 @@
-# REFINE_DESIGN.md - R~ Joint Refine 设计文档
+# REFINE_DESIGN.md - Refine 模块设计
 
-> 更新时间：2026-05-04 14:20 (Asia/Shanghai)
+> 更新时间：2026-05-05 05:30 (Asia/Shanghai)
 
 > **书写规范**：
-> 1. 只讲 R~（Joint Refine）：信息从哪里来、怎么组装成 joint loss、backward timing 如何
-> 2. 遵循"信息源 → 信号转换 → 下游消费"链式分析
-> 3. 数学公式用 `$...$` 或 `$$...$$` 包裹
+> 1. 只记录设计，不记录历史过程
+> 2. 覆盖式更新，不追加
+> 3. 状态用 ✅ ⚠️ ❌ 标记
 > 4. 更新后修改文档顶部时间戳
 
 ---
 
-## 0. 文档口径更新（2026-04-30）
+## 1. 模块概览
 
-本文件原本描述的是 **legacy standalone R~**：`run_pseudo_refinement_v2.py` 里的 StageA / StageB / `brpo_joint_v1`。这部分内容现在仍保留，因为它还是历史 compare 与 replay 的 reference。
-
-但从 2026-04-30 开始，R~ 的工程主线已经切到 **S3PO backend continuation**：
-- supervision 语义仍来自 exact upstream pseudo bundle；
-- execution shell 改为 `third_party/S3PO-GS/utils/slam_backend_brpo.py`；
-- opt-in 入口已挂到 `third_party/S3PO-GS/slam.py::_maybe_run_brpo_pseudo_continuation()`；
-- actual hook smoke 已通过，产物根为 `/data/bzhang512/tmp/s3po_brpo_hook_manual_smoke/`。
-
-因此下面第 2–8 节应理解为：**它们描述的是 legacy standalone refine contract，不再是未来主 refine 引擎。**
+Refine 模块负责 pseudo view 的 pose 和 scene refinement，包括：
+- **Pose optimization**：优化 pseudo view 的 pose (theta/rho)
+- **Scene optimization**：优化 Gaussians 的 xyz, opacity, scale, rotation
+- **Exposure refinement**：优化 exposure 参数 (exposure_a/b)
+- **Scale regularization**：防止 Gaussian scale 爆炸
 
 ---
 
-## 1.1 新 backend continuation 已落地的最小结构
+## 2. 核心组件
 
-当前已经 landed 的新 R~ 组件是：
-- `pseudo_branch/refine/backend_pseudo_bundle.py`：把 `stageA_history.json` / sample artifacts 解析成 backend 可用的 pseudo bundle；
-- `pseudo_branch/refine/backend_pseudo_view_loader.py`：把 pseudo bundle 重建成 backend 可消费的 pseudo viewpoints；
-- `pseudo_branch/refine/backend_pseudo_loss.py`：把 exact shared-C_m loss 封成 backend 可直接调用的 pseudo exact RGB-D loss；
-- `third_party/S3PO-GS/utils/slam_backend_brpo.py`：real-window-centered joint continuation runner；
-- `third_party/S3PO-GS/slam.py`：新增 `_maybe_run_brpo_pseudo_continuation()` hook；
-- `third_party/S3PO-GS/utils/slam_backend.py`：新增 `S3PO_COLOR_REFINEMENT_ITERS` override，允许把默认 26k color refinement 缩到 smoke/debug 范围。
+### 2.1 Pose Delta 管理 (pseudo_camera_state.py)
 
-一句话：R~ 现在已经不只是“joint loss 怎么组装”，而是“exact pseudo supervision 如何接进 S3PO backend optimizer”。
+| 函数 | 作用 | 状态 |
+|------|------|------|
+| `current_w2c(vp)` | 计算 pose-corrected w2c | ✅ |
+| `refresh_viewpoint_transforms_(vp)` | 用 R/T 刷新 transforms | ✅ |
+| `apply_pose_delta_before_render_(vp)` | **关键修复**：render 前应用 pose delta | ✅ |
+| `apply_pose_residual_(vp)` | 将 delta 折叠到 R/T | ✅ |
+| `make_viewpoint_trainable(vp)` | 初始化 pose delta 参数 | ✅ |
 
----
+**CRITICAL FIX (2026-05-05)**：
+- S3PO rasterizer forward.cu 不使用 theta/rho
+- `apply_pose_delta_before_render_()` 在 render 前将 pose delta 应用到 world_view_transform
+- 现在 gradient 可以从 RGB/depth loss 直接流回 theta/rho
 
-## 1. 概览
+### 2.2 Gauss-Newton Pose Optimization (pose_gauss_newton.py)
 
-R~（Joint Refine）现在需要区分两层：legacy standalone refine，以及新的 backend continuation refine。legacy 路径仍描述“pseudo loss 和 real loss 怎样在同一 iteration 内组装”，而新路径更进一步，要求把 pseudo exact supervision 直接接到 S3PO backend 的 real-window-centered optimization loop。
+| 函数 | 作用 | 状态 |
+|------|------|------|
+| `compute_pose_jacobian_fd()` | Finite difference 计算 pose Jacobian | ✅ |
+| `gauss_newton_pose_update()` | 单 viewpoint GN optimization | ✅ |
+| `gauss_newton_batch_update()` | 批量 GN optimization | ✅ |
+| `GaussNewtonPoseOptimizer` | 状态化 optimizer 类 | ✅ |
 
-**当前关键结论**：
-- `run_pseudo_refinement_v2.py` 里的 `brpo_joint_v1` 现在只保留为 legacy reference，不再是未来主 refine 引擎；
-- 新的 landed 主线是 `slam_backend_brpo.py` + `slam.py::_maybe_run_brpo_pseudo_continuation()`；
-- legacy G~ timing 仍是 delayed，而 backend continuation 的目标是把 pseudo supervision 直接并入 S3PO backend，而不是继续围绕 standalone StageB 调旋钮。
+**设计要点**：
+- 用 finite difference 计算 J = dLoss/dPose
+- Levenberg-Marquardt damping: H = J.T @ J + damping * I
+- 直接更新 theta/rho，不依赖 Adam
 
----
+### 2.3 Loss Functions (pseudo_loss_v2.py)
 
-## 2. 所有 R~ 变种一览
+| 函数 | 作用 | 状态 |
+|------|------|------|
+| `masked_rgb_loss()` | RGB L1 loss + exposure | ✅ |
+| `masked_depth_loss()` | Depth L1 loss | ✅ |
+| `pose_reg_loss()` | Pose delta L2 regularization | ✅ |
+| `exposure_reg_loss()` | Exposure L1 regularization | ✅ |
+| `scale_reg_loss()` | **新增**：Scale regularization | ✅ |
+| `absolute_pose_prior_loss_scaled()` | Absolute pose prior | ✅ |
+| `build_stageA_loss_paper_brpo_split()` | Paper chain loss | ✅ |
 
-### 2.1 Topology modes
+### 2.4 Backend Integration (slam_backend_brpo.py)
 
-| Mode | Pseudo/Real 组装方式 | Backward timing | G~ timing |
-|------|---------------------|-----------------|-----------|
-| `off` | Sequential（pseudo → real） | Separate backward | Delayed |
-| `brpo_joint_v1` | Joint（pseudo + real → joint loss） | Single backward | Delayed |
-
-### 2.2 Depth loss modes
-
-| Mode | RGB/Depth mask 关系 | Fallback | 适用 observation mode |
-|------|---------------------|---------|---------------------|
-| `legacy` | RGB/depth 可分离 mask | render_depth fallback | 通用 |
-| `source_aware` | RGB/depth 可分离 mask + tier | seed/dense/fallback tier | `old T~` |
-| `exact_shared_cm_v1` | **RGB/depth 共用 C_m × target_confidence** | **无 fallback** | `exact_brpo_upstream_target_v1` |
-| `paper_brpo_split_v1` | **RGB 只用 C_m；depth 只用 C_m** | **无 fallback** | `paper_brpo_target_v1` / `paper_brpo_cm_old_target_v1` |
-| `paper_brpo_split_depthconf_v1` | **RGB 只用 C_m；depth 用 C_m × depth-only target_confidence** | **无 fallback** | `paper_brpo_target_v1` / `paper_brpo_cm_old_target_v1` |
-
----
-
-## 3. 信息源层
-
-R~ 的上游信息来自两条 branch：
-
-### 3.1 Pseudo branch
-
-**输入**：
-- Pseudo frames（来自 prepare stage 的 fusion output）
-- M~（mask/confidence）
-- T~（depth target）
-- Rendered pseudo RGB/depth（当前 Gaussian state）
-
-### 3.2 Real branch
-
-**输入**：
-- Real frames（training dataset）
-- Rendered real RGB/depth
+| 类/函数 | 作用 | 状态 |
+|---------|------|------|
+| `BRPOMappingConfig` | Online mapping 配置 | ✅ 已添加 lambda_scale |
+| `BRPOBackEndContinuation` | Backend runner | ✅ |
+| `_run_joint_pseudo_engine()` | Joint optimization loop | ✅ 已集成 scale_reg_loss |
+| `run_brpo_pseudo_mapping()` | Online mapping 入口 | ✅ |
 
 ---
 
-## 4. 信号转换层
+## 3. 配置参数
 
-### 4.1 StageA（pose/exposure only）
+### 3.1 BRPOMappingConfig 新增参数
 
-**目标**：只更新 pseudo pose/exposure，不更新 Gaussian。
+| 参数 | 默认值 | 作用 |
+|------|--------|------|
+| `lambda_scale` | 0.01 | Scale regularization 权重 |
+| `max_scale` | None | 最大允许 scale |
+| `lambda_exp` | 0.001 | Exposure regularization 权重 |
 
-**Loss 组装**：
+### 3.2 使用方式
 
-$$
-L_{pose} = L_{rgb}^{pseudo} + \lambda_{pose} \cdot L_{pose\_residual}
-$$
-
-**约束**：
-- Gaussian 参数 frozen
-- Replay 不是判优指标（只 pose/exposure 变化）
-
----
-
-### 4.2 StageB T1（`brpo_joint_v1`）
-
-**代码位置**：`run_pseudo_refinement_v2.py` → StageB loop
-
-**Loss 组装**：
-
-$$
-L_{joint} = \lambda_{pseudo} \cdot L_{pseudo} + \lambda_{real} \cdot L_{real} + L_{abs\_prior}
-$$
-
-其中 pseudo loss：
-
-$$
-L_{pseudo} = \eta_{rgb} \cdot L_{rgb} + (1-\eta_{rgb}) \cdot L_{depth} + \lambda_{pose} \cdot L_{pose\_reg} + \lambda_{exp} \cdot L_{exp\_reg}
-$$
-
----
-
-### 4.3 Legacy depth loss（`stageA_depth_loss_mode=legacy`）
-
-$$
-L_{depth} = C_m \cdot |d_{render} - d_{target}|
-$$
-
-RGB 和 depth 使用同一 $C_m$（但可分别有 rgb_confidence_mask / depth_confidence_mask override）。
-
----
-
-### 4.4 Source-aware depth loss
-
-$$
-L_{depth} = \lambda_{seed} \cdot L_{seed} + \lambda_{dense} \cdot L_{dense} + \lambda_{fallback} \cdot L_{fallback}
-$$
-
-其中每个 tier 对应不同 source_ids：
-- Seed: {1, 2, 3}（双侧 + stable）
-- Dense: {4}（single-side）
-- Fallback: {0}（render_depth fallback）
-
----
-
-### 4.5 Exact shared-C_m loss（Phase T3 新增）
-
-$$
-L_{rgb} = C_m \cdot C_{target} \cdot |I_{render} - I_{target}|
-$$
-$$
-L_{depth} = C_m \cdot C_{target} \cdot |d_{render} - d_{target}|
-$$
-
-**关键特点**：
-- RGB/depth **强制共用** 同一 $C_m$
-- $C_{target}$ 是 continuous confidence（来自 exact backend）
-- 无 fallback tier（`no_render_fallback=true`）
-
-**代码位置**：`pseudo_loss_v2.py` → `build_stageA_loss_exact_shared_cm()`
-
----
-
-### 4.6 Paper split loss（2026-05-04 新增）
-
-`paper_brpo_split_v1`：
-$$
-L_{rgb} = C_m \cdot |I_{render} - I_{target}|
-$$
-$$
-L_{depth} = C_m \cdot |d_{render} - d_{target}|
-$$
-
-`paper_brpo_split_depthconf_v1`：
-$$
-L_{rgb} = C_m \cdot |I_{render} - I_{target}|
-$$
-$$
-L_{depth} = C_m \cdot C^{depth}_{target} \cdot |d_{render} - d_{target}|
-$$
-
-**关键特点**：
-- RGB 端固定只吃离散 `C_m`，不再让 depth-side `valid_mask / target_confidence` 回流去 gate RGB
-- depth 端是否乘连续 confidence，变成一个独立 ablation，而不是 shared contract 的副作用
-- 这两个 mode 当前定位为 **paper-realign compare contract**：它们已经完成 full9 compare，但还没有取代 `exact_shared_cm_v1` 成为 current mainline consumer
-
-## 5. Backward timing 层
-
-### 5.1 T1 timing（`brpo_joint_v1`）
-
-```
-iter t:
-  1. pseudo render (G~ action from iter t-1)
-  2. real render
-  3. assemble joint loss: L_joint = λ_pseudo * L_pseudo + λ_real * L_real
-  4. backward once (joint backward)
-  5. collect G~ stats → generate G~ action for iter t+1
-  6. optimizer.step
-
-iter t+1:
-  1. pseudo render (G~ action from iter t)
-  ...
-```
-
-**关键特点**：
-- Single backward（不是 separate pseudo → real backward）
-- G~ delayed（iter t 统计 → iter t+1 消费）
-
----
-
-### 5.2 BRPO 论文 timing
-
-```
-iter t:
-  1. collect G~ stats
-  2. generate G~ stochastic mask (current-step)
-  3. pseudo render (current-step G~ action)
-  4. pseudo backward
-  5. real render
-  6. real backward
-  7. optimizer.step
-```
-
-**与 T1 的差异**：
-- BRPO 是 sequential（pseudo → real）
-- T1 是 joint（pseudo + real → joint backward）
-- G~ timing：BRPO current-step，T1 delayed
-
----
-
-## 6. Abs prior（固定背景约束）
-
-**定义**：
-
-$$
-L_{abs\_prior} = \lambda_t \cdot |t_{pseudo} - t_{prior}| + \lambda_r \cdot |r_{pseudo} - r_{prior}| + \lambda_{abs\_pose} \cdot L_{abs\_scaled}
-$$
-
-**当前配置**：
-- $\lambda_t = 3.0$
-- $\lambda_r = 0.1$
-- $\lambda_{abs\_pose} = 0.0$（默认不启用）
-
-**Robust type**：`charbonnier`
-
----
-
-## 7. Stage 协议
-
-当前固定协议：`post40_lr03_120`
-
-- `post40`：iteration 40 之后开始 StageB
-- `lr03`：StageB learning rate = 0.3
-- `120`：StageB iteration 数 = 120
-
----
-
-## 8. R~ 与其他模块的关系
-
-```
-R~ 输入:
-  - M~: pseudo RGB/depth mask
-  - T~: pseudo depth target
-  - G~: pseudo render Gaussian gating (delayed action)
-
-R~ 输出:
-  - joint loss
-  - optimizer updates (pose/exposure/Gaussian)
-
-Pipeline:
-  M~ + T~ 定义 pseudo supervision scope 和 target
-  G~ 决定哪些 Gaussian 参与 pseudo render
-  R~ 决定 pseudo + real 怎么组装成 joint loss
-  Backward + optimizer.step
+```yaml
+Results:
+  brpo_online_mapping:
+    lambda_scale: 0.01  # 新增
+    max_scale: 0.5      # 新增（可选）
+    lambda_exp: 0.001   # 已有
 ```
 
 ---
 
-## 9. 代码位置索引
+## 4. Gradient Flow 修复
 
-| 文件 | 功能 | 关键函数 |
-|------|------|---------|
-| `scripts/run_pseudo_refinement_v2.py` | 主 loop | StageA loop, StageB loop, G~ timing |
-| `pseudo_branch/refine/pseudo_loss_v2.py` | Loss 组装 | `build_stageA_loss`, `build_stageA_loss_source_aware`, `build_stageA_loss_exact_shared_cm` |
-| `pseudo_branch/refine/pseudo_refine_scheduler.py` | Stage 协议 | iteration scheduling |
-| `pseudo_branch/gaussian_management/local_gating/*` | G~ timing 介入点 | `maybe_apply_pseudo_local_gating` |
+### 4.1 问题诊断
 
----
+| 问题 | 原因 | 影响 |
+|------|------|------|
+| Pose gradient 不起作用 | forward.cu 不使用 theta/rho | Pose 无法从 RGB/depth refine |
 
-## 10. 当前状态与下一步
+### 4.2 修复方案
 
-### 10.1 当前状态
+```
+修复前：
+render(viewpoint) → forward.cu 使用 viewmatrix(R/T) → theta/rho 不影响 render
 
-- `brpo_joint_v1` 是固定 topology 主线
-- Stage 协议 `post40_lr03_120` 已稳定
-- G~ timing 保持 delayed（与 BRPO 论文不同）
-
-### 10.2 不做的事
-
-- 不改 topology（`brpo_joint_v1` 固定）
-- 不改 Stage 协议
-- 不推进 G~ current-step timing（G~ 已冻结）
-
-### 10.3 下一步
-
-主线不再继续扫 standalone topology compare；下一阶段是把固定的 `brpo_joint_v1 + exact_shared_cm_v1 + clean summary G~` 这套 consumer 壳带进 backend-only integration。
+修复后：
+apply_pose_delta_before_render_(viewpoint) → 更新 world_view_transform
+render(viewpoint) → forward.cu 使用 pose-corrected viewmatrix → theta/rho 影响 render
+backward → gradient 流回 theta/rho
+```
 
 ---
 
-> 文档口径：R~ = Joint Refine（topology）。与 M~/T~/G~ 协同工作，决定 loss 组装和 backward timing。
+## 5. 一句话结论
+
+> **Refine 模块已完成关键修复：pose gradient 问题通过 `apply_pose_delta_before_render_()` 解决，Gauss-Newton 模块已实现，scale regularization 已添加。所有修改已集成到 slam_backend_brpo.py 的 online mapping loop。**

@@ -1,0 +1,7 @@
+#!/bin/bash
+# D5 Difix + Fusion Experiment
+ulimit -n 65536
+echo "ulimit -n = $(ulimit -Sn)"
+export CUDA_VISIBLE_DEVICES=0
+cd /home/bzhang512/CV_Project/part3_BRPO
+python run_slam.py --config configs/d5_online_mapping_fix.yaml

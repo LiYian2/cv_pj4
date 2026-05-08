@@ -32,6 +32,9 @@ class BackendPseudoViewRecord:
     target_depth_path: Optional[str] = None
     confidence_path: Optional[str] = None
     observation_meta_path: Optional[str] = None
+    # Phase 2 fix: reference frame IDs for pose propagation
+    left_ref_frame_id: Optional[int] = None
+    right_ref_frame_id: Optional[int] = None
 
     def to_loss_inputs(self) -> dict[str, Any]:
         return {

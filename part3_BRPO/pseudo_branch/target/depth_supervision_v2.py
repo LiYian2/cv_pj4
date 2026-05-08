@@ -314,6 +314,10 @@ def build_exact_upstream_depth_target(
     provenance_right: np.ndarray | None = None,
     min_confidence_threshold: float = 0.5,
     use_confidence_weighted_composition: bool = True,
+    target_depth_left_override: np.ndarray | None = None,
+    target_depth_right_override: np.ndarray | None = None,
+    target_field_semantics: str = "exact_upstream_v1",
+    depth_input_semantics: str = "projected_depth_exact",
 ) -> Dict[str, np.ndarray | Dict]:
     """Exact upstream depth target builder.
     
@@ -327,12 +331,14 @@ def build_exact_upstream_depth_target(
     support_right = np.asarray(support_right_exact, dtype=np.float32) > 0.5
     projected_depth_left = np.asarray(projected_depth_left_exact, dtype=np.float32)
     projected_depth_right = np.asarray(projected_depth_right_exact, dtype=np.float32)
+    depth_left = projected_depth_left if target_depth_left_override is None else np.asarray(target_depth_left_override, dtype=np.float32)
+    depth_right = projected_depth_right if target_depth_right_override is None else np.asarray(target_depth_right_override, dtype=np.float32)
     confidence_left = np.asarray(confidence_left_exact, dtype=np.float32)
     confidence_right = np.asarray(confidence_right_exact, dtype=np.float32)
     fusion_weight_left = np.asarray(fusion_weight_left, dtype=np.float32)
     fusion_weight_right = np.asarray(fusion_weight_right, dtype=np.float32)
     
-    h, w = projected_depth_left.shape
+    h, w = depth_left.shape
     
     # Verified union (BRPO semantics)
     verify_both = support_left & support_right
@@ -341,8 +347,8 @@ def build_exact_upstream_depth_target(
     verify_union = support_left | support_right
     
     # Depth availability
-    depth_available_left = projected_depth_left > 1e-6
-    depth_available_right = projected_depth_right > 1e-6
+    depth_available_left = depth_left > 1e-6
+    depth_available_right = depth_right > 1e-6
     
     # Target regions (intersection of support and depth availability)
     both_available = verify_both & depth_available_left & depth_available_right
@@ -362,8 +368,8 @@ def build_exact_upstream_depth_target(
         both_w_sum = confidence_left + confidence_right
         both_w_valid = both_available & (both_w_sum > 1e-8)
         depth_target[both_w_valid] = (
-            confidence_left[both_w_valid] * projected_depth_left[both_w_valid]
-            + confidence_right[both_w_valid] * projected_depth_right[both_w_valid]
+            confidence_left[both_w_valid] * depth_left[both_w_valid]
+            + confidence_right[both_w_valid] * depth_right[both_w_valid]
         ) / both_w_sum[both_w_valid]
         target_confidence[both_w_valid] = both_w_sum[both_w_valid] / 2.0  # average confidence
     else:
@@ -371,19 +377,19 @@ def build_exact_upstream_depth_target(
         both_w_sum = fusion_weight_left + fusion_weight_right
         both_w_valid = both_available & (both_w_sum > 1e-8)
         depth_target[both_w_valid] = (
-            fusion_weight_left[both_w_valid] * projected_depth_left[both_w_valid]
-            + fusion_weight_right[both_w_valid] * projected_depth_right[both_w_valid]
+            fusion_weight_left[both_w_valid] * depth_left[both_w_valid]
+            + fusion_weight_right[both_w_valid] * depth_right[both_w_valid]
         ) / both_w_sum[both_w_valid]
         target_confidence[both_w_valid] = (confidence_left[both_w_valid] + confidence_right[both_w_valid]) / 2.0
     
     source_map[both_available] = SOURCE_BOTH_WEIGHTED
     
     # Single-side targets
-    depth_target[left_from_both_only | left_single] = projected_depth_left[left_from_both_only | left_single]
+    depth_target[left_from_both_only | left_single] = depth_left[left_from_both_only | left_single]
     source_map[left_from_both_only | left_single] = SOURCE_LEFT
     target_confidence[left_from_both_only | left_single] = confidence_left[left_from_both_only | left_single]
     
-    depth_target[right_from_both_only | right_single] = projected_depth_right[right_from_both_only | right_single]
+    depth_target[right_from_both_only | right_single] = depth_right[right_from_both_only | right_single]
     source_map[right_from_both_only | right_single] = SOURCE_RIGHT
     target_confidence[right_from_both_only | right_single] = confidence_right[right_from_both_only | right_single]
     
@@ -397,7 +403,9 @@ def build_exact_upstream_depth_target(
     
     summary = {
         "verifier_backend_semantics": "exact_branch_native_v1",
-        "target_field_semantics": "exact_upstream_v1",
+        "target_field_semantics": str(target_field_semantics),
+        "depth_input_semantics": str(depth_input_semantics),
+        "target_depth_override_applied": bool(target_depth_left_override is not None or target_depth_right_override is not None),
         "verified_union_ratio": verified_ratio,
         "target_filled_ratio": target_filled_ratio,
         "unsupported_within_verified_ratio": unsupported_ratio,

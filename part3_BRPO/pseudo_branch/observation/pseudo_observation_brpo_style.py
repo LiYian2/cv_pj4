@@ -797,6 +797,11 @@ def build_exact_brpo_upstream_target_observation(
     provenance_left: np.ndarray | None = None,
     provenance_right: np.ndarray | None = None,
     use_confidence_weighted_composition: bool = True,
+    target_depth_left_override: np.ndarray | None = None,
+    target_depth_right_override: np.ndarray | None = None,
+    target_field_semantics: str = "exact_upstream_v1",
+    depth_target_rule: str | None = None,
+    depth_input_semantics: str = "projected_depth_exact",
 ) -> Dict[str, np.ndarray | Dict]:
     """Exact BRPO upstream target observation builder.
     
@@ -823,6 +828,10 @@ def build_exact_brpo_upstream_target_observation(
         provenance_left=provenance_left,
         provenance_right=provenance_right,
         use_confidence_weighted_composition=use_confidence_weighted_composition,
+        target_depth_left_override=target_depth_left_override,
+        target_depth_right_override=target_depth_right_override,
+        target_field_semantics=target_field_semantics,
+        depth_input_semantics=depth_input_semantics,
     )
     
     # Build exact C_m from support sets (same as exact_brpo_full_target)
@@ -848,7 +857,7 @@ def build_exact_brpo_upstream_target_observation(
     
     summary = {
         "verifier_backend_semantics": "exact_branch_native_v1",
-        "target_field_semantics": "exact_upstream_v1",
+        "target_field_semantics": str(target_field_semantics),
         "target_loss_contract": "exact_shared_cm_v1",
         "valid_ratio": float(valid_mask.mean()),
         "cm_nonzero_ratio": float((confidence_cm > 0).mean()),
@@ -860,10 +869,12 @@ def build_exact_brpo_upstream_target_observation(
         "avg_target_confidence": float(target_confidence[valid_mask > 0].mean()) if (valid_mask > 0).any() else 0.0,
         "source_counts": depth_result["summary"]["source_counts"],
         "no_render_fallback": True,
+        "depth_input_semantics": str(depth_result["summary"].get("depth_input_semantics", depth_input_semantics)),
+        "target_depth_override_applied": bool(depth_result["summary"].get("target_depth_override_applied", False)),
         "policy": {
             "version": "exact_brpo_upstream_target_v1",
             "confidence_rule": "strict BRPO-style C_m from exact backend support sets",
-            "depth_target_rule": "exact upstream projected-depth composition with continuous confidence, no render fallback",
+            "depth_target_rule": str(depth_target_rule or "exact upstream projected-depth composition with continuous confidence, no render fallback"),
             "strict_brpo_scope": "cm_and_target_and_upstream_backend",
             "upstream_backend": "exact_branch_native_v1",
             "target_confidence_same_source": True,

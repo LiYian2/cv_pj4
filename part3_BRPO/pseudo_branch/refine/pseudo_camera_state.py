@@ -104,13 +104,48 @@ def current_c2w(vp) -> torch.Tensor:
 
 
 def refresh_viewpoint_transforms_(vp):
-    world_view_transform = getWorld2View2(vp.R, vp.T).transpose(0, 1)
-    vp.world_view_transform = world_view_transform
-    vp.full_proj_transform = world_view_transform.unsqueeze(0).bmm(
-        vp.projection_matrix.unsqueeze(0)
-    ).squeeze(0)
-    vp.camera_center = world_view_transform.inverse()[3, :3]
+    """Clear pose delta overrides so Camera properties return R/T-based transforms.
+
+    This effectively restores base pose rendering. Camera properties will compute
+    transforms from vp.R and vp.T on-demand.
+    """
+    vp._world_view_transform_override = None
+    vp._full_proj_transform_override = None
+    vp._camera_center_override = None
     return vp
+
+
+def apply_pose_delta_before_render_(vp):
+    """Apply pose delta to viewpoint transforms BEFORE render.
+
+    CRITICAL FIX for S3PO pose gradient problem:
+    - S3PO rasterizer forward.cu uses viewmatrix but does NOT use theta/rho
+    - This function applies pose delta to world_view_transform before render
+    - Now forward will use pose-corrected pose, and gradient will flow back to theta/rho
+
+    Args:
+        vp: viewpoint/camera object with R, T, cam_rot_delta, cam_trans_delta
+
+    Returns:
+        vp with updated transforms (world_view_transform, full_proj_transform, camera_center)
+    """
+    w2c_current = current_w2c(vp)  # Includes pose delta
+    world_view_transform = w2c_current.transpose(0, 1).contiguous()
+    vp._world_view_transform_override = world_view_transform
+    vp._full_proj_transform_override = world_view_transform.unsqueeze(0).bmm(
+        vp.projection_matrix.unsqueeze(0)
+    ).squeeze(0).contiguous()
+    vp._camera_center_override = world_view_transform.inverse()[3, :3]
+    return vp
+
+
+def restore_base_pose_after_render_(vp):
+    """Restore viewpoint transforms to base pose (R/T) after render.
+
+    Use this after render if you need to revert to base pose.
+    Usually not needed if you always call apply_pose_delta_before_render_ before render.
+    """
+    return refresh_viewpoint_transforms_(vp)
 
 
 def apply_pose_residual_(vp, converged_threshold: float = 1e-4) -> bool:

@@ -19,7 +19,7 @@ from dust3r.inference import inference
 from dust3r.utils.image import load_images
 
 
-DEFAULT_MODEL_NAME = "naver/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric"
+DEFAULT_MODEL_NAME = "/home/bzhang512/CV_Project/third_party/S3PO-GS/checkpoints/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth"
 
 
 @dataclass

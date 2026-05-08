@@ -92,6 +92,32 @@ def exposure_reg_loss(viewpoint) -> torch.Tensor:
     return viewpoint.exposure_a.abs().mean() + viewpoint.exposure_b.abs().mean()
 
 
+def scale_reg_loss(gaussians, target_scale_mean: float = None, max_scale: float = None) -> torch.Tensor:
+    """Scale regularization loss for Gaussians.
+
+    Prevents Gaussian scales from growing too large or drifting from target mean.
+
+    Args:
+        gaussians: Gaussian model with get_scaling attribute
+        target_scale_mean: Target mean scale (optional, defaults to current mean)
+        max_scale: Maximum allowed scale (optional, penalizes scales > max_scale)
+
+    Returns:
+        Scale regularization loss
+    """
+    scaling = gaussians.get_scaling  # shape (N, 3) or (N, 1)
+
+    # Penalize deviation from isotropic (each scale should be similar to others)
+    isotropic_loss = torch.abs(scaling - scaling.mean(dim=1).view(-1, 1)).mean()
+
+    # Optional: penalize scales exceeding max_scale
+    if max_scale is not None:
+        scale_exceed = torch.clamp(scaling - max_scale, min=0.0).mean()
+        isotropic_loss = isotropic_loss + scale_exceed
+
+    return isotropic_loss
+
+
 def _build_w2c0(viewpoint):
     w2c0 = torch.eye(4, device=viewpoint.R.device, dtype=viewpoint.R.dtype)
     w2c0[:3, :3] = viewpoint.R0

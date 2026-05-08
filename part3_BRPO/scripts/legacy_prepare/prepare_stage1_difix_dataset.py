@@ -328,6 +328,18 @@ def load_difix_model(model_name: Optional[str], model_path: Optional[str], times
             trust_remote_code=True,
         )
         pipe = pipe.to("cuda")
+        # Make Difix VAE monkey-patched forward methods pickle-safe for multiprocessing spawn.
+        # Bound methods are reconstructed by name during unpickling, so expose stable aliases
+        # on the encoder/decoder instances themselves before this pipeline is sent to child processes.
+        vae = getattr(pipe, "vae", None)
+        encoder = getattr(vae, "encoder", None)
+        decoder = getattr(vae, "decoder", None)
+        if encoder is not None and hasattr(encoder, "forward") and not hasattr(encoder, "my_vae_encoder_fwd"):
+            if getattr(getattr(encoder, "forward", None), "__name__", "") == "my_vae_encoder_fwd":
+                encoder.my_vae_encoder_fwd = encoder.forward
+        if decoder is not None and hasattr(decoder, "forward") and not hasattr(decoder, "my_vae_decoder_fwd"):
+            if getattr(getattr(decoder, "forward", None), "__name__", "") == "my_vae_decoder_fwd":
+                decoder.my_vae_decoder_fwd = decoder.forward
         return {"kind": "hf_pipeline", "obj": pipe, "timestep": timestep}
 
     difix_src = Path("/home/bzhang512/CV_Project/third_party/Difix3D/src")
