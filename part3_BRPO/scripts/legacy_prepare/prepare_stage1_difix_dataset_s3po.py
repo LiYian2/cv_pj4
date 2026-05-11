@@ -380,15 +380,19 @@ def load_pseudo_records(run_root: Path) -> List[PseudoRecord]:
     return [PseudoRecord(**item) for item in data]
 
 
-def load_difix_model(model_name: Optional[str], model_path: Optional[str], timestep: int):
+def load_difix_model(model_name: Optional[str], model_path: Optional[str], timestep: int, target_device=None):
     import torch
     import os
-    # In multiprocessing spawn child, CUDA_VISIBLE_DEVICES remaps GPU indices.
-    # If CUDA_VISIBLE_DEVICES=1, then cuda:0 in this process maps to physical GPU 1.
-    cuda_visible = os.environ.get("CUDA_VISIBLE_DEVICES", None)
-    if cuda_visible is not None:
-        # Force cuda:0 to be the visible GPU (remapped by CUDA_VISIBLE_DEVICES)
-        torch.cuda.set_device(0)
+
+    # Resolve the runtime device dynamically. If the launcher used
+    # CUDA_VISIBLE_DEVICES=1, logical cuda:0 maps to physical GPU 1.
+    if target_device is None:
+        target_device = torch.device("cuda:0" if torch.cuda.is_available() else "cpu")
+    else:
+        target_device = torch.device(target_device)
+    if target_device.type == "cuda":
+        torch.cuda.set_device(0 if target_device.index is None else target_device.index)
+        _ = torch.empty(1, device=target_device)
     if model_name and not model_path:
         from diffusers import DiffusionPipeline
         custom_pipeline = "/home/bzhang512/CV_Project/third_party/Difix3D/src/pipeline_difix.py"
@@ -397,7 +401,7 @@ def load_difix_model(model_name: Optional[str], model_path: Optional[str], times
             custom_pipeline=custom_pipeline,
             trust_remote_code=True,
         )
-        pipe = pipe.to(torch.device("cuda"))
+        pipe = pipe.to(target_device)
         # Make Difix VAE monkey-patched forward methods pickle-safe for multiprocessing spawn.
         # Bound methods are reconstructed by name during unpickling, so expose stable aliases
         # on the encoder/decoder instances themselves before this pipeline is sent to child processes.
@@ -410,7 +414,7 @@ def load_difix_model(model_name: Optional[str], model_path: Optional[str], times
         if decoder is not None and hasattr(decoder, "forward") and not hasattr(decoder, "my_vae_decoder_fwd"):
             if getattr(getattr(decoder, "forward", None), "__name__", "") == "my_vae_decoder_fwd":
                 decoder.my_vae_decoder_fwd = decoder.forward
-        return {"kind": "hf_pipeline", "obj": pipe, "timestep": timestep}
+        return {"kind": "hf_pipeline", "obj": pipe, "timestep": timestep, "device": str(target_device)}
     difix_src = Path("/home/bzhang512/CV_Project/third_party/Difix3D/src")
     if str(difix_src) not in sys.path:
         sys.path.insert(0, str(difix_src))
@@ -422,7 +426,9 @@ def load_difix_model(model_name: Optional[str], model_path: Optional[str], times
         mv_unet=True,
     )
     model.set_eval()
-    return {"kind": "local_model", "obj": model, "timestep": timestep}
+    if target_device.type == "cuda" and hasattr(model, "to"):
+        model = model.to(target_device)
+    return {"kind": "local_model", "obj": model, "timestep": timestep, "device": str(target_device)}
 
 
 def run_single_difix(model_bundle, image_path: Path, ref_path: Path, output_path: Path, prompt: str, height: int, width: int, overwrite: bool) -> None:

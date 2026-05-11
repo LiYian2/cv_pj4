@@ -99,3 +99,36 @@
 ```bash
 ssh Group8DDY "cd /home/bzhang512/CV_Project/part3_BRPO && export PYTHONPATH=/home/bzhang512/CV_Project/third_party/S3PO-GS:/home/bzhang512/CV_Project/part3_BRPO && /home/bzhang512/miniconda3/envs/s3po-gs/bin/python scripts/xxx.py --args"
 ```
+
+
+## 2026-05-09 handoff — E7a 2IMG+PAIR binary cap
+- Current E7a path was patched and rerun in-place. Code: pseudo_branch/common/twoimg_pair_proxy_depth.py::apply_cm_cap now uses binary (C_m > 0) support; do not restore depth * C_m.
+- Rerun output: /data3/bzhang512/part3_online_mapping_experiments/E7a_jointprimary_twoimg_pair_proxy/DL3DV-2_part2_s3po/2026-05-09-15-51-46.
+- Verified P0 fix in artifacts, but result is mixed: PSNR improved to 20.597 yet still below E5c 21.201; ATE/stats_final is bad at 0.329. Next reentry should investigate post-fix 2img depth value quality and pose/geometry drift, not re-open the old 0.5 cap bug.
+
+
+## 2026-05-09 handoff — E7a depth-off winner
+- Do not conclude E7a failed because pseudo online mapping is useless. Clean ablation shows the opposite: E7a_binarycap_depthoff reaches after_opt PSNR 21.633 and stats_final RMSE 0.0619, better than E5c PSNR 21.201 / RMSE 0.0645.
+- The harmful component is current 2IMG dense depth loss. Post-binarycap depth-enabled E7a has PSNR 20.597 and RMSE 0.329, with spikes around frame 264 and frames 302/303/305.
+- Artifact diagnosis: no global scale drift on shared E5c support (ratio about 1.01), but abs-rel about 0.20; right PAIR anchor disagreement is large (mean median abs-rel about 0.31, late events around 0.63); added support is mostly single-support.
+- If re-entering: preserve apply_cm_cap binary support; for ablations remember lambda_depth=0 requires match_real_loss_weights=false, otherwise resolver resets lambda_depth to 0.025 from Training.alpha. Next depth repair should test both-only / anchor-valid / right-left-consistency gated depth, not full dense 2IMG depth.
+
+
+## 2026-05-10 E8 C_m local expansion audit
+
+- Fixed C_m expansion metadata/stat reporting: observation summaries now separate raw reciprocal C_m stats from consumed soft-C_m stats; diagnostic sidecar dry-run no longer writes frame outputs; sidecar summaries include depth target filled before/after and complete reject counters.
+- Audited E8 at /home/bzhang512/my_storage2_1T/part3_online_mapping_experiments/E8_cm_local_expand_r1_soft. The run is protocol-aligned with E5c except cm_expansion_mode=local_soft_v1 and cm_expansion_apply_to_depth_scope=false.
+- Final metrics: E8 after_opt PSNR 20.5222, SSIM 0.6629, LPIPS 0.2684, stats_final RMSE 0.0875. E5c reference: PSNR 21.2012, RMSE 0.0645. E8 degraded.
+- Code/production-flow check: raw support is preserved; signal confidence equals cm_expanded_soft and not cm_raw; depth target/valid scope stays raw/projected. No current hard wiring bug was found in the audited E8 artifacts.
+- Mechanistic diagnosis: local expansion adds about 8-16 percent image area as RGB-only soft C_m; depth_in_added is 0 for all audited events because apply_to_depth_scope=false and projected depth target remains raw. Since paper_brpo_split_v1 RGB loss normalizes by confidence_mask.sum, added easy/weak pixels dilute raw reciprocal seed RGB gradients by about 10-25 percent while adding no geometric anchor. This is the leading explanation for lower training pseudo losses but worse final PSNR/ATE.
+- Next recommendation: do not continue full local_soft_v1 as-is. Test conservative variants: both-only/near-depth-valid expansion, or budget-preserving reweighting that keeps raw seed gradient mass constant; optionally pair with depth-off if isolating pure RGB expansion.
+
+
+## 2026-05-10 handoff — dense_match_v1 landed
+- Added standalone peer-style RGB-only support mode without geometry overlap gating: `rgb_only_support_mode=dense_match_v1`.
+- Implementation files: `pseudo_branch/mask/dense_match_densify.py`, `pseudo_branch/integration/runtime_exact_backend.py`, `third_party/S3PO-GS/utils/slam_backend.py`.
+- Semantics: reciprocal match points -> disk rasterization -> Gaussian blur -> normalize -> threshold; this only changes RGB-only branch support/C_m coverage. Exact projected depth target path is unchanged.
+- Important non-overlap rule: runtime rejects `dense_match_v1` together with `cm_expansion_mode != none`; keep dense-match experiments separate from E8/local_soft_v1 identity.
+- New YAML knobs: `rgb_only_support_mode`, `cm_dense_point_radius`, `cm_dense_blur_sigma`, `cm_dense_blur_kernel`, `cm_dense_corr_threshold`, `cm_dense_seed_mode`, `cm_dense_normalize_mode`.
+- Debug artifacts: raw reciprocal support still saved separately; dense outputs live under `exact_backend_v1/dense_match_v1/` with `dense_match_meta.json`.
+- Verification already done: py_compile/import smoke; direct toy smoke showed dense support ratio > raw support ratio; BackEnd resolver smoke confirmed YAML -> runtime propagation.

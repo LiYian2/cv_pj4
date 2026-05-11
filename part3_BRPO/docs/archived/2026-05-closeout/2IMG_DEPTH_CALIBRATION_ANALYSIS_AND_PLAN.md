@@ -219,3 +219,22 @@ PAIR-proxy adaptive across 9 frames:
 - MRE median: 18.3%
 - MRE std: 5.7%
 - Best: 12.8%, Worst: 29.1%
+
+
+重要提醒:给 Claude 的提醒我觉得有必要，规划文档还不够细，尤其要避免几个坑：
+
+1. 不要做成全图 depth loss。2img+PAIR raw depth 可以 100%，但 safe mode 应该只填充/启用 C_m 内的 depth，RGB C_m 不变，depth effective mask 也不要越过 C_m，除非另开 diagnostic arm。
+
+2. 生产校准不能用 pseudo_render_depth_runtime.npy 当 scale target。它只能作为诊断/评估。正式 scale anchor 应该来自 exact_backend 的 projected_depth_left/right_exact + valid/support/confidence，即 PAIR projected depth anchor。
+
+3. 不要复用现有 mast3r_direct_exact_anchor_v1 当成这个方案。那个是 MASt3R(pseudo, ref) direct depth + global anchor，不是 MASt3R(pseudo, pseudo) + PAIR-proxy adaptive scale。
+
+4. 新模块名不要叫 2img_pair_proxy_depth.py，Python 模块数字开头不合适。建议 twoimg_pair_proxy_depth.py。
+
+5. 默认必须保持 projected，不影响现有实验。新增开关例如 depth_generation_mode: twoimg_pair_proxy_cm_capped_v1；新 config、新 save_dir、新 debug root，不能覆盖 E5c 当前目录。
+
+6. metadata 必须写清楚三组比例：cm_nonzero_ratio、projected_depth_union_ratio、twoimg_depth_effective_ratio_after_cm_cap。否则后面很难判断到底是 depth 没进来，还是进来了但没效果。
+
+7. 先做 sidecar materialize 脚本，在已有 brpo_debug frame 上只生成新 depth 和 summary，不改 signal_v2；确认比例和尺度后再接 runtime。
+
+一句话给 Claude：目标不是 “100% dense depth supervision”，而是 “在 C_m 安全区域内，用 2img+PAIR calibrated depth 补齐 PAIR projected depth 缺口”。当前数据看这个缺口大约是一半 C_m，所以这个实验值得做。

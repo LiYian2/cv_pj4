@@ -92,10 +92,9 @@ def viewpoint_optimizer_groups(vp, lr_rot: float, lr_trans: float, lr_exp: float
 
 
 def current_w2c(vp) -> torch.Tensor:
-    # Fix dtype mismatch: R/T may be float64 from dataset, ensure float32
-    base = torch.eye(4, device=vp.R.device, dtype=torch.float32)
-    base[:3, :3] = vp.R.float()
-    base[:3, 3] = vp.T.float()
+    base = torch.eye(4, device=vp.R.device, dtype=vp.R.dtype)
+    base[:3, :3] = vp.R
+    base[:3, 3] = vp.T
     tau = torch.cat([vp.cam_trans_delta, vp.cam_rot_delta], dim=0)
     return SE3_exp(tau) @ base
 
@@ -241,7 +240,7 @@ def export_view_state(view: Dict[str, Any]) -> Dict[str, Any]:
     abs_pose_theta_norm = None
     scene_scale_used = view.get('stageA_scene_scale')
     if hasattr(vp, 'R0') and hasattr(vp, 'T0') and vp.R0 is not None and vp.T0 is not None:
-        w2c0 = torch.eye(4, device=vp.R0.device, dtype=torch.float32)  # Fix dtype mismatch
+        w2c0 = torch.eye(4, device=vp.R0.device, dtype=vp.R0.dtype)
         w2c0[:3, :3] = vp.R0
         w2c0[:3, 3] = vp.T0
         w2c0_list = w2c0.detach().cpu().numpy().tolist()

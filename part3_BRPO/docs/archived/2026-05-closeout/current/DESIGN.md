@@ -222,3 +222,60 @@ R~ 当前必须区分成三层：
 - T~ 详细：[TARGET_DESIGN.md]
 - G~ 详细：[GAUSSIAN_MANAGEMENT_DESIGN.md]
 - R~ 详细：[REFINE_DESIGN.md]
+
+
+## 2026-05-08 13:18 — Difix device policy
+- Difix device policy is dynamic, not physical-GPU hardcoded: launcher chooses CUDA_VISIBLE_DEVICES; backend uses logical cuda:0 mapped by that environment.
+- Config switch remains use_difix_restoration; optional difix_enforce_backend_device defaults true for backend-loaded Difix.
+
+
+## 2026-05-08 14:10 — E6 upper-bound semantics
+- `pseudo_rgb_source=gt` means pseudo RGB supervision, matching, and RGB-only C_m/mask use the dataset image.
+- Depth supervision remains projected bidirectional exact backend (`depth_generation_mode=projected`), so render depth is still used for geometric verification; only rendered pseudo RGB is bypassed.
+
+
+## 2026-05-09 — 2IMG+PAIR C_m cap semantics
+- C_m is a loss/support confidence, not a depth-value scale. For dense 2IMG+PAIR target generation, C_m cap must be binary support: depth_effective = depth_calibrated * (C_m > 0).
+- Discrete C_m values (1.0 both, 0.5 single) should be applied by the consumer loss as weights, never multiplied into target depth.
+- Post-fix E7a improves PSNR but still trails E5c and has poor ATE, indicating remaining risk is 2img depth value quality/geometry consistency rather than the now-fixed cap bug alone.
+
+
+## 2026-05-09 — E7a depth-loss interpretation
+- Binary C_m cap is necessary but not sufficient. After fixing it, full 2IMG dense depth still causes trajectory/geometry corruption.
+- Shared support does not show a simple global scale error: median E7a/E5c depth ratio is about 1.01, but median abs-rel is about 0.20. The problem is local/value consistency, not one scalar scale.
+- Current implementation calibrates against left PAIR projected depth, then applies the same 2IMG target to both branches. Right-branch disagreement is large; late events show right-anchor abs-rel around 0.63.
+- Added 2IMG coverage is dominated by single-support pixels, so most new depth supervision is weakly verified. Until repaired, 2IMG depth should be disabled or gated to safer regions such as both-support / anchor-valid / right-left-consistent pixels.
+- Evidence: E7a_binarycap_depthoff (same config except match_real_loss_weights=false and lambda_depth=0.0) reaches PSNR 21.633 and stats_final RMSE 0.0619.
+
+
+## 2026-05-10 E8 C_m local expansion audit
+
+- Fixed C_m expansion metadata/stat reporting: observation summaries now separate raw reciprocal C_m stats from consumed soft-C_m stats; diagnostic sidecar dry-run no longer writes frame outputs; sidecar summaries include depth target filled before/after and complete reject counters.
+- Audited E8 at /home/bzhang512/my_storage2_1T/part3_online_mapping_experiments/E8_cm_local_expand_r1_soft. The run is protocol-aligned with E5c except cm_expansion_mode=local_soft_v1 and cm_expansion_apply_to_depth_scope=false.
+- Final metrics: E8 after_opt PSNR 20.5222, SSIM 0.6629, LPIPS 0.2684, stats_final RMSE 0.0875. E5c reference: PSNR 21.2012, RMSE 0.0645. E8 degraded.
+- Code/production-flow check: raw support is preserved; signal confidence equals cm_expanded_soft and not cm_raw; depth target/valid scope stays raw/projected. No current hard wiring bug was found in the audited E8 artifacts.
+- Mechanistic diagnosis: local expansion adds about 8-16 percent image area as RGB-only soft C_m; depth_in_added is 0 for all audited events because apply_to_depth_scope=false and projected depth target remains raw. Since paper_brpo_split_v1 RGB loss normalizes by confidence_mask.sum, added easy/weak pixels dilute raw reciprocal seed RGB gradients by about 10-25 percent while adding no geometric anchor. This is the leading explanation for lower training pseudo losses but worse final PSNR/ATE.
+- Next recommendation: do not continue full local_soft_v1 as-is. Test conservative variants: both-only/near-depth-valid expansion, or budget-preserving reweighting that keeps raw seed gradient mass constant; optionally pair with depth-off if isolating pure RGB expansion.
+
+
+## 2026-05-10 — dense_match_v1 standalone C_m support builder
+- Added a new RGB-only support-generation branch distinct from `cm_expansion_mode`: `rgb_only_support_mode=dense_match_v1`.
+- Semantics: use the existing reciprocal match points as seeds, then build branch-local support by `disk(radius) -> Gaussian blur -> normalize -> threshold`. No reprojection/depth overlap is applied in this mode.
+- Consumer contract is intentionally conservative in v1: this mode replaces the branch `support_mask/confidence_map` used by the `rgb_only_verification` path, but does not modify exact projected depth generation and does not inject a soft `confidence_cm_override`.
+- Therefore v1 isolates one question only: whether larger RGB-only support coverage changes online-mapping behavior when depth target semantics stay fixed.
+- Non-overlap rule: `dense_match_v1` must not be combined with `cm_expansion_mode`; runtime raises a hard error to keep this branch separate from local soft C_m expansion.
+- Config surface:
+  - `rgb_only_support_mode: reciprocal_seed | dense_match_v1`
+  - `cm_dense_point_radius`
+  - `cm_dense_blur_sigma`
+  - `cm_dense_blur_kernel` (`0` => auto)
+  - `cm_dense_corr_threshold`
+  - `cm_dense_seed_mode: binary | confidence_weighted`
+  - `cm_dense_normalize_mode: max | p99 | none`
+- Debug/production artifacts now preserve both raw and dense views of the support field, enabling direct raw-vs-dense coverage audits per pseudo event.
+
+## 2026-05-10 — dense_match_v1 bridge hardening
+- Dense-match enablement requires three distinct layers to agree: YAML config, resolver output, and the actual `RuntimeExactBackendConfig` constructed inside `_maybe_prepare_brpo_runtime_slots()`.
+- The residual E9 failure mode was exactly a layer-3 drop: the runtime constructor omitted `rgb_only_support_mode` and `cm_dense_*` fields, so the consumer could execute `reciprocal_seed` despite a dense YAML/config identity.
+- Mainline guardrail now writes `exact_cfg_debug.json` for each prepared frame and raises immediately on support-mode mismatch. This makes future dense-route bring-up artifact-verifiable and prevents another silent fallback run.
+

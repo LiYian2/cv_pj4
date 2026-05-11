@@ -119,7 +119,7 @@ def scale_reg_loss(gaussians, target_scale_mean: float = None, max_scale: float 
 
 
 def _build_w2c0(viewpoint):
-    w2c0 = torch.eye(4, device=viewpoint.R.device, dtype=torch.float32)  # Fix dtype mismatch
+    w2c0 = torch.eye(4, device=viewpoint.R.device, dtype=viewpoint.R.dtype)
     w2c0[:3, :3] = viewpoint.R0
     w2c0[:3, 3] = viewpoint.T0
     return w2c0

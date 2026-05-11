@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from pathlib import Path
-import os
 from typing import Any
 
 import numpy as np
@@ -473,16 +472,6 @@ def build_runtime_exact_backend_bundle(
     # ==================== MASt3R Matching (using fused RGB if difix enabled) ====================
     pseudo_input_for_match = pseudo_state["image_path"]
     h, w = int(pseudo_state["image_height"]), int(pseudo_state["image_width"])
-    write_json(frame_root / "sink_cfg_debug.json", {
-        "module_file": __file__,
-        "frame_id": int(slot.frame_id),
-        "rgb_only_verification": bool(cfg.rgb_only_verification),
-        "received_rgb_only_support_mode": str(cfg.rgb_only_support_mode),
-        "received_cm_dense_point_radius": int(cfg.cm_dense_point_radius),
-        "received_cm_dense_blur_sigma": float(cfg.cm_dense_blur_sigma),
-        "received_cm_dense_corr_threshold": float(cfg.cm_dense_corr_threshold),
-        "expect_dense_env": os.environ.get("E9_EXPECT_DENSE_MATCH_V1", ""),
-    })
 
     # Get match points and confidence from MASt3R
     pts_pseudo_left, pts_ref_left, match_conf_left = matcher.match_pair(
@@ -504,8 +493,6 @@ def build_runtime_exact_backend_bundle(
 
         # Step 1: Get RGB-only mask for C_m
         rgb_only_support_mode = str(cfg.rgb_only_support_mode)
-        if os.environ.get("E9_EXPECT_DENSE_MATCH_V1", "") == "1" and rgb_only_support_mode != "dense_match_v1":
-            raise RuntimeError(f"E9 sink mismatch: expected dense_match_v1 at runtime_exact_backend, got {rgb_only_support_mode}")
         if rgb_only_support_mode == "dense_match_v1" and str(cfg.cm_expansion_mode) != "none":
             raise ValueError("dense_match_v1 is a standalone RGB-only support mode and must not be combined with cm_expansion_mode")
         dense_match_meta = None

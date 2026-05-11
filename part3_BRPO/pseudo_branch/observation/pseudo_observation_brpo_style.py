@@ -802,6 +802,7 @@ def build_exact_brpo_upstream_target_observation(
     target_field_semantics: str = "exact_upstream_v1",
     depth_target_rule: str | None = None,
     depth_input_semantics: str = "projected_depth_exact",
+    confidence_cm_override: np.ndarray | None = None,
 ) -> Dict[str, np.ndarray | Dict]:
     """Exact BRPO upstream target observation builder.
     
@@ -845,10 +846,32 @@ def build_exact_brpo_upstream_target_observation(
     verify_union = support_left | support_right
     
     # Strict BRPO C_m: both->1.0, xor->0.5, none->0.0
-    confidence_cm = np.zeros_like(support_left, dtype=np.float32)
-    confidence_cm[verify_both] = 1.0
-    confidence_cm[verify_xor] = 0.5
+    # OR use override if provided (for cm_expansion)
+    if confidence_cm_override is not None:
+        confidence_cm = np.asarray(confidence_cm_override, dtype=np.float32)
+        cm_source = "cm_expansion_override"
+    else:
+        confidence_cm = np.zeros_like(support_left, dtype=np.float32)
+        confidence_cm[verify_both] = 1.0
+        confidence_cm[verify_xor] = 0.5
+        cm_source = "exact_backend_support"
     
+    # Raw discrete C_m from reciprocal support, kept for diagnostics even when
+    # a soft override is consumed by the loss.
+    raw_confidence_cm = np.zeros_like(support_left, dtype=np.float32)
+    raw_confidence_cm[verify_both] = 1.0
+    raw_confidence_cm[verify_xor] = 0.5
+    cm_positive = confidence_cm > 0
+    raw_cm_positive = raw_confidence_cm > 0
+    num_pixels = float(confidence_cm.size)
+    raw_effective_weight = float(raw_confidence_cm.sum() / num_pixels)
+    cm_effective_weight = float(confidence_cm.sum() / num_pixels)
+    cm_weight_gain_vs_raw = float(cm_effective_weight / max(raw_effective_weight, 1e-8))
+    cm_added_nonzero = cm_positive & (~raw_cm_positive)
+    cm_changed_existing = cm_positive & raw_cm_positive & (np.abs(confidence_cm - raw_confidence_cm) > 1e-6)
+    def _value_ratio(value: float) -> float:
+        return float((np.abs(confidence_cm - float(value)) <= 1e-6).mean())
+
     # Combine with depth target result
     depth_target = depth_result["pseudo_depth_target_exact_upstream_v1"]
     source_map = depth_result["pseudo_source_map_exact_upstream_v1"]
@@ -860,12 +883,32 @@ def build_exact_brpo_upstream_target_observation(
         "target_field_semantics": str(target_field_semantics),
         "target_loss_contract": "exact_shared_cm_v1",
         "valid_ratio": float(valid_mask.mean()),
-        "cm_nonzero_ratio": float((confidence_cm > 0).mean()),
-        "cm_mean_positive": float(confidence_cm[confidence_cm > 0].mean()) if (confidence_cm > 0).any() else 0.0,
+        "cm_nonzero_ratio": float(cm_positive.mean()),
+        "cm_source": cm_source,
+        "confidence_cm_override_applied": bool(confidence_cm_override is not None),
+        "cm_mean_positive": float(confidence_cm[cm_positive].mean()) if cm_positive.any() else 0.0,
+        # Raw reciprocal-support stats.  These are intentionally raw support, not
+        # expanded-soft provenance bins.
+        "cm_support_stats_semantics": "raw reciprocal support for *_raw fields; consumed soft C_m for cm_*effective/weight fields",
+        "cm_raw_nonzero_ratio": float(raw_cm_positive.mean()),
+        "cm_raw_both_ratio": float(verify_both.mean()),
+        "cm_raw_single_ratio": float(verify_xor.mean()),
+        "cm_raw_effective_weight": raw_effective_weight,
+        # Backward-compatible names, but now explicitly equivalent to raw support.
         "cm_both_ratio": float(verify_both.mean()),
         "cm_single_ratio": float(verify_xor.mean()),
+        # Consumed C_m stats (soft override if present, otherwise raw discrete C_m).
+        "cm_effective_weight": cm_effective_weight,
+        "cm_weight_gain_vs_raw": cm_weight_gain_vs_raw,
+        "cm_added_nonzero_ratio": float(cm_added_nonzero.mean()),
+        "cm_changed_existing_ratio": float(cm_changed_existing.mean()),
+        "cm_weight_1_00_ratio": _value_ratio(1.0),
+        "cm_weight_0_60_ratio": _value_ratio(0.6),
+        "cm_weight_0_50_ratio": _value_ratio(0.5),
+        "cm_weight_0_25_ratio": _value_ratio(0.25),
         "depth_target_filled_ratio": float((depth_target > 1e-6).mean()),
-        "depth_target_filled_within_cm_ratio": float((depth_target[verify_union] > 1e-6).mean()) if verify_union.any() else 0.0,
+        "depth_target_filled_within_raw_cm_ratio": float((depth_target[verify_union] > 1e-6).mean()) if verify_union.any() else 0.0,
+        "depth_target_filled_within_cm_ratio": float((depth_target[cm_positive] > 1e-6).mean()) if cm_positive.any() else 0.0,
         "avg_target_confidence": float(target_confidence[valid_mask > 0].mean()) if (valid_mask > 0).any() else 0.0,
         "source_counts": depth_result["summary"]["source_counts"],
         "no_render_fallback": True,
@@ -873,7 +916,7 @@ def build_exact_brpo_upstream_target_observation(
         "target_depth_override_applied": bool(depth_result["summary"].get("target_depth_override_applied", False)),
         "policy": {
             "version": "exact_brpo_upstream_target_v1",
-            "confidence_rule": "strict BRPO-style C_m from exact backend support sets",
+            "confidence_rule": "soft C_m override" if confidence_cm_override is not None else "strict BRPO-style C_m from exact backend support sets",
             "depth_target_rule": str(depth_target_rule or "exact upstream projected-depth composition with continuous confidence, no render fallback"),
             "strict_brpo_scope": "cm_and_target_and_upstream_backend",
             "upstream_backend": "exact_branch_native_v1",
