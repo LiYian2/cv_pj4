@@ -15,6 +15,7 @@ Current judgment:
 Important current constraint:
 - Do not execute code reorganization yet.
 - First keep this document as the planning authority; actual file moves/splits come later after the online mainline and documentation are frozen.
+- User constraint: do not refactor or rename `third_party/S3PO-GS/*`; keep third-party code untouched and perform only `part3_BRPO`-side restructuring.
 
 ## 2. Current route boundary: what is actually live
 

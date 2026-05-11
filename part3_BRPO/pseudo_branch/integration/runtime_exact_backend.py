@@ -143,6 +143,14 @@ class RuntimeExactBackendConfig:
     cm_expanded_single_weight: float = 0.25
     cm_expansion_apply_to_depth_scope: bool = False
 
+    # ABLATION: Disable confidence mask (A2)
+    # When True, confidence_mask becomes all ones (no masking effect)
+    disable_confidence_mask: bool = False
+
+    # ABLATION: Single-side difix fusion (A3)
+    # Valid modes: "brpo_overlap_confidence", "left_only", "right_only"
+    # "left_only" / "right_only" bypass fusion, use single reference's difix result directly
+
 @dataclass
 class RuntimeExactBackendBundle:
     slot: RuntimePseudoSlot
@@ -440,14 +448,29 @@ def build_runtime_exact_backend_bundle(
             right_geom["overlap_confidence"],
         )
 
-        # Fuse RGB using residual fusion.
-        fused_rgb_uint8 = fuse_residual_targets(
-            I_render=pseudo_rgb_uint8,
-            I_L=left_fixed_rgb,
-            I_R=right_fixed_rgb,
-            W_L=w_left,
-            W_R=w_right,
-        )
+        # ABLATION: Single-side fusion mode (A3)
+        fusion_mode = str(cfg.difix_fusion_mode)
+        if fusion_mode == "left_only":
+            # Use left reference's difix result only
+            fused_rgb_uint8 = left_fixed_rgb
+            w_left = np.ones(pseudo_rgb_uint8.shape[:2], dtype=np.float32)
+            w_right = np.zeros(pseudo_rgb_uint8.shape[:2], dtype=np.float32)
+            fused_conf = np.ones(pseudo_rgb_uint8.shape[:2], dtype=np.float32)
+        elif fusion_mode == "right_only":
+            # Use right reference's difix result only
+            fused_rgb_uint8 = right_fixed_rgb
+            w_left = np.zeros(pseudo_rgb_uint8.shape[:2], dtype=np.float32)
+            w_right = np.ones(pseudo_rgb_uint8.shape[:2], dtype=np.float32)
+            fused_conf = np.ones(pseudo_rgb_uint8.shape[:2], dtype=np.float32)
+        else:
+            # Default: BRPO overlap confidence fusion
+            fused_rgb_uint8 = fuse_residual_targets(
+                I_render=pseudo_rgb_uint8,
+                I_L=left_fixed_rgb,
+                I_R=right_fixed_rgb,
+                W_L=w_left,
+                W_R=w_right,
+            )
         fused_rgb = fused_rgb_uint8.astype(np.float32) / 255.0
 
         # Save fusion results.
@@ -749,6 +772,12 @@ def build_runtime_exact_backend_bundle(
         # Write expansion side products.  Never overwrite raw reciprocal support by default.
         cm_exp_out = ensure_dir(exact_frame_out / "cm_expansion_v1")
         confidence_cm_local_soft = cm_expansion_result["cm_composition"]["confidence_cm"].astype(np.float32)
+
+        # ABLATION: Disable confidence mask (A2)
+        if bool(cfg.disable_confidence_mask):
+            h, w = confidence_cm_local_soft.shape
+            confidence_cm_local_soft = np.ones((h, w), dtype=np.float32)
+
         cm_expansion_meta = {
             "frame_id": int(slot.frame_id),
             "expansion_mode": "local_soft_v1",
@@ -780,6 +809,25 @@ def build_runtime_exact_backend_bundle(
         # Add confidence_cm_override for signal builder; this is the intended runtime effect.
         left_result["confidence_cm_override"] = confidence_cm_local_soft
         right_result["confidence_cm_override"] = confidence_cm_local_soft
+
+    # ABLATION: Disable confidence mask when cm_expansion is off (A2 fallback)
+    # When disable_confidence_mask=True but cm_expansion_mode="none",
+    # we need to inject all-ones override for RGB/depth loss weighting.
+    # Also save the file so load_exact_backend_frame_bundle can pick it up.
+    if bool(cfg.disable_confidence_mask) and str(cfg.cm_expansion_mode) == "none":
+        h = int(pseudo_state["image_height"])
+        w = int(pseudo_state["image_width"])
+        all_ones = np.ones((h, w), dtype=np.float32)
+        left_result["confidence_cm_override"] = all_ones
+        right_result["confidence_cm_override"] = all_ones
+        # Save to expected location for downstream signal builder
+        np.save(exact_frame_out / "confidence_cm_local_soft_v1.npy", all_ones)
+        write_json(exact_frame_out / "ablation_no_mask_meta.json", {
+            "frame_id": int(slot.frame_id),
+            "disable_confidence_mask": True,
+            "cm_expansion_mode": "none",
+            "override_source": "ablation_all_ones",
+        })
 
 
     direct_depth_left = None

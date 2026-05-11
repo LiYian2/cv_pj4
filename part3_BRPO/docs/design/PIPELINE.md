@@ -247,21 +247,22 @@ Relevant code:
 
 ### 7.1 Default matching route
 
-The default route is sparse reciprocal descriptor matching:
-- MASt3R / DUSt3R inference extracts descriptors
-- `fast_reciprocal_NNs(...)` builds mutual nearest-neighbor matches
-- default sparse matcher metadata includes `subsample_or_initxy1=8`
+The current mainline uses dense 3D point matching:
+- `matcher_mode=dense_pts3d_3d` (current default across E5c, E7a, E9, R5c, W5c)
+- MASt3R inference extracts dense 3D point maps for pseudo and reference views
+- dense correspondence is built by projecting 3D points and finding nearest neighbors
+- produces higher-density support maps compared to sparse reciprocal matching
 
 Output per branch:
-- pseudo points `pts_pseudo`
-- reference points `pts_ref`
-- per-match descriptor confidence
+- pseudo points `pts_pseudo` (dense)
+- reference points `pts_ref` (dense)
+- per-point confidence from MASt3R output
 
 ### 7.2 Optional matcher family
 
-The runtime also supports another matcher mode via the matcher factory:
-- `matcher_mode=sparse_desc_2d` (default sparse reciprocal route)
-- `matcher_mode=dense_pts3d_3d` (optional dense 3D route)
+The runtime supports two matcher modes:
+- `matcher_mode=dense_pts3d_3d` (current mainline default)
+- `matcher_mode=sparse_desc_2d` (legacy sparse reciprocal route)
 
 Current mainline understanding:
 - the strict BRPO semantics are downstream of the matcher
@@ -477,36 +478,50 @@ Pseudo views are runtime supervision members, not persistent mapping members, bu
 Real keyframes continue to use the normal S3PO mapping loss via rendered RGB/depth against the real viewpoints.
 This remains the real-branch anchor.
 
-### 12.3 Shared-mask pseudo RGB-D loss contract
+### 12.3 Paper-aligned split loss contract
 
-Current mainline default depth loss mode is `exact_shared_cm_v1`.
-Its key rule is:
-- RGB and depth use the same discrete `C_m` support domain
-- exact valid-mask gating may further restrict the domain
-- target confidence may further downweight the same domain continuously
+Current mainline default depth loss mode is `paper_brpo_split_v1`.
 
-Formally, if
-- `C_m` is the strict discrete confidence mask
-- `V` is the valid mask
-- `C_t` is the continuous target confidence
+**Critical semantics**: RGB and depth losses use **different mask scopes**.
 
-then the effective supervision mask is
+RGB loss uses only the discrete `C_m`:
+- No valid_mask gating
+- No target_confidence weighting
+- Pure three-level BRPO confidence mask
 
-`M_eff = C_m * V * C_t`
+Depth loss can optionally use additional weighting:
+- Uses `C_m` as base mask
+- Optionally applies `depth_confidence` (target_confidence) for continuous weighting
+- `depth_confidence` never gates RGB loss ("never gates RGB" rule)
 
-(with `V` and `C_t` included only when provided)
+Formally, for `paper_brpo_split_v1`:
 
-The RGB loss is computed on `M_eff`, and the depth loss is also computed on `M_eff`.
-Thus the current mainline semantics are truly shared-mask RGB-D supervision.
+```
+M_rgb = C_m          (RGB uses pure discrete C_m)
+M_depth = C_m * depth_confidence   (depth may use additional continuous weighting)
+```
+
+The loss terms are:
+
+```
+L_rgb = masked_rgb_loss(render_rgb, target_rgb, M_rgb, viewpoint)
+L_depth = masked_depth_loss(render_depth, target_depth, M_depth)
+```
+
+This split contract ensures depth-side weighting does not flow back to affect RGB supervision.
+
+**Historical note**: The older `exact_shared_cm_v1` mode uses `M_eff = C_m * valid_mask * target_confidence` for both RGB and depth, but this is no longer the mainline default.
 
 ### 12.4 Depth loss and RGB loss form
 
 The masked RGB loss is a confidence-weighted masked L1 over RGB channels after exposure adjustment.
 The masked depth loss is a confidence-weighted masked L1 over valid target-depth pixels.
 
-At a high level, the pseudo objective is:
+At a high level, the pseudo objective for `paper_brpo_split_v1` is:
 
-`L_pseudo = beta_rgb * L_rgb(M_eff) + lambda_depth * L_depth(M_eff) + lambda_pose * L_pose + L_abs_pose + lambda_exp * L_exp`
+```
+L_pseudo = beta_rgb * L_rgb(C_m) + lambda_depth * L_depth(C_m * depth_conf) + lambda_pose * L_pose + L_abs_pose + lambda_exp * L_exp
+```
 
 where:
 - `L_pose` is pose residual regularization
@@ -611,6 +626,25 @@ The correct description is:
 - pseudo is a runtime equal-member supervision view inside the mapping event
 - not a persistent real-window/keyframe object in the SLAM state graph
 
+### 13.4 Pseudo scene mask mode behavior
+
+When `pseudo_window_equivalence=true` (joint-primary default), the `pseudo_scene_mask_mode` config parameter is **overridden**.
+
+Code behavior (`slam_backend_brpo.py:531`):
+```python
+scene_mask_mode = "none" if pseudo_window_equivalence else str(cfg.pseudo_scene_mask_mode or "all_valid")
+```
+
+This means:
+- When `pseudo_window_equivalence=true`: `scene_mask_mode="none"` (forced)
+- The configured `pseudo_scene_mask_mode: both_only` is **not applied** in joint-primary mode
+- Pseudo loss uses the full `C_m` domain without additional `both_only` restriction
+
+The `pseudo_scene_mask_mode` config only applies when `pseudo_window_equivalence=false` (side-branch mode).
+In that case, `both_only` would restrict supervision to `verify_both` regions only.
+
+**Report implication**: When documenting joint-primary experiments, the effective supervision domain is the full `C_m`, not `both_only` restricted.
+
 ## 14. Optional post-map masked pseudo color refinement
 
 Relevant code:
@@ -631,13 +665,14 @@ The most stable current online interpretation is:
 - keyframe-triggered runtime pseudo slot insertion
 - midpoint or other configured placement inside newly closed gaps
 - coarse pseudo render
-- optional Difix restoration and BRPO-style residual fusion
-- MASt3R reciprocal matching
-- exact branch verification
+- optional Difix restoration and BRPO-style residual fusion (default: `difix_fusion_mode=brpo_overlap_confidence`)
+- MASt3R dense 3D matching (`matcher_mode=dense_pts3d_3d`)
+- exact branch verification with RGB-only support (`rgb_only_verification=true`, `rgb_only_support_mode=reciprocal_seed`)
 - strict discrete three-level `C_m`
-- exact-upstream projected-depth target
-- shared-mask RGB-D pseudo loss (`exact_shared_cm_v1`)
-- joint backend mapping with pose-gradient fix
+- exact-upstream projected-depth target (`depth_generation_mode=projected` for baseline experiments)
+- paper-aligned split loss (`depth_loss_mode=paper_brpo_split_v1`) with RGB using pure `C_m`
+- joint backend mapping (`topology_mode=joint_primary`, `pseudo_window_equivalence=true`)
+- pose-gradient fix for proper gradient flow
 - optional Gauss-Newton and scale regularization
 
 ### 15.2 Optional module family A: placement and event structure
@@ -658,11 +693,16 @@ The most stable current online interpretation is:
 
 ### 15.4 Optional module family C: matching and support generation
 
-- `matcher_mode = sparse_desc_2d | dense_pts3d_3d`
-- `rgb_only_verification = true | false`
-- `rgb_only_support_mode = reciprocal_seed | dense_match_v1`
+- `matcher_mode = sparse_desc_2d | dense_pts3d_3d` (mainline default: `dense_pts3d_3d`)
+- `rgb_only_verification = true | false` (mainline default: `true`)
+- `rgb_only_support_mode = reciprocal_seed | dense_match_v1` (mainline default: `reciprocal_seed`)
 
-`dense_match_v1` is not the default strict path.
+When `rgb_only_verification=true`:
+- `C_m` is computed from RGB matching correspondences only
+- No depth-based geometric verification is used for `C_m` generation
+- Depth targets still come from projected depth from matched correspondences
+
+`dense_match_v1` (E9 experiment) is not the default path.
 It is an optional densified RGB-only support route that does:
 - reciprocal seed rasterization
 - Gaussian blur
@@ -678,31 +718,53 @@ This is also optional and should be documented as a side branch over the raw str
 
 ### 15.6 Optional module family E: depth-generation overrides
 
-Main default:
-- `depth_generation_mode = projected`
+Baseline experiments (E5c, R5c, W5c):
+- `depth_generation_mode = projected` (exact upstream projected depth)
 
-Optional alternatives:
+E7a/E9 experiments:
+- `depth_generation_mode = twoimg_pair_proxy_cm_capped_v1` (2IMG pair proxy depth)
+
+Optional alternatives not currently in mainline:
 - `mast3r_direct_exact_anchor_v1`
-- `twoimg_pair_proxy_cm_capped_v1`
 
-The important closeout message is:
-- the main default target depth still comes from left/right branch projected depth
-- the 2IMG or direct-depth routes are optional depth-field variants, not the default online target definition
+The important closeout message:
+- baseline experiments use projected depth from left/right branch correspondences
+- E7a/E9 use the `twoimg_pair_proxy_cm_capped_v1` variant which computes depth differently
+- report should distinguish which depth generation mode is used per experiment
 
 ### 15.7 Optional module family F: optimizer and control switches
 
-- `match_real_loss_weights`
+Loss weight modes:
+- `match_real_loss_weights = true | false`
+  - `true` (R5c, W5c): `beta_rgb` and `lambda_depth` auto-synced with `Training.alpha`
+  - `false` (E7a, E9): explicit `beta_rgb` and `lambda_depth` from config
+
+Pose optimization:
 - `update_real_pose`
-- `update_pseudo_pose`
+- `update_pseudo_pose` (default: `true`)
 - `update_real_exposure`
 - `use_gauss_newton`
+
+Scale regularization:
 - `lambda_scale`, `max_scale`
+- `isotropic_weight` (fallback when `lambda_scale=0`)
+
+Absolute pose prior:
 - `lambda_abs_pose`, `lambda_abs_t`, `lambda_abs_r`
-- `pseudo_window_equivalence`
+- `abs_pose_robust = charbonnier | huber`
+
+Joint-primary topology:
+- `pseudo_window_equivalence = true` (default for joint-primary)
+  - When `true`, `pseudo_scene_mask_mode` is forced to `"none"` (see Section 13.4)
 - `extra_real_views`
 - `propagate_pseudo_delta_to_neighbors`
-- `gaussian_maintenance_source`
+- `gaussian_maintenance_source = real_only` (default)
 - `joint_primary_run_legacy_prune`
+
+Side-branch only (not used in joint-primary):
+- `pseudo_scene_mask_mode = all_valid | both_only`
+  - Only applies when `pseudo_window_equivalence=false`
+  - `both_only` would restrict supervision to verify_both regions
 
 ## 16. What is not the core mainline and should be described carefully in a report
 
@@ -717,7 +779,7 @@ The important closeout message is:
 
 A compact but faithful description of the current online mainline is:
 
-The live Part3 BRPO system inserts runtime pseudo supervision into the S3PO backend at keyframe-triggered gap-closure events. For each selected pseudo slot, it renders a coarse pseudo RGB/depth view, optionally performs left/right Difix restoration and geometry-guided residual RGB fusion, matches the fused pseudo image to the left/right real keyframes with MASt3R reciprocal correspondences, verifies both branches geometrically to obtain exact support and projected depth, converts those branch results into strict three-level BRPO confidence `C_m` and exact-upstream projected-depth targets, then optimizes the live Gaussian scene and pose residuals with a shared-mask RGB-D pseudo loss inside the backend mapping loop. Optional branches modify placement density, support densification, local confidence expansion, pseudo RGB source, and target-depth generation, but the main default semantics remain strict discrete `C_m` plus exact projected-depth supervision without render-depth fallback.
+The live Part3 BRPO system inserts runtime pseudo supervision into the S3PO backend at keyframe-triggered gap-closure events. For each selected pseudo slot, it renders a coarse pseudo RGB/depth view, optionally performs left/right Difix restoration and geometry-guided residual RGB fusion using overlap confidence, matches the fused pseudo image to the left/right real keyframes with MASt3R dense 3D correspondences, builds RGB-only support masks to obtain strict three-level BRPO confidence `C_m` (both=1.0, single=0.5, none=0), computes projected-depth targets from verified correspondences, then optimizes the live Gaussian scene and pose residuals inside the joint-primary backend mapping loop. The pseudo loss uses `paper_brpo_split_v1` contract where RGB supervision uses pure discrete `C_m` without additional gating, while depth supervision may optionally apply continuous confidence weighting. In joint-primary mode with `pseudo_window_equivalence=true`, the configured `pseudo_scene_mask_mode` is overridden to `"none"`, meaning the full `C_m` domain receives supervision rather than being restricted to `both_only` regions.
 
 ## 18. Bottom line
 
