@@ -1,0 +1,272 @@
+\section{Method}
+\label{sec:method}
+
+\subsection{Overview}
+\label{sec:method_overview}
+
+We build the Part 3 pipeline as an online pseudo-view supervision module inside the S3PO-GS backend mapping stage. The S3PO frontend still tracks real frames and selects real keyframes, while our branch adds temporary pseudo views only for backend optimization. These pseudo views are not stored as persistent SLAM keyframes and do not replace real-frame tracking. Instead, they provide confidence-masked RGB-D supervision that can update the live Gaussian scene and the pseudo camera residuals. This design uses generated views to improve under-observed regions while keeping the reconstruction anchored by real keyframes.
+
+% \begin{figure*}[t]
+%   \centering
+%   \includegraphics[width=\linewidth]{figures/online_brpo_mapping_pipeline.pdf}
+%   \caption{Overview of the online BRPO-style pseudo-view mapping pipeline. When a new real keyframe closes a gap, the backend selects runtime pseudo slots between the two real keyframes. Each pseudo view is rendered from the current Gaussian scene, restored with left/right reference-guided Difix branches, fused into a pseudo RGB target, verified through bidirectional support, and used as masked RGB-D supervision during backend mapping. Pseudo views are runtime supervision members, not persistent SLAM keyframes.}
+%   \label{fig:online_brpo_pipeline}
+% \end{figure*}
+
+\subsection{Keyframe-Triggered Pseudo-View Insertion}
+\label{sec:pseudo_slot}
+
+Let $k_l$ and $k_r$ denote two neighboring real keyframes in the current backend window, where $k_r$ is the newly arrived keyframe. The backend selects pseudo-view slots from the non-keyframe frames between them. Each slot is associated with a pseudo frame index $k_p$ and two reference keyframes, $k_l$ and $k_r$. In the midpoint setting, $k_p$ is placed near the center of the interval. More generally, for a placement ratio $r\in(0,1)$, we select
+\begin{equation}
+k_p = \operatorname{snap}\big(k_l + r(k_r-k_l)\big),
+\end{equation}
+where $\operatorname{snap}(\cdot)$ maps the continuous position to an available non-keyframe frame id.
+
+The pseudo camera is constructed from the runtime camera state exported by the frontend. This state contains the image size, camera intrinsics, field of view, and the current pose estimate for the selected frame. The resulting pseudo camera defines the viewpoint used for coarse rendering, reference-guided fusion, and backend supervision in the following stages.
+
+\subsection{Reference-Guided Pseudo RGB Fusion}
+\label{sec:pseudo_target}
+
+For each selected pseudo slot, the backend first renders a coarse pseudo view from the current Gaussian scene. This produces a pseudo RGB image $I_{\mathrm{rend}}$ and a pseudo depth map $D_{\mathrm{rend}}$ under the pseudo camera. The same Gaussian scene is also rendered from the left and right reference keyframes to provide reference depths. The coarse pseudo render gives a geometrically aligned initial view, but it may contain blur, holes, and floating artifacts because the underlying Gaussian scene is still sparse.
+
+We then use Difix-based restoration to obtain two reference-guided pseudo RGB candidates. The left branch uses the left keyframe as the reference and produces $I_L$, while the right branch uses the right keyframe and produces $I_R$. Since the two references may have different visibility and different geometric reliability, we do not average the two outputs directly. Instead, we compute a branch confidence based on geometric overlap.
+
+For a projected pseudo point in a reference view, let $z_{\mathrm{ref}}$ be the projected depth and $d_{\mathrm{ref}}$ be the sampled reference depth. We define a relative depth error
+\begin{equation}
+e_{\mathrm{rel}}
+=
+\frac{|z_{\mathrm{ref}}-d_{\mathrm{ref}}|}
+{0.5(|z_{\mathrm{ref}}|+|d_{\mathrm{ref}}|)+\epsilon}.
+\end{equation}
+The depth-consistency score is
+\begin{equation}
+c_{\mathrm{depth}}=\exp(-e_{\mathrm{rel}}/\tau_d).
+\end{equation}
+We also penalize large camera displacement between the pseudo camera center $t_p$ and the reference camera center $t_r$:
+\begin{equation}
+c_{\mathrm{trans}}=\exp(-\|t_p-t_r\|_2/\tau_t).
+\end{equation}
+The final branch confidence is
+\begin{equation}
+c = c_{\mathrm{depth}}c_{\mathrm{trans}} .
+\end{equation}
+
+Let $c_L$ and $c_R$ be the confidence maps for the left and right branches. We normalize them into residual fusion weights:
+\begin{equation}
+W_L=\frac{c_L}{c_L+c_R+\epsilon},\qquad
+W_R=\frac{c_R}{c_L+c_R+\epsilon}.
+\end{equation}
+The fused pseudo RGB target is then constructed by residual fusion:
+\begin{equation}
+I_p
+=
+I_{\mathrm{rend}}
++
+W_L\odot (I_L-I_{\mathrm{rend}})
++
+W_R\odot (I_R-I_{\mathrm{rend}}).
+\end{equation}
+This fused image $I_p$ is used as the pseudo RGB target and as the image input for correspondence matching.
+
+% \subsection{BRPO-Style Confidence Map from Bidirectional Support}
+% \label{sec:brpo_confidence}
+
+% After obtaining the fused pseudo RGB target, we match it with the left and right real keyframes. We use MASt3R-based dense 3D correspondence to obtain pseudo-to-left and pseudo-to-right matches. The two branches provide complementary evidence: the left reference may support regions visible before the pseudo viewpoint, while the right reference may support regions visible after it. The role of matching is to decide which pseudo pixels are supported by real observations, rather than to make the pseudo image dense by itself.
+
+% Let $S_L$ and $S_R$ denote the pseudo-pixel support sets obtained from the left and right branches. These sets are constructed from bidirectional correspondences and geometric projection checks. For each matched pair, the reference point is back-projected to 3D using the reference depth and then projected into the pseudo camera. We compute the reprojection error
+% \begin{equation}
+% e_{\mathrm{reproj}}=\|\hat{u}_p-u_p\|_2,
+% \end{equation}
+% where $u_p$ is the matched pseudo pixel and $\hat{u}_p$ is the projected location from the reference branch. We also compute a relative depth error
+% \begin{equation}
+% e_{\mathrm{depth}}
+% =
+% \frac{|\hat{z}_p-D_{\mathrm{rend}}(u_p)|}
+% {\max(D_{\mathrm{rend}}(u_p),\epsilon)} ,
+% \end{equation}
+% where $\hat{z}_p$ is the projected pseudo depth. These checks remove inconsistent correspondences and provide projected-depth evidence for the next stage.
+
+% The confidence map follows a strict BRPO-style discrete rule. A pixel supported by both branches is considered the most reliable, while a pixel supported by only one branch is treated as weaker but still useful. We define
+% \begin{equation}
+% C_m(x)=
+% \begin{cases}
+% 1.0, & x\in S_L\cap S_R,\\
+% 0.5, & x\in (S_L\setminus S_R)\cup(S_R\setminus S_L),\\
+% 0.0, & \text{otherwise}.
+% \end{cases}
+% \label{eq:cm}
+% \end{equation}
+% This confidence map is not a soft attention map learned from the image. It is a discrete support map derived from bidirectional reference evidence. In this way, pseudo-view supervision is limited to pixels that can be connected back to real keyframes.
+
+% \subsection{Projected Depth Target}
+% \label{sec:projected_depth_target}
+
+% The pseudo depth target is built from the same left and right branch evidence. We do not fill unsupported pixels with rendered depth, because doing so would turn the pseudo target into a dense self-supervision signal from the current map. Instead, depth supervision is used only where the pseudo pixel is supported by reference evidence.
+
+% Let $d_L(x)$ and $d_R(x)$ denote the projected pseudo depths from the left and right branches, and let $c_L(x)$ and $c_R(x)$ denote their branch confidence scores. If both branches support a pixel, the target depth is computed by confidence-weighted composition:
+% \begin{equation}
+% D_p(x)
+% =
+% \frac{c_L(x)d_L(x)+c_R(x)d_R(x)}
+% {c_L(x)+c_R(x)+\epsilon},
+% \qquad x\in S_L\cap S_R .
+% \end{equation}
+% If only one branch supports the pixel, the depth target is copied from that branch:
+% \begin{equation}
+% D_p(x)=
+% \begin{cases}
+% d_L(x), & x\in S_L\setminus S_R,\\
+% d_R(x), & x\in S_R\setminus S_L.
+% \end{cases}
+% \end{equation}
+% Pixels outside $S_L\cup S_R$ remain invalid for depth supervision. This rule keeps the pseudo depth target tied to real-frame projection evidence, rather than to the current rendered pseudo depth.
+
+\subsection{Bidirectional Support, Confidence, and Depth Targets}
+\label{sec:bidirectional_support}
+
+After constructing the fused pseudo RGB target, we match the pseudo view with the left and right real keyframes using MASt3R-based dense 3D correspondences. The two reference branches provide complementary evidence for the pseudo view. Let $S_L$ and $S_R$ denote the pseudo-pixel support sets obtained from the left and right branches. For each matched pair, the reference point is back-projected to 3D using the reference depth and then projected into the pseudo camera. We compute the reprojection error
+\begin{equation}
+e_{\mathrm{reproj}}=\|\hat{u}_p-u_p\|_2,
+\end{equation}
+where $u_p$ is the matched pseudo pixel and $\hat{u}_p$ is the projected location from the reference branch. We also compute the relative depth error
+\begin{equation}
+e_{\mathrm{depth}}
+=
+\frac{|\hat{z}_p-D_{\mathrm{rend}}(u_p)|}
+{\max(D_{\mathrm{rend}}(u_p),\epsilon)} ,
+\end{equation}
+where $\hat{z}_p$ is the projected pseudo depth and $D_{\mathrm{rend}}$ is the rendered pseudo depth. A correspondence is kept as branch support only when the projected point is valid, lies inside the pseudo image, and satisfies the reprojection and depth-consistency thresholds.
+
+We convert the two branch support sets into a strict BRPO-style confidence map:
+\begin{equation}
+C_m(x)=
+\begin{cases}
+1.0, & x\in S_L\cap S_R,\\
+0.5, & x\in (S_L\setminus S_R)\cup(S_R\setminus S_L),\\
+0.0, & \text{otherwise}.
+\end{cases}
+\label{eq:cm}
+\end{equation}
+Thus, pixels verified by both references receive the highest confidence, pixels verified by only one reference are still used with lower confidence, and unsupported pixels are excluded. The confidence map is a discrete support map derived from real-frame evidence, rather than a learned soft attention map.
+
+The pseudo depth target is built from the same bidirectional support. Let $d_L(x)$ and $d_R(x)$ be the projected depths from the left and right branches, and let $c_L(x)$ and $c_R(x)$ be their branch confidence scores. For pixels supported by both branches, we use confidence-weighted depth composition:
+\begin{equation}
+D_p(x)
+=
+\frac{c_L(x)d_L(x)+c_R(x)d_R(x)}
+{c_L(x)+c_R(x)+\epsilon},
+\qquad x\in S_L\cap S_R .
+\end{equation}
+For pixels supported by only one branch, the target depth is copied from the corresponding branch:
+\begin{equation}
+D_p(x)=
+\begin{cases}
+d_L(x), & x\in S_L\setminus S_R,\\
+d_R(x), & x\in S_R\setminus S_L.
+\end{cases}
+\end{equation}
+Pixels outside $S_L\cup S_R$ remain invalid for depth supervision. We do not fill them with rendered pseudo depth, because the depth target should come from projected reference evidence rather than from the current map itself.
+
+% \subsection{Joint Backend Mapping with Pseudo Supervision}
+% \label{sec:joint_backend_mapping}
+
+% The final stage optimizes the live Gaussian scene using both real keyframes and runtime pseudo views. Real keyframes continue to provide the standard S3PO mapping supervision. Pseudo views provide additional RGB-D losses, but only through the confidence map defined in Eq.~\eqref{eq:cm}. The pseudo camera also has residual pose variables, so the optimization can make small pose corrections instead of forcing the pseudo slot to use a fixed pose.
+
+% Let $\hat{I}_p$ and $\hat{D}_p$ be the RGB and depth rendered from the current Gaussian scene under the pseudo camera. The pseudo RGB loss uses only the discrete confidence map $C_m$:
+% \begin{equation}
+% \mathcal{L}_{rgb}
+% =
+% \frac{
+% \sum_x C_m(x)\|\hat{I}_p(x)-I_p(x)\|_1
+% }{
+% \sum_x C_m(x)+\epsilon
+% }.
+% \end{equation}
+% The depth loss uses the same BRPO support domain:
+% \begin{equation}
+% \mathcal{L}_{depth}
+% =
+% \frac{
+% \sum_x C_m(x)|\hat{D}_p(x)-D_p(x)|
+% }{
+% \sum_x C_m(x)+\epsilon
+% }.
+% \end{equation}
+% This split keeps the RGB supervision controlled by the discrete BRPO support map. Depth supervision is also restricted to the same support domain, with invalid unsupported depths excluded by the target construction in Sec.~\ref{sec:projected_depth_target}.
+
+% For pseudo pose refinement, we parameterize the pose update as a small residual in $SE(3)$. Let $\theta$ and $\rho$ denote the rotation and translation residuals. We regularize them by
+% \begin{equation}
+% \mathcal{L}_{pose}
+% =
+% \|\theta\|_2 + w_t\|\rho\|_2 .
+% \end{equation}
+% The renderer uses the pose-corrected camera transform, so gradients from the RGB-D rendering losses can update the pseudo pose residuals. We also use an exposure regularization term $\mathcal{L}_{exp}$ and, when needed, an absolute pose prior $\mathcal{L}_{abs}$ to avoid large pose drift.
+
+% The pseudo-view objective is
+% \begin{equation}
+% \mathcal{L}_{pseudo}
+% =
+% \beta \mathcal{L}_{rgb}
+% +
+% (1-\beta)\mathcal{L}_{depth}
+% +
+% \lambda_{pose}\mathcal{L}_{pose}
+% +
+% \lambda_{abs}\mathcal{L}_{abs}
+% +
+% \lambda_{exp}\mathcal{L}_{exp}.
+% \end{equation}
+% During backend mapping, this objective is optimized together with the real-keyframe mapping loss. Therefore, pseudo views improve the Gaussian scene through additional verified RGB-D supervision, while real keyframes remain the stable anchors of the reconstruction.
+
+\subsection{Joint Backend Mapping with Pseudo Supervision}
+\label{sec:joint_backend_mapping}
+
+The backend optimizes the live Gaussian scene using both the real-keyframe mapping loss and the pseudo-view loss. For a pseudo view, let $\hat{I}_p$ and $\hat{D}_p$ be the RGB image and depth map rendered from the current Gaussian scene, and let $I_p$, $D_p$, and $C_m$ be the pseudo RGB target, projected depth target, and BRPO confidence map defined in the previous sections. The pseudo RGB loss is
+\begin{equation}
+\mathcal{L}_{rgb}
+=
+\frac{
+\sum_x C_m(x)\|\hat{I}_p(x)-I_p(x)\|_1
+}{
+\sum_x C_m(x)+\epsilon
+}.
+\end{equation}
+The pseudo depth loss uses the same confidence domain:
+\begin{equation}
+\mathcal{L}_{depth}
+=
+\frac{
+\sum_x C_m(x)|\hat{D}_p(x)-D_p(x)|
+}{
+\sum_x C_m(x)+\epsilon
+}.
+\end{equation}
+Invalid depth pixels have already been excluded during the projected-depth target construction, so the loss does not require an additional supervision region beyond $C_m$.
+
+The pseudo camera is allowed to undergo a small residual pose update during mapping. Let $\theta$ and $\rho$ denote the rotation and translation residuals. We regularize this update as
+\begin{equation}
+\mathcal{L}_{pose}
+=
+\|\theta\|_2 + w_t\|\rho\|_2 .
+\end{equation}
+We also include an exposure regularization term $\mathcal{L}_{exp}$ to enhance exposure details. The full pseudo-view objective is
+\begin{equation}
+\mathcal{L}_{pseudo}
+=
+\beta \mathcal{L}_{rgb}
++
+(1-\beta)\mathcal{L}_{depth}
++
+\lambda_{pose}\mathcal{L}_{pose}
++
+\lambda_{exp}\mathcal{L}_{exp}.
+\end{equation}
+The backend then optimizes
+\begin{equation}
+\mathcal{L}_{map}
+=
+\mathcal{L}_{real}
++
+\sum_{p\in\mathcal{P}}\mathcal{L}_{pseudo}^{(p)},
+\end{equation}
+where $\mathcal{L}_{real}$ is the normal real-keyframe mapping loss and $\mathcal{P}$ is the set of runtime pseudo views selected for the current mapping event.

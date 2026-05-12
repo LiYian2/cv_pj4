@@ -1,110 +1,99 @@
 # Hermes Online Mapping Extraction Design
 
-Last updated: 2026-05-11
-Status: design-only; no Python refactor executed here
-Goal: design how to extract the current online mapping path into a cleaner module structure without breaking the live system.
+Last updated: 2026-05-12
+Status: design updated after phase 1 extraction landed and passed real import verification
+Goal: finish converging the live online route toward `online_mapping/` + `core_shared/` payload roots while reducing `pseudo_branch/` to online-only content and keeping the four S3PO bridge files stable.
 
 ## 1. Immediate conclusion
 
-### 1.1 About `scripts/run_pseudo_refinement_v2.py`
-
-Grounded conclusion after direct remote inspection:
-1. It is not part of the current live online-mapping mainline.
-2. Current active runs are all `slam.py --config ...` online-mapping jobs; none use `run_pseudo_refinement_v2.py`.
-3. Current mainline route is `slam_frontend.py -> slam_backend.py -> slam_backend_brpo.py`.
-4. `scripts/run_pseudo_refinement_v2.py` is currently a broken external symlink to `/data/bzhang512/tmp/run_pseudo_refinement_v2_pose_fix.py`, and the target does not exist.
-5. Therefore: deleting it would not break the current online mainline, but it still belongs to legacy/standalone/control history and should be retired deliberately, not confused with live online code.
-
-Important nuance:
-- `scripts/README.md` still lists `run_pseudo_refinement_v2.py` as top-level live core, but that is stale relative to the current online mainline.
-- For refactor planning, treat that README statement as historical, not authoritative.
+Current grounded conclusion:
+1. The live online mainline still runs through `slam_frontend.py -> slam_backend.py -> slam_backend_brpo.py`.
+2. The first repo-side extraction pass succeeded: several online kernels and record/pose/loss modules already moved under `online_mapping/` and `core_shared/`.
+3. However, the bridge still imports `pseudo_branch.integration`, `pseudo_branch.common`, and `pseudo_branch.refine`, so `pseudo_branch/` is not yet online-only.
+4. The user’s desired end state is now sharper than before: `pseudo_branch/` should eventually contain only current online-mapping modules and facades; everything else should move out.
 
 ## 2. Non-breakage principle
 
-The top design requirement is exactly what the user asked: do not break the system.
-
-So the extraction order must be additive-first, not move-first:
-1. add new clean modules first
-2. keep old import surface alive through thin wrappers / facades
-3. switch one caller boundary at a time
-4. verify behavior after each switch
-5. only archive or remove old paths after the new path has already been exercised by the real online route
+The non-breakage rules remain:
+1. keep `third_party/S3PO-GS/*` import/call surfaces stable first
+2. continue additive-first extraction behind existing facades
+3. do not broad-delete pseudo_branch content before package facades stop importing it
+4. verify imports after each structural step
 
 This means:
-- no changes to `third_party/S3PO-GS/*` in this refactor plan
-- no deletion of mixed online files before repo-side wrappers exist
-- no path surgery inside active runtime entrypoints
-- keep current `pseudo_branch.integration` and `pseudo_branch.refine` import surfaces stable for the untouched third-party caller
+- `slam_backend.py` may continue importing `pseudo_branch.integration`
+- `slam_backend_brpo.py` may continue importing `pseudo_branch.refine`
+- `pseudo_branch/` should shrink by facade slimming plus internal extraction, not by early deletion
 
-## 3. What the current online system really looks like
+## 3. Current live bridge contracts
 
-### 3.1 Executor boundary (must stay stable at first)
+### 3.1 `slam_backend.py`
 
-Current live executor chain:
-- `third_party/S3PO-GS/slam.py`
-- `third_party/S3PO-GS/utils/slam_frontend.py`
-- `third_party/S3PO-GS/utils/slam_backend.py`
-- `third_party/S3PO-GS/utils/slam_backend_brpo.py`
+Current repo-side contract it consumes:
+- from `pseudo_branch.integration`:
+  - `RuntimeExactBackendConfig`
+  - `RuntimeSlotSelectorConfig`
+  - `build_runtime_exact_backend_bundle`
+  - `build_runtime_exact_signal_bundle`
+  - `build_runtime_pseudo_record_bundle`
+  - `select_runtime_pseudo_slots`
+- from `pseudo_branch.common`:
+  - `build_pair_matcher`
 
-Current live payload imported from `part3_BRPO`:
-- `pseudo_branch/integration/runtime_slot_selector.py`
-- `pseudo_branch/integration/runtime_exact_backend.py`
-- `pseudo_branch/integration/runtime_signal_builder.py`
-- `pseudo_branch/integration/runtime_pseudo_builder.py`
-- `pseudo_branch/integration/runtime_debug_export.py`
-- `pseudo_branch/refine/backend_pseudo_bundle.py`
-- `pseudo_branch/refine/backend_pseudo_view_loader.py`
-- `pseudo_branch/refine/backend_pseudo_loss.py`
-- `pseudo_branch/refine/pseudo_camera_state.py`
-- `pseudo_branch/refine/pseudo_loss_v2.py`
-- `pseudo_branch/refine/pose_gauss_newton.py`
-- selected `common/`, `observation/`, `mask/`, and `target/` helpers
+Implication:
+- `pseudo_branch.integration` and the online matcher surface in `pseudo_branch.common` must remain stable until a later bridge cleanup pass.
 
-### 3.2 What is mixed today
+### 3.2 `slam_backend_brpo.py`
 
-The main mixed boundaries are:
-1. `third_party/S3PO-GS/utils/slam_backend.py`
-   - config resolving
-   - slot selection / preparation orchestration
-   - runtime exact backend building
-   - runtime signal building
-   - runtime pseudo record packing
-   - pseudo mapping dispatch
-   - topology dispatch (`joint_primary` vs `side_branch`)
-   - optional masked pseudo color refinement
-   - plus legacy real-keyframe mapping in the same file
+Current repo-side contract it consumes:
+- from `pseudo_branch.refine`:
+  - `BackendPseudoLossConfig`
+  - `BackendPseudoViewRecord`
+  - `build_records_from_pseudo_bundle`
+  - `compute_backend_pseudo_exact_loss`
+  - `current_w2c`
+  - `load_pseudo_bundle_from_stageA_history`
+  - `refresh_viewpoint_transforms_`
+  - `apply_pose_delta_before_render_`
+  - `viewpoint_optimizer_groups`
+  - `scale_reg_loss`
+  - `GaussNewtonPoseOptimizer`
 
-2. `third_party/S3PO-GS/utils/slam_backend_brpo.py`
-   - runtime pseudo mapping entry
-   - online pseudo optimizer implementation
-   - continuation-oriented code paths in the same file
+Implication:
+- `pseudo_branch.refine` must become an online-only facade, not a mixed online/standalone export bag.
 
-3. `pseudo_branch/integration/runtime_exact_backend.py`
-   - default projected exact path
-   - optional GT pseudo RGB path
-   - optional Difix branch
-   - optional `rgb_only_support_mode=dense_match_v1`
-   - optional `cm_expansion_mode=local_soft_v1`
-   - optional direct-depth branch
+## 4. Phase 1 extraction already complete
 
-4. `pseudo_branch/integration/runtime_signal_builder.py`
-   - default projected exact-upstream path
-   - optional `twoimg_pair_proxy_cm_capped_v1` override path
+### 4.1 Online/runtime and shared-core moves landed
 
-5. `pseudo_branch/observation/pseudo_observation_brpo_style.py`
-   - current exact-upstream mainline builder
-   - multiple historical target/observation families for standalone experiments
+Already extracted behind compatibility wrappers:
+- slot selection -> `online_mapping/runtime/slot_selector.py`
+- runtime pseudo record build -> `online_mapping/records/runtime_record_builder.py`
+- reprojection verification -> `core_shared/verification/brpo_reprojection_verify.py`
+- pseudo fusion -> `core_shared/fusion/pseudo_fusion.py`
+- pseudo bundle/view loader -> `core_shared/records/*`
+- backend pseudo loss -> `core_shared/losses/*`
+- pose state / GN -> `core_shared/pose/*`
 
-## 4. Safe target structure
+### 4.2 Standalone move-outs already landed
 
-The refactor should converge to a structure like this conceptually:
+Standalone/control entrypoints now have dedicated non-online homes:
+- `standalone_mask_signal/`
+- `standalone_prepare/`
+- `standalone_replay/`
+- `legacy_or_archive/`
+
+This is important because future pseudo_branch slimming no longer needs to preserve those as top-level `scripts/*` authorities.
+
+## 5. New target structure
+
+The target structure is now more specific than before:
 
 ```text
 part3_BRPO/
   online_mapping/
     runtime/
     records/
-    config/
   core_shared/
     matching/
     verification/
@@ -113,404 +102,164 @@ part3_BRPO/
     losses/
     pose/
     records/
-  standalone_pipeline/
-    prepare/
-    mask_signal/
-    refine/
-    replay/
-  legacy_or_archive/
-    old_runners/
-    diagnostics/
-    experiments/
   pseudo_branch/
-    integration/   # compatibility facade kept for untouched third-party imports
-    refine/        # compatibility facade kept for untouched third-party imports
+    integration/   # online bridge facade only
+    refine/        # online bridge facade only
+    common/        # only online matcher surface still needed by bridge/runtime
+    observation/   # only still-live online observation helpers
+    mask/          # only still-live online support helpers
+    target/        # only still-live online target helpers
+  standalone_mask_signal/
+  standalone_prepare/
+  standalone_replay/
+  legacy_or_archive/
 ```
 
-This is a design target, not a first-step file move instruction.
-Important revision: there is no plan to create a new repo-side bridge by editing third-party code. The bridge remains the current untouched third-party caller; `part3_BRPO` only provides cleaner modules behind the existing `pseudo_branch` import surface.
+Critical revision:
+- `pseudo_branch/` is no longer a long-term “everything BRPO” namespace.
+- It is only a temporary compatibility package plus the still-unextracted online subset.
 
-## 5. Safe extraction strategy
+## 6. Safe extraction strategy from here
 
-### Phase A — keep third-party untouched, extract behind `pseudo_branch` facades
+### Phase A — finish extracting remaining online authorities
 
-Do not touch the external execution shape.
-Keep these import/call sites stable because the third-party caller is not allowed to change:
-- untouched `slam_backend.py` continues importing from `pseudo_branch.integration`
-- untouched `slam_backend_brpo.py` continues importing from `pseudo_branch.refine`
+#### A1. `runtime_exact_backend.py`
 
-So the first safe refactor move is entirely repo-side:
-- keep `pseudo_branch/integration/__init__.py` as the stable facade
-- keep `pseudo_branch/refine/__init__.py` as the stable facade
-- gradually redirect those exports to cleaner internal modules under `online_mapping/` and `core_shared/`
-
-This avoids breaking the untouched third-party caller while still letting us refactor internals.
-
-### Phase B — split online runtime by semantic layer, not by filename age
-
-#### B1. Split `runtime_exact_backend.py`
-
-Current file should be decomposed conceptually into:
-1. `online_mapping/runtime/exact_core.py`
-   - render pseudo/reference RGB/depth
-   - matcher dispatch
-   - exact left/right verification
-   - default exact bundle assembly
-2. `online_mapping/runtime/difix_rgb.py`
-   - Difix load/runtime helpers
-   - left/right branch restoration
-   - residual fusion entry
-3. `online_mapping/runtime/support_variants.py`
-   - `reciprocal_seed`
-   - `dense_match_v1`
-   - `cm_local_expansion`
-4. `online_mapping/runtime/depth_variants.py`
-   - projected default
-   - `mast3r_direct_exact_anchor_v1`
-   - any direct-depth side branches
-
-Safe first implementation rule:
-- do not replace the old file at once
-- first create helpers and make `build_runtime_exact_backend_bundle(...)` delegate internally to them
-- preserve the top-level function signature unchanged
-
-#### B2. Split `runtime_signal_builder.py`
-
-Target substructure:
-1. `online_mapping/runtime/signal_exact_upstream.py`
-   - default exact-upstream projected target path
-2. `online_mapping/runtime/signal_depth_overrides.py`
-   - `twoimg_pair_proxy_cm_capped_v1`
-   - any future override families
+Next target split under `online_mapping/runtime/`:
+- `exact_core.py`
+- `difix_rgb.py`
+- `support_variants.py`
+- `depth_variants.py`
 
 Safe rule:
-- keep `build_runtime_exact_signal_bundle(...)` name and signature stable at first
-- route to default/override implementation internally
+- keep `build_runtime_exact_backend_bundle(...)` and `RuntimeExactBackendConfig` stable at `pseudo_branch.integration`
+- move implementation behind that surface
 
-#### B3. Split `runtime_pseudo_builder.py`
+#### A2. `runtime_signal_builder.py`
 
-This file is already relatively clean.
-Refactor goal is smaller:
-- move record schema/data-model logic into a shared record module
-- keep runtime wrapper thin
-
-Good target:
-1. `core_shared/records/backend_pseudo_record.py`
-2. `online_mapping/records/runtime_record_builder.py`
-
-### Phase C — split optimizer core from runtime shell
-
-#### C1. `slam_backend_brpo.py`
-
-Because third-party is frozen, do not plan any implementation step that edits this file.
-Instead, repo-side refactor must work under the existing untouched call boundary:
-1. keep `run_brpo_pseudo_mapping(...)` as an external fixed boundary
-2. restructure only the repo-side payload objects and helpers that this function already imports from `pseudo_branch.refine`
-3. treat optimizer-core extraction from this file as out of scope unless the user later relaxes the third-party constraint
+Next target split under `online_mapping/runtime/`:
+- `signal_exact_upstream.py`
+- `signal_depth_overrides.py`
 
 Safe rule:
-- assume `run_brpo_pseudo_mapping(...)` is fixed
-- improve readability and separation only on the `part3_BRPO` side behind the current import boundary
-
-#### C2. `pseudo_branch/refine/__init__.py`
-
-Current problem:
-- online runtime imports and standalone StageA/StageB utilities are re-exported from the same package facade
-
-Safe design:
-- keep `pseudo_branch.refine` import path stable for current callers
-- internally split exports into two groups:
-  1. online-needed exports
-  2. standalone-only exports
-
-Suggested internal layout:
-- `core_shared/losses/backend_pseudo_loss.py`
-- `core_shared/records/backend_pseudo_bundle.py`
-- `core_shared/records/backend_pseudo_view_loader.py`
-- `core_shared/pose/pseudo_camera_state.py`
-- `core_shared/pose/pose_gauss_newton.py`
-- `standalone_pipeline/refine/stage_scheduler.py`
-- `standalone_pipeline/refine/stage_losses.py`
-
-### Phase D — extract shared algorithm kernels from mixed online/standalone code
-
-The first shared-kernel extraction set should be:
-1. matching
-   - `flow_matcher.py`
-   - `mast3r_matchers.py`
-   - `mast3r_pair_forward.py`
-2. verification
-   - `brpo_reprojection_verify.py`
-3. fusion
-   - `pseudo_fusion.py`
-4. exact-upstream target semantics
-   - current mainline subset from `pseudo_observation_brpo_style.py`
-5. pose math
-   - `pseudo_camera_state.py`
-   - `pose_gauss_newton.py`
-6. record schema
-   - `backend_pseudo_bundle.py`
-   - `backend_pseudo_view_loader.py`
-7. loss contract
-   - `backend_pseudo_loss.py`
-   - only the online-relevant subset of `pseudo_loss_v2.py`
-
-Important non-breakage rule:
-- extract only the exact-upstream mainline subset first
-- do not drag every historical observation/target mode into `core_shared` on day one
-
-## 6. What not to do first
-
-These would be high-risk and are explicitly out of scope or not the first move:
-1. editing `third_party/S3PO-GS/utils/slam_backend.py`
-2. editing `third_party/S3PO-GS/utils/slam_backend_brpo.py`
-3. deleting `pseudo_branch/integration/runtime_exact_backend.py` before a delegated wrapper exists
-4. deleting `pseudo_branch/observation/pseudo_observation_brpo_style.py` before isolating exact-upstream mainline helpers
-5. treating `scripts/run_pseudo_refinement_v2.py` as an authority path for new work
-6. starting from `scripts/` cleanup instead of online payload extraction
-
-## 7. First concrete engineering steps when implementation starts
-
-### Step 1
-Create a new repo-side internal namespace without changing callers yet.
-
-Recommended first directories:
-- `online_mapping/runtime/`
-- `online_mapping/records/`
-- `core_shared/matching/`
-- `core_shared/verification/`
-- `core_shared/fusion/`
-- `core_shared/targets/`
-- `core_shared/losses/`
-- `core_shared/pose/`
-- `core_shared/records/`
-
-### Step 2
-Copy/extract the smallest online-stable helpers first, not the giant mixed files.
-
-Best first candidates:
-- exact reprojection verification
-- pseudo fusion
-- pseudo camera state / pose delta application
-- backend pseudo loss
-- backend pseudo record schema
-
-### Step 3
-Refactor `runtime_signal_builder.py` and `runtime_exact_backend.py` into delegating wrappers.
-
-Target state:
-- old filenames still exist
-- public function names still exist
-- logic moved into smaller helpers behind them
-
-### Step 4
-Refactor `slam_backend_brpo.py` into shell + core.
-
-Target state:
-- `run_brpo_pseudo_mapping(...)` still exists
-- implementation body becomes a thin wrapper around extracted runtime mapping core
-
-### Step 5
-Only after online extraction is stable, reclassify standalone.
+- keep `build_runtime_exact_signal_bundle(...)` stable at `pseudo_branch.integration`
+- move implementation behind that surface
 
-That is when to decide:
-- which parts of `build_brpo_v2_signal_from_internal_cache.py` become wrappers over shared kernels
-- whether `brpo_build_mask_from_internal_cache.py` should remain a standalone control script
-- whether `run_pseudo_refinement_v2.py` should be restored as a real archived control runner or fully retired
+#### A3. `pseudo_observation_brpo_style.py`
 
-## 8. Validation ladder for a non-breaking refactor
+Next target split under `core_shared/targets/` or `online_mapping/runtime/targets/`:
+- exact-upstream online semantics
+- old standalone observation families moved elsewhere
 
-Each split phase should be validated with the smallest possible ladder.
+Safe rule:
+- do not delete the file early; first isolate the online authority subset
 
-### Level 0 — static import check
-Verify that these still import after each extraction step:
-- `from pseudo_branch.integration import build_runtime_exact_backend_bundle`
-- `from pseudo_branch.integration import build_runtime_exact_signal_bundle`
-- `from pseudo_branch.integration import build_runtime_pseudo_record_bundle`
-- `from pseudo_branch.refine import compute_backend_pseudo_exact_loss`
-- `from pseudo_branch.refine import apply_pose_delta_before_render_`
+### Phase B — slim package facades to online-only
 
-### Level 1 — event preparation smoke
-On one saved runtime event or one tiny debug config, verify:
-- slot selection still works
-- exact bundle still writes outputs
-- signal bundle still writes outputs
-- runtime pseudo record still builds
+#### B1. `pseudo_branch/refine/__init__.py`
 
-### Level 2 — one-keyframe online smoke
-Verify one short `slam.py` online run with:
-- `topology_mode=joint_primary`
-- `placement_mode=midpoint_only`
-- `use_difix_restoration=true`
-- projected depth path
+Goal:
+- export only the symbols actually used by `slam_backend_brpo.py`
+- stop re-exporting StageA/StageA.5 standalone scheduler surface from the online bridge package
 
-### Level 3 — option-branch smoke
-Separately verify the option branches that are currently known-live in recent configs:
-- `depth_generation_mode=twoimg_pair_proxy_cm_capped_v1` (`e9`-family)
-- `rgb_only_support_mode=dense_match_v1` (`e9`-family)
-- `use_difix_restoration=true` (all checked live configs)
+Expected result:
+- once facade is slim, standalone-only refine helpers can move out of `pseudo_branch/refine/`
 
-### Level 4 — topology regression
-Verify both:
-- `joint_primary`
-- `side_branch`
+#### B2. `pseudo_branch/common/__init__.py`
 
-Even if `joint_primary` is the current focus, do not silently break `side_branch` while refactoring shared code.
+Goal:
+- export only the online matcher/pair-forward surface used by live online runtime code
+- stop dragging non-online geometry/cache helpers through the bridge package
 
-## 7. Interim design verdict
+Expected result:
+- `build_pseudo_cache.py`, `epipolar_depth.py`, `align_depth_scale.py`, `diag_writer.py` become movable
 
-The safest way to “split out the online mapping module” under the current constraint is:
-1. leave third-party entry files completely untouched
-2. preserve current `pseudo_branch.integration` / `pseudo_branch.refine` import surfaces
-3. extract cleaner repo-side online/core modules behind those surfaces
-4. turn mixed current repo files into thin delegating wrappers
-5. only then decide which standalone/history paths to keep
+#### B3. `pseudo_branch/integration/__init__.py`
 
-That approach matches the current live system and best satisfies the “do not break the system” requirement.
+Goal:
+- keep stable public names
+- make every export resolve to extracted `online_mapping/` implementation where possible
 
+### Phase C — move non-online pseudo content out
 
-## 8. When execution can safely start
+Once phases A and B are done, move out of `pseudo_branch/`:
+- `gaussian_management/**`
+- `brpo_v2_signal/**`
+- old target-builder family
+- old joint-observation / verifier family
+- standalone confidence/mask family
+- standalone scheduler and similar refine-only helpers
+- cache-build/diagnostic utilities not needed by the online path
 
-Short answer: almost yes, but not on the basis of “runs finished” alone.
+## 7. How the four `slam*` bridge files should be cleaned up
 
-After the current cloud runs finish, the project should be considered ready to start execution only if these gates are satisfied:
-1. no active `slam.py` / `part3_BRPO` jobs are still importing the live repo
-2. the first implementation step is additive-only (new modules + wrapper delegation), not path-moving
-3. we have one tiny online smoke config prepared for immediate regression checking after each step
-4. we do not batch naming cleanup and structural extraction into the same first patch
+These files should be treated as thin shells over the cleaned repo-side payload.
 
-So the correct readiness statement is:
-- once the current runs finish, we can start the refactor implementation phase,
-- but only with the wrapper-first extraction plan already frozen,
-- and with a smoke-validation ladder ready before the first code move.
+### 7.1 `slam.py`
+- keep as launch/runtime shell
+- no major BRPO logic growth here
 
-### 8.1 First implementation patch that should be allowed after runs finish
+### 7.2 `slam_frontend.py`
+- keep as frontend state shell
+- only light structural cleanup unless clear online-mapping logic leakage is found
 
-The first execution patch should be limited to:
-1. create new internal directories for `online_mapping/` and `core_shared/`
-2. extract one or two low-risk helper modules into the new structure
-3. keep old import surfaces in `pseudo_branch.integration` and `pseudo_branch.refine`
-4. make one existing mixed file delegate to the new helper without changing its public API
+### 7.3 `slam_backend.py`
+Reorganize internally around explicit sections:
+- config resolve
+- runtime matcher/state setup
+- gap closure and slot selection
+- exact backend prepare
+- signal build
+- pseudo record pack
+- mapping dispatch
+- optional masked color refinement
 
-This is safe enough to begin once the active runs are done.
+Target result:
+- same path, same external behavior, much thinner and easier to read
+- heavy BRPO logic delegated to `online_mapping/` and `core_shared/`
 
-### 8.2 What should still wait even after runs finish
+### 7.4 `slam_backend_brpo.py`
+Reorganize internally around explicit sections:
+- pseudo record normalization
+- optimizer-group assembly
+- loss-call boundary
+- pose-update helper calls
+- topology dispatch
+- stats/export
 
-Even after active runs end, these are still not first-step operations:
-- any edit to `third_party/S3PO-GS/*`
-- renaming many files in one batch
-- deleting legacy standalone code before deciding what is retained as control/reference
-- deleting `scripts/run_pseudo_refinement_v2.py` before recording an explicit retirement decision
+Target result:
+- keep `BRPOMappingConfig` and `run_brpo_pseudo_mapping(...)` stable
+- make the file a thin optimization shell over repo-side payload helpers
 
-## 9. Naming strategy for readability
+## 8. What not to do next
 
-Short answer to the user’s naming question:
-- yes, the current naming is not good enough
-- and yes, renaming should happen after the online structural extraction begins, not before
+Do not do these first:
+1. broad-delete non-online pseudo_branch modules before facades stop importing them
+2. edit all four `slam*` files heavily before repo-side payload extraction is more complete
+3. treat `pseudo_branch/` as the permanent public home for standalone/history code
+4. move standalone/history code back into top-level `scripts/*`
 
-Reason:
-- if we rename first and split later, we will mix two axes of change at once: semantic relocation and lexical rename
-- that makes code review, blame, smoke debugging, and fallback much harder
-- for a fragile live system, the lower-risk order is: extract -> stabilize -> rename surviving modules
+## 9. Immediate next-step implementation plan
 
-### 9.1 Naming policy
-
-Use role-based engineering names, not paper/history labels.
-
-Good naming principles:
-1. name by runtime role (`target_builder`, `record_builder`, `support_verify`, `mapping_loop`)
-2. reserve `legacy_`, `archive_`, or `standalone_` prefixes for retained historical routes
-3. avoid paper-specific labels in live module names when the file’s real role is broader than one paper variant
-4. keep variant names at function/config level when possible instead of baking them into file names
-
-### 9.2 Recommended rename direction for the online mainline
-
-These are design targets, not immediate renames:
-
-- `Results.brpo_online_mapping` -> `Results.online_pseudo_mapping`
-  - reason: this is the live system role, not the paper provenance.
-
-- `pseudo_branch/integration/runtime_exact_backend.py` -> future internal role equivalent:
-  - `online_mapping/runtime/runtime_supervision_prepare.py`
-  - or split into `exact_core.py`, `difix_rgb.py`, `support_variants.py`, `depth_variants.py`
-  - reason: this file prepares runtime supervision bundles; “backend” is misleading here.
-
-- `pseudo_branch/integration/runtime_signal_builder.py` -> future internal role equivalent:
-  - `online_mapping/runtime/runtime_target_builder.py`
-  - reason: it builds supervision targets/signals, not generic “signals”.
-
-- `pseudo_branch/integration/runtime_pseudo_builder.py` -> future internal role equivalent:
-  - `online_mapping/records/runtime_record_builder.py`
-  - reason: it packs runtime pseudo records.
-
-- `pseudo_branch/observation/brpo_reprojection_verify.py` -> future internal role equivalent:
-  - `core_shared/verification/reprojection_support_verify.py`
-  - reason: describes what it does without paper naming.
-
-- `pseudo_branch/observation/pseudo_observation_brpo_style.py` -> split first, then rename surviving mainline subset to:
-  - `core_shared/targets/exact_upstream_targets.py`
-  - and move leftover historical builders to something like `legacy_target_variants.py`
-
-- `pseudo_branch/refine/backend_pseudo_loss.py` -> future internal role equivalent:
-  - `core_shared/losses/runtime_pseudo_supervision_loss.py`
-
-- `pseudo_branch/refine/backend_pseudo_bundle.py` / `backend_pseudo_view_loader.py` -> future internal role equivalent:
-  - `core_shared/records/runtime_pseudo_bundle.py`
-  - `core_shared/records/runtime_pseudo_record_loader.py`
-
-### 9.3 Rename order
-
-Safe rename order:
-1. first split live online modules behind stable wrappers
-2. then rename newly extracted internal modules to clean engineering names
-3. keep old module paths as wrappers/facades for one transition phase
-4. only after smoke verification, update callers to the cleaner names
-5. finally archive/remove obsolete wrappers
-
-This keeps runtime risk low while still improving readability.
-
-## 10. Policy for standalone naming and deletion
-
-For standalone/history code, use a different rule from online mainline.
-
-### 10.1 If a standalone module is already proven useless
-
-If it is truly proven to be:
-- not used by current online mainline
-- not needed as control/reference
-- not needed for provenance or replay
-- and not the only remaining implementation of a shared algorithm kernel
-
-then deletion is better than renaming.
-
-Do not spend rename effort on dead code.
-
-### 10.2 If a standalone module is still kept as control/reference
-
-Then rename only after deciding it survives.
-Use names like:
-- `standalone_signal_build.py`
-- `standalone_mask_build.py`
-- `standalone_refine_legacy.py`
-- `standalone_replay_eval.py`
-
-This makes the route identity obvious and avoids pretending those files are part of the live online mainline.
-
-### 10.3 Specific implication for `run_pseudo_refinement_v2.py`
-
-Current recommendation:
-- do not treat it as a live path
-- do not rename it first
-- later make an explicit decision:
-  1. restore it as a real archived standalone control runner with a stable in-repo file, or
-  2. retire it completely
-
-Given its current broken external-symlink state, it is a bad candidate for early rename work.
-
-## 11. Updated design verdict
-
-Yes: after the current runs finish, we should be able to start executing the repo-side refactor plan.
-But the first execution step must be a wrapper-first extraction patch entirely inside `part3_BRPO`, not a broad rename or any third-party edit.
-
-And yes: naming cleanup is important, but for the current live online mainline it should happen after the first repo-side structural extraction boundary is in place, not before.
-That order gives the best chance of improving readability without destabilizing the running system.
+1. extract `runtime_exact_backend.py`
+2. extract `runtime_signal_builder.py`
+3. isolate exact-upstream online semantics from `pseudo_observation_brpo_style.py`
+4. slim `pseudo_branch/refine/__init__.py` to online-only bridge exports
+5. slim `pseudo_branch/common/__init__.py` to online-only matcher exports
+6. move the now-detached non-online pseudo_branch modules into `standalone_*` or `legacy_or_archive/`
+7. only then do a shell-cleanup pass on `slam_backend.py` and `slam_backend_brpo.py`
+
+## 10. Immediate takeaway
+
+The refactor target is now:
+- not “keep a large mixed `pseudo_branch/` forever”
+- but “finish extracting payload into `online_mapping/` and `core_shared/`, then leave `pseudo_branch/` as a small online-only bridge compatibility layer, with the four `slam*` files cleaned into thin orchestration shells.”
+
+Update note (2026-05-12, phase 1.5): exact-upstream observation semantics moved behind core_shared.targets; runtime_exact_backend/runtime_signal_builder authority moved behind online_mapping.runtime wrappers; standalone legacy observation consumers redirected to standalone_mask_signal.
+
+
+## 2026-05-12 phase 2 mask/target extraction
+- live online mask helpers moved to `online_mapping/mask/` (`rgb_mask_inference.py`, `dense_match_densify.py`, `cm_local_expansion.py`) and `online_mapping/runtime/runtime_exact_backend.py` now imports them directly.
+- shared exact/signal target builders moved to `core_shared/targets/` (`depth_supervision_v2.py`, `joint_confidence.py`, `joint_observation.py`, `exact_upstream_observation.py`).
+- standalone BRPO signal/depth helpers moved out of `pseudo_branch` into `standalone_mask_signal/` (`brpo_confidence_mask.py`, `brpo_train_mask.py`, `brpo_depth_densify.py`, `brpo_depth_target.py`, `support_expand.py`).
+- `pseudo_branch/mask/*`, `pseudo_branch/target/*`, and `pseudo_branch/observation/joint_observation.py` are now compatibility facades only; `confidence_builder.py` and `depth_target_builder.py` are retired into `legacy_or_archive/retired_pseudo_branch_mask_target/`.

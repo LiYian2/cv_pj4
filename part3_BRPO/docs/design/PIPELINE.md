@@ -59,6 +59,7 @@ Important semantic boundary:
 - verification: `pseudo_branch/observation/brpo_reprojection_verify.py`
 - fusion: `pseudo_branch/observation/pseudo_fusion.py`
 - observation/signal semantics: `pseudo_branch/observation/pseudo_observation_brpo_style.py`
+- live mask support: `pseudo_branch/mask/rgb_mask_inference.py`; optional branches `pseudo_branch/mask/dense_match_densify.py`, `pseudo_branch/mask/cm_local_expansion.py`
 - target build: `pseudo_branch/target/depth_supervision_v2.py`
 - runtime loss contract: `pseudo_branch/refine/backend_pseudo_loss.py`, `pseudo_branch/refine/pseudo_loss_v2.py`
 - pose math: `pseudo_branch/refine/pseudo_camera_state.py`, `pseudo_branch/refine/pose_gauss_newton.py`
@@ -787,3 +788,13 @@ For future report writing, the safest mainline interpretation is:
 - online pseudo supervision now lives inside the S3PO backend mapping event
 - its core semantics are strict discrete `C_m` plus exact-upstream projected depth
 - pseudo affects the live Gaussian scene through backend RGB-D refinement, while remaining a runtime supervision member rather than a persistent SLAM keyframe
+
+## 15. Live mask / target boundary after 2026-05-10 cleanup
+
+For the current online-mapping runtime route, the live mask/target boundary is:
+- live RGB-only support / `C_m` seed builder: `pseudo_branch/mask/rgb_mask_inference.py`
+- optional dense-support branch: `pseudo_branch/mask/dense_match_densify.py`
+- optional local soft-`C_m` branch: `pseudo_branch/mask/cm_local_expansion.py`
+- live target builder: `pseudo_branch/target/depth_supervision_v2.py`
+
+Legacy standalone mask/target modules that are not part of the live online route were archived under `legacy_or_archive/pseudo_branch_legacy/`.

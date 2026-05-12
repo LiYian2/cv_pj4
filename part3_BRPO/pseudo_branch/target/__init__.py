@@ -1,7 +1,8 @@
-"""Depth-target builders, densification helpers, reprojection helpers, supervision assembly, and support expansion."""
+"""Compatibility target package.
 
-from .brpo_depth_target import *  # noqa: F401,F403
-from .brpo_depth_densify import *  # noqa: F401,F403
-from .depth_target_builder import *  # noqa: F401,F403
+The shared online/standalone target authority now lives under
+`core_shared.targets`. Standalone BRPO depth-target utilities should be imported
+directly from `standalone_mask_signal`.
+"""
+
 from .depth_supervision_v2 import *  # noqa: F401,F403
-from .support_expand import *  # noqa: F401,F403

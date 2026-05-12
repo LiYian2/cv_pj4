@@ -19,7 +19,7 @@ sys.path.insert(0, f"{S3PO_ROOT}/gaussian_splatting")
 from scene.gaussian_model import GaussianModel
 from gaussian_renderer import render
 from pseudo_branch.refine.pseudo_loss_v2 import build_stageA_loss, build_stageA_loss_source_aware
-from pseudo_branch.refine.pseudo_refine_scheduler import StageAConfig
+from standalone.pseudo_refine_scheduler import StageAConfig
 from scripts.run_pseudo_refinement_v2 import load_stageA_pseudo_views, sample_indices, diagnose_grad_contrib_for_sampled_views
 from types import SimpleNamespace
 

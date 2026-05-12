@@ -1,372 +1,235 @@
 # Hermes Refactor Plan for Part3 BRPO
 
-Last updated: 2026-05-11
-Status: planning only; no refactor executed in this document
-Scope: record the current route boundaries, target repository structure, module split strategy, and recommended execution order for the future Part3 BRPO closeout refactor.
+Last updated: 2026-05-12
+Status: phase 1 executed; first repo-side extraction landed and import-verified
+Scope: record the current online/standalone route boundaries, the now-implemented first extraction pass, and the next-step plan for shrinking `pseudo_branch/` down to online-only content while keeping the S3PO bridge stable.
 
 ## 1. Executive summary
 
 Current judgment:
-1. The real engineering mainline is no longer the old standalone `pseudo_cache -> signal_v2 -> run_pseudo_refinement_v2.py` route.
-2. The real live mainline is the S3PO online-mapping route, where pseudo supervision is built and consumed inside the backend keyframe event.
-3. A future GitHub-facing simplification should therefore be organized around route boundaries, not around the current historical directory pile (`pseudo_branch/` and `scripts/`).
-4. Refactor should not begin by moving files blindly. The first step is to freeze the route map, then extract the online mainline skeleton, then separate mixed online/legacy code.
+1. The real engineering mainline is the S3PO online-mapping route, not the old standalone `pseudo_cache -> signal_v2 -> run_pseudo_refinement_v2.py` route.
+2. The user wants `pseudo_branch/` to end in an online-only state: keep only modules still used by the current online mapping route, and move everything else out to standalone/archive areas.
+3. `third_party/S3PO-GS/*` is still the live executor boundary, but it should be treated as a thin bridge shell rather than the place where BRPO implementation complexity lives.
+4. The first additive extraction pass has already landed inside `part3_BRPO/`: new `online_mapping/`, `core_shared/`, `standalone_*`, and `legacy_or_archive/` roots now exist, and import-preserving wrappers were verified.
 
 Important current constraint:
-- Do not execute code reorganization yet.
-- First keep this document as the planning authority; actual file moves/splits come later after the online mainline and documentation are frozen.
-- User constraint: do not refactor or rename `third_party/S3PO-GS/*`; keep third-party code untouched and perform only `part3_BRPO`-side restructuring.
+- Do not break the live online route.
+- Keep `third_party/S3PO-GS/*` behavior stable while repo-side modules are cleaned up.
+- Prefer wrapper-first moves and import-surface preservation over rename-first cleanup.
 
-## 2. Current route boundary: what is actually live
+## 2. What was actually implemented in phase 1
 
-### 2.1 Live online-mapping mainline
+### 2.1 New repo-side roots created
 
-The current online mainline is driven by:
+The following new roots now exist and are import-verified:
+- `online_mapping/`
+- `core_shared/`
+- `standalone_mask_signal/`
+- `standalone_prepare/`
+- `standalone_replay/`
+- `legacy_or_archive/`
+
+### 2.2 Implemented extractions already landed
+
+Moved into new internal locations, with old import paths preserved as wrappers/facades:
+- `pseudo_branch/integration/runtime_slot_selector.py` -> `online_mapping/runtime/slot_selector.py`
+- `pseudo_branch/integration/runtime_pseudo_builder.py` -> `online_mapping/records/runtime_record_builder.py`
+- `pseudo_branch/observation/brpo_reprojection_verify.py` -> `core_shared/verification/brpo_reprojection_verify.py`
+- `pseudo_branch/observation/pseudo_fusion.py` -> `core_shared/fusion/pseudo_fusion.py`
+- `pseudo_branch/refine/backend_pseudo_bundle.py` -> `core_shared/records/backend_pseudo_bundle.py`
+- `pseudo_branch/refine/backend_pseudo_view_loader.py` -> `core_shared/records/backend_pseudo_view_loader.py`
+- `pseudo_branch/refine/backend_pseudo_loss.py` -> `core_shared/losses/backend_pseudo_loss.py`
+- `pseudo_branch/refine/pseudo_camera_state.py` -> `core_shared/pose/pseudo_camera_state.py`
+- `pseudo_branch/refine/pose_gauss_newton.py` -> `core_shared/pose/pose_gauss_newton.py`
+- online-facing portion of `pseudo_branch/refine/pseudo_loss_v2.py` -> `core_shared/losses/pseudo_loss_v2.py`
+
+Standalone/control scripts were also moved behind compatibility wrappers into:
+- `standalone_mask_signal/`
+- `standalone_prepare/`
+- `standalone_replay/`
+
+Historical broken path handled explicitly:
+- `scripts/run_pseudo_refinement_v2.py` is no longer a broken external symlink; it is now a deliberate retired wrapper pointing into `legacy_or_archive/retired_entrypoints/`.
+
+### 2.3 Verification completed in phase 1
+
+Verified with real remote checks:
+- `py_compile` passed for new modules and preserved wrappers.
+- direct import smoke passed for:
+  - new `online_mapping/*`
+  - new `core_shared/*`
+  - preserved `pseudo_branch/*` facades
+  - preserved `scripts/*` wrappers
+- result: `ALL_IMPORTS_OK`
+
+## 3. Current live route after phase 1
+
+### 3.1 Stable bridge boundary
+
+Current live executor chain remains:
 - `third_party/S3PO-GS/slam.py`
 - `third_party/S3PO-GS/utils/slam_frontend.py`
 - `third_party/S3PO-GS/utils/slam_backend.py`
 - `third_party/S3PO-GS/utils/slam_backend_brpo.py`
 
-Its runtime pseudo branch is built through:
-- `pseudo_branch/integration/runtime_slot_selector.py`
-- `pseudo_branch/integration/runtime_exact_backend.py`
-- `pseudo_branch/integration/runtime_signal_builder.py`
-- `pseudo_branch/integration/runtime_pseudo_builder.py`
-- `pseudo_branch/integration/runtime_debug_export.py`
+This boundary is still authoritative for runtime orchestration.
 
-Its shared algorithmic dependencies currently include:
-- `pseudo_branch/common/*`
-- `pseudo_branch/observation/brpo_reprojection_verify.py`
-- `pseudo_branch/observation/pseudo_fusion.py`
-- `pseudo_branch/observation/pseudo_observation_brpo_style.py`
-- `pseudo_branch/target/depth_supervision_v2.py`
-- `pseudo_branch/refine/backend_pseudo_loss.py`
-- `pseudo_branch/refine/backend_pseudo_bundle.py`
-- `pseudo_branch/refine/backend_pseudo_view_loader.py`
-- `pseudo_branch/refine/pseudo_camera_state.py`
-- `pseudo_branch/refine/pose_gauss_newton.py`
-- optional support/densify modules under `pseudo_branch/mask/`
+### 3.2 What `pseudo_branch/` still needs to provide today
 
-### 2.2 Standalone / offline control route
+Directly or indirectly, the current live online route still depends on:
+- `pseudo_branch.integration`
+- `pseudo_branch.common`
+- `pseudo_branch.refine`
+- selected `pseudo_branch.observation/*`
+- selected `pseudo_branch.mask/*`
+- selected `pseudo_branch.target/*`
 
-The old standalone and offline-preparation route still exists and is still useful as control/reference, but it is no longer the primary engineering landing route.
+So after phase 1, `pseudo_branch/` is smaller in responsibility, but it is not yet online-only in content.
 
-Its main entrypoints are:
-- `scripts/run_pseudo_refinement_v2.py`
-- `scripts/run_pseudo_refinement.py`
-- `scripts/compat/run_pseudo_refinement.py`
-- `scripts/prepare_stage1_difix_dataset_s3po_internal.py`
-- `scripts/build_brpo_v2_signal_from_internal_cache.py`
-- `scripts/brpo_build_mask_from_internal_cache.py`
-- `scripts/select_signal_aware_pseudos.py`
-- `scripts/materialize_m5_depth_targets.py`
-- `scripts/materialize_twoimg_pair_proxy_depth.py`
-- `scripts/replay_internal_eval.py`
-- `scripts/brpo_verify_single_branch.py`
-- `scripts/legacy_prepare/*`
+## 4. End-state goal for `pseudo_branch/`
 
-### 2.3 Historical / experimental / non-mainline support area
+The desired end state is now explicit:
+- `pseudo_branch/` should contain only the current online-mapping route’s compatibility facade and any still-live online modules not yet extracted.
+- Anything standalone-only, historical, diagnostic, or archive-only should move out.
 
-These are not the online mainline skeleton and should not define future repo shape:
-- `pseudo_branch/gaussian_management/*` (currently much more tied to standalone/history than live online mapping)
-- `scripts/diagnostics/*`
-- `scripts/test_*.py`
-- `scripts/verify_*.py`
-- `scripts/run_*.sh`
-- `scripts/archive_experiments/*`
-- many `.bak*` files
-- one-off config generators and temporary wrappers
+Target end-state by subarea:
+- keep as online facade/core: `integration/`, `refine/`, selected `common/`, selected `observation/`, selected `mask/`, selected `target/`
+- move out: standalone signal/prepare/replay logic, old StageA/StageB scheduling helpers, historical gaussian-management/SPGM/local-gating code, old target builders, old joint-observation families, diagnostics/cache-build helpers
 
-## 3. What is currently mixed and needs later separation
+## 5. Immediate next extraction priorities
 
-The future refactor must explicitly separate mixed files instead of pretending every file belongs to only one route.
-
-### 3.1 Mixed executor files
-
-1. `third_party/S3PO-GS/utils/slam_backend.py`
-   - Contains original S3PO real-keyframe mapping.
-   - Also contains online pseudo slot preparation.
-   - Also contains runtime exact backend / runtime signal / runtime pseudo record preparation calls.
-   - Also contains joint-primary and side-branch route switching.
-   - Also contains optional masked pseudo color refinement.
-   - Therefore this file is both the live mainline entry and the biggest mixed boundary.
-
-2. `third_party/S3PO-GS/utils/slam_backend_brpo.py`
-   - Contains online mapping pseudo loop.
-   - Also contains after-opt continuation logic.
-   - Also contains shared joint pseudo engine reused by both continuation and online mapping.
-   - Future split should make “shared pseudo optimizer core” explicit, then keep thin online/continuation wrappers around it.
-
-### 3.2 Mixed runtime builder files
+### 5.1 Highest-priority online files still too mixed
 
 1. `pseudo_branch/integration/runtime_exact_backend.py`
-   - Core online runtime builder.
-   - But it also contains multiple optional branches:
-     - default projected-depth exact route
-     - GT pseudo RGB upper-bound route
-     - Difix restoration + residual fusion route
-     - RGB-only verification route
-     - `dense_match_v1` optional support densify route
-     - `cm_expansion_mode=local_soft_v1` optional soft expansion route
-     - direct-depth override route
-   - Future split should separate:
-     - exact runtime builder core
-     - optional RGB-source variants
-     - optional support-generation variants
-     - optional depth-generation variants
+   - still the biggest online mixed file
+   - next split should produce repo-side helpers for:
+     - exact default core
+     - Difix branch
+     - support variants (`reciprocal_seed`, `dense_match_v1`, `cm_local_expansion`)
+     - depth override branches
 
 2. `pseudo_branch/integration/runtime_signal_builder.py`
-   - Default exact-upstream target/signal builder.
-   - Also contains optional depth override branches, especially `twoimg_pair_proxy_cm_capped_v1`.
-   - Future split should isolate the depth-override family from the exact-upstream default path.
+   - still mixes default exact-upstream path with depth override families
+   - next split should isolate:
+     - exact-upstream default builder
+     - `twoimg_pair_proxy_cm_capped_v1` and any future depth-override family
 
-### 3.3 Mixed standalone files
+3. `pseudo_branch/observation/pseudo_observation_brpo_style.py`
+   - still contains both current exact-upstream semantics and historical standalone observation families
+   - next split should isolate exact-upstream online semantics from old standalone modes
 
-1. `scripts/run_pseudo_refinement_v2.py`
-   - Still a large historical standalone executor.
-   - Mixes StageA / StageA.5 / StageB.
-   - Mixes old/legacy observation modes with exact-upstream modes.
-   - Mixes old G~/SPGM/local-gating experiments with main refine logic.
-   - Future split should not move this wholesale into the GitHub simple version; it should be decomposed or retained only as historical control.
+### 5.2 Package facades that still need slimming
 
-2. `scripts/build_brpo_v2_signal_from_internal_cache.py`
-   - Offline builder, but algorithmically overlaps with online runtime signal building.
-   - Future split should extract shared signal/target assembly kernels rather than keeping separate near-duplicate routes forever.
+1. `pseudo_branch/refine/__init__.py`
+   - currently still re-exports standalone-oriented scheduler/loss surface together with online runtime surface
+   - next step: trim it to online-only exports required by `slam_backend_brpo.py`
 
-3. `scripts/brpo_build_mask_from_internal_cache.py`
-   - Offline exact backend / mask build path.
-   - Algorithmically overlaps with runtime exact backend.
-   - Future split should extract shared verifier/support core.
+2. `pseudo_branch/common/__init__.py`
+   - currently still bundles online matcher surface together with non-online geometry/cache helpers
+   - next step: trim it to only the matcher/pair-forward symbols used by the online route
 
-## 4. Refactor goal: desired conceptual repository structure
+3. `pseudo_branch/integration/__init__.py`
+   - currently still points runtime exact/signal/debug exports at old locations
+   - next step: keep the facade stable, but move underlying implementation deeper into `online_mapping/`
 
-This is the target logical structure, not an immediate file-move instruction.
+## 6. Planned `pseudo_branch/` shrink order
 
-```text
-part3_brpo/
-  online_mapping/
-    bridge/
-    runtime/
-    config/
-  standalone_pipeline/
-    prepare/
-    signal/
-    refine/
-    replay/
-  core_shared/
-    matching/
-    verification/
-    fusion/
-    target/
-    loss/
-    pose/
-    io/
-  legacy_or_experiments/
-    standalone_history/
-    diagnostics/
-    launchers/
-    ablations/
-```
+Do this in order, not by broad deletion:
+1. keep facade imports stable for `third_party` callers
+2. continue extracting mixed online implementations into `online_mapping/` and `core_shared/`
+3. slim `pseudo_branch/common/__init__.py` and `pseudo_branch/refine/__init__.py` to online-only exports
+4. once package import chains no longer reach old modules, move the non-online modules out of `pseudo_branch/`
+5. only then archive/remove the old pseudo_branch content
 
-### 4.1 `online_mapping/`
+This order matters because many currently non-online files are still dragged in indirectly through package `__init__` files.
 
-Purpose:
-- Keep only the live S3PO-online route.
-- Expose the runtime pseudo supervision chain clearly.
+## 7. Planned `slam` bridge cleanup strategy
 
-Expected contents:
-- S3PO bridge glue
-- runtime slot selection
-- runtime exact backend build
+The four S3PO bridge files should not be the place where BRPO implementation keeps growing.
+They should converge to thin shells with stable contracts.
+
+### 7.1 `slam.py`
+- keep as launch/runtime entry shell
+- avoid adding BRPO implementation detail here
+
+### 7.2 `slam_frontend.py`
+- keep as frontend state / keyframe-event shell
+- only light cleanup unless a clear online-mapping responsibility leak is found
+
+### 7.3 `slam_backend.py`
+Target it as a thin orchestration shell around these blocks:
+- config resolve
+- runtime camera-state cache
+- gap closure / slot selection
+- runtime exact backend prepare
 - runtime signal build
-- runtime pseudo record build
-- online mapping config resolver and route toggles
+- runtime pseudo record pack
+- topology dispatch
+- optional masked pseudo color refinement
 
-### 4.2 `standalone_pipeline/`
+The file can remain in place, but its internals should become clearer and thinner by delegating repo-side work to `online_mapping/` and `core_shared/`.
 
-Purpose:
-- Preserve the standalone/reference route as a separate route family.
-- Keep it explicit that this is not the primary live path.
+### 7.4 `slam_backend_brpo.py`
+Target it as a thin optimization shell around these blocks:
+- runtime pseudo record normalization
+- optimizer-group assembly
+- loss-call boundary
+- pose-update helpers
+- topology dispatch
+- stats/export
 
-Expected contents:
-- offline prepare / difix dataset build
-- offline exact backend / signal build
-- standalone refine executor or decomposed refine stages
-- replay evaluation
+Keep external names stable:
+- `BRPOMappingConfig`
+- `run_brpo_pseudo_mapping(...)`
 
-### 4.3 `core_shared/`
+## 8. What should move out of `pseudo_branch/` once facades are slim enough
 
-Purpose:
-- Hold algorithm kernels shared between online and standalone.
-- This is the most important future extraction boundary.
+Priority move-out candidates:
+- `pseudo_branch/gaussian_management/**`
+- `pseudo_branch/brpo_v2_signal/**`
+- `pseudo_branch/common/build_pseudo_cache.py`
+- `pseudo_branch/common/align_depth_scale.py`
+- `pseudo_branch/common/epipolar_depth.py`
+- `pseudo_branch/common/diag_writer.py`
+- `pseudo_branch/observation/joint_observation.py`
+- `pseudo_branch/observation/pseudo_observation_verifier.py`
+- `legacy_or_archive/pseudo_branch_legacy/mask/brpo_confidence_mask.py` — archived from pseudo_branch
+- `legacy_or_archive/pseudo_branch_legacy/mask/brpo_train_mask.py` — archived from pseudo_branch
+- `legacy_or_archive/pseudo_branch_legacy/mask/confidence_builder.py` — archived from pseudo_branch
+- `pseudo_branch/mask/joint_confidence.py`
+- `legacy_or_archive/pseudo_branch_legacy/target/brpo_depth_target.py` — archived from pseudo_branch
+- `legacy_or_archive/pseudo_branch_legacy/target/brpo_depth_densify.py` — archived from pseudo_branch
+- `pseudo_branch/target/depth_target_builder.py`
+- `pseudo_branch/target/support_expand.py`
+- standalone-oriented pieces of `pseudo_branch/refine/` not needed by the online route
 
-Expected contents:
-- pair matching / reciprocal matching / dense3d matching
-- reprojection verification
-- pseudo fusion
-- exact-upstream target builder
-- pseudo loss contracts
-- pose-delta application and Gauss-Newton utilities
-- pseudo record bundle definitions and loaders
+## 9. Immediate next-step plan
 
-### 4.4 `legacy_or_experiments/`
+Next implementation wave should be:
+1. extract `runtime_exact_backend.py`
+2. extract `runtime_signal_builder.py`
+3. split online-only semantics out of `pseudo_observation_brpo_style.py`
+4. slim `pseudo_branch/refine/__init__.py` to only what `slam_backend_brpo.py` uses
+5. slim `pseudo_branch/common/__init__.py` to only what `slam_backend.py` and live runtime code use
+6. then move non-online pseudo_branch content into `standalone_*` or `legacy_or_archive/`
+7. after repo-side payload stabilizes, do a light shell-cleanup pass over the four bridge `slam*` files
 
-Purpose:
-- Move non-mainline experiment scaffolding out of the live surface.
-- Prevent the future GitHub simple version from being dominated by historical artifacts.
+## 10. Immediate takeaway
 
-Expected contents:
-- old runner scripts
-- one-off launchers
-- diagnostics and verification scripts
-- archival ablation code
-- backup files if they must remain in-repo temporarily
+The current state should be read as:
+1. `third_party/S3PO-GS/*` = stable online bridge shell
+2. `online_mapping/` + `core_shared/` = new extracted payload roots already landed
+3. `pseudo_branch/` = temporary compatibility + partially extracted online payload; target is online-only
+4. `standalone_*` + `legacy_or_archive/` = place where non-online content should continue to move
 
-## 5. First extraction priority: the online mainline skeleton
+So the next refactor objective is no longer just “extract online pieces somewhere”; it is specifically:
+- finish extracting online authority out of mixed pseudo_branch files
+- slim pseudo_branch down to online-only content
+- leave the four `slam*` files as stable, clearer shells over that payload
 
-Before any big cleanup, the first thing to extract conceptually is the smallest continuous online-mapping chain:
+Update note (2026-05-12, phase 1.5): exact-upstream observation semantics moved behind core_shared.targets; runtime_exact_backend/runtime_signal_builder authority moved behind online_mapping.runtime wrappers; standalone legacy observation consumers redirected to standalone_mask_signal.
 
-1. frontend runtime state cache export
-2. gap closure + pseudo slot selection
-3. coarse pseudo render
-4. optional Difix + left/right restoration
-5. overlap-guided residual fusion
-6. MASt3R matching + reciprocal correspondence
-7. exact branch verification
-8. strict discrete `C_m`
-9. exact-upstream depth target build
-10. runtime pseudo record build
-11. backend joint pseudo mapping loop
-12. optional masked pseudo color refinement
-
-This skeleton should become the primary route map for future simplification.
-
-## 6. Later split strategy by boundary, not by current filename
-
-### 6.1 Split 1: shared algorithm cores from both online and standalone
-
-Extract and stabilize reusable kernels first:
-- matching
-- verification
-- fusion
-- exact target builder
-- loss contract
-- pose math
-- pseudo record data model
-
-Reason:
-- this gives a real common substrate and reduces duplicate logic
-- lower risk than moving top-level entrypoints first
-
-### 6.2 Split 2: online runtime glue from S3PO backend control flow
-
-After shared cores are explicit:
-- thin the runtime builder pieces in `slam_backend.py`
-- make backend event order easier to read
-- keep one obvious online execution spine
-
-Reason:
-- current live mainline truth is hidden inside large mixed backend files
-- future GitHub users must be able to see online route without reading the whole historical backend
-
-### 6.3 Split 3: standalone route into clean reference pipeline
-
-Only after online mainline is stabilized:
-- isolate prepare
-- isolate signal build
-- isolate refine
-- isolate replay
-- retain only the minimal reference/control implementation needed
-
-Reason:
-- standalone is now mainly reference/control
-- it should be simplified after the online route is made legible
-
-### 6.4 Split 4: archive experiment scaffolding
-
-Last step:
-- move diagnostics, test harnesses, runner shells, and stale variants
-- do not mix this with core route extraction
-
-Reason:
-- archive work is low-value but noisy
-- doing it too early creates churn without clarifying the main system
-
-## 7. Files that should define future GitHub simple version
-
-The future simple GitHub should not attempt to include every historical experiment.
-It should primarily expose:
-
-1. the live online mainline route
-2. the exact-upstream pseudo supervision components
-3. one explicit standalone reference/control route
-4. minimal replay/evaluation support
-5. a concise pipeline doc and code map
-
-It should not center around:
-- old compare launchers
-- every D/E-series wrapper
-- every temporary verification script
-- every historical docs artifact
-
-## 8. Recommended phased execution order when refactor actually starts
-
-### Phase 0 — freeze and document
-Output:
-- final online mainline `PIPELINE.md`
-- this refactor plan
-- explicit route inventory
-
-### Phase 1 — inventory and tag
-Tasks:
-- label files as `online`, `standalone`, `shared`, `legacy`, or `mixed`
-- do not move files yet
-
-### Phase 2 — extract shared kernels
-Tasks:
-- create stable shared modules for verifier/fusion/target/loss/pose/data model
-- switch both online and standalone callers to the shared kernels
-
-### Phase 3 — expose online skeleton cleanly
-Tasks:
-- reduce online runtime path to a readable chain
-- separate route control from algorithm payload where possible
-- keep S3PO patch boundary explicit
-
-### Phase 4 — simplify standalone reference route
-Tasks:
-- split prepare/signal/refine/replay boundaries
-- keep only minimal reference entrypoints
-
-### Phase 5 — archive or drop non-mainline artifacts
-Tasks:
-- move launchers, diagnostics, ad-hoc tests, and stale backups out of live surface
-
-## 9. Explicit non-goals for the current step
-
-This document does not authorize immediate:
-- file moves
-- import rewrites
-- path renaming
-- launcher cleanup
-- deletion of historical modules
-- GitHub packaging
-
-Those come later, after the online pipeline doc is finalized and accepted.
-
-## 10. Practical notes for the next session
-
-When refactor work begins later, the first two concrete questions should be:
-1. Which exact online-mapping chain do we want to preserve as the canonical minimal route?
-2. Which mixed files must be split first because they currently hide both online and historical logic in the same executor?
-
-Current best answer:
-- preserve the online runtime chain rooted in `slam_frontend.py -> slam_backend.py -> slam_backend_brpo.py`
-- first split shared algorithm kernels from the mixed executors, not vice versa
-
-## 11. Immediate takeaway
-
-Do not start from “cleaning `scripts/`” or “cleaning `pseudo_branch/`”.
-Start from “extract the online-mapping skeleton, then separate shared kernels, then shrink the historical surface.”
-
-That order matches the real current project state and will produce a much cleaner final repository than a directory-only cleanup.
+Archived safe subset completed on 2026-05-10:
+- moved `brpo_confidence_mask.py`, `brpo_train_mask.py`, `confidence_builder.py` out of `pseudo_branch/mask/`
+- moved `brpo_depth_target.py`, `brpo_depth_densify.py` out of `pseudo_branch/target/`
+- remaining move-out candidates (`joint_confidence.py`, `depth_target_builder.py`, `support_expand.py`, legacy observation helpers) still require bridge-aware follow-up

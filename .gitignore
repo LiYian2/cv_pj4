@@ -30,17 +30,37 @@ wandb/
 # =========================
 # Large data and experiment outputs
 # =========================
-dataset
 dataset/
 output/
 output_reference/
-plots/part1/previous
+plots/
+results/
+tmp/
+
+# Part3 specific outputs
 part3_BRPO/test_refine_output/
+part3_BRPO/experiments/
+part3_BRPO/debug_output/
 
 # =========================
 # External / cloned repositories
 # =========================
 third_party/
+
+# =========================
+# Archives / legacy code
+# =========================
+part3_BRPO/legacy_or_archive/
+part3_BRPO/notebooks/
+part3_BRPO/standalone/
+part3_BRPO/standalone_mask_signal/
+part3_BRPO/standalone_prepare/
+part3_BRPO/standalone_replay/
+part3_BRPO/docs/archived/
+part2/scripts/
+part2/configs/
+part1/reports/
+part1/scripts/
 
 # =========================
 # Archives / large bundled files
@@ -55,3 +75,43 @@ third_party/
 # =========================
 AGENT.md
 temporary_local_notes/
+.hermes/
+*.local.md
+hermes.md
+
+# =========================
+# Backup directories
+# =========================
+*.backup/
+*_backup/
+hermes_backups/
+backups/
+
+# =========================
+# IDE / editor configs
+# =========================
+.idea/
+.vscode/
+*.sublime-*
+
+# =========================
+# Model checkpoints / caches
+# =========================
+.cache/
+*.pth
+*.ckpt
+*.pt
+
+# =========================
+# Temporary files
+# =========================
+*.tmp
+*.temp
+*.bak
+*.swp
+*~
+
+# =========================
+# PDF / documentation
+# =========================
+*.pdf

@@ -1,13 +1,17 @@
 # target
 
-Depth-target builders, densification helpers, reprojection helpers, supervision assembly, and target-side support expansion.
+Live target-side modules still needed by the current Part3 tree.
 
-Current live target-side entries are all under this directory:
+Current online-mapping target entry kept in `pseudo_branch/target/`:
+- `depth_supervision_v2.py` — exact-upstream target construction consumed by the live online route
+
+Temporarily retained bridge / utility helpers:
+- `depth_target_builder.py` — shared depth load / reprojection utilities, still re-exported from `pseudo_branch`
+- `support_expand.py` — legacy/bridge support-expansion helper, not part of the live online-mapping runtime route
+
+Archived out of the live target package on 2026-05-10:
 - `brpo_depth_target.py`
 - `brpo_depth_densify.py`
-- `depth_target_builder.py`
-- `depth_supervision_v2.py`
-- `support_expand.py`
 
-Callers should import from `pseudo_branch.target.*`.
-The old flat target-side paths `pseudo_branch/brpo_depth_target.py`, `pseudo_branch/brpo_depth_densify.py`, and `pseudo_branch/depth_target_builder.py` are retired.
+Archived files now live under:
+- `legacy_or_archive/pseudo_branch_legacy/target/`
