@@ -32,6 +32,7 @@ wandb/
 # =========================
 dataset/
 output/
+output
 output_reference/
 plots/
 results/
@@ -51,6 +52,7 @@ third_party/
 # Archives / legacy code
 # =========================
 part3_BRPO/legacy_or_archive/
+part3_BRPO/configs/
 part3_BRPO/notebooks/
 part3_BRPO/standalone/
 part3_BRPO/standalone_mask_signal/
@@ -59,8 +61,14 @@ part3_BRPO/standalone_replay/
 part3_BRPO/docs/archived/
 part2/scripts/
 part2/configs/
+part2_s3po/scripts/
+part2_s3po/configs/
+part2_s3po/checks/
 part1/reports/
 part1/scripts/
+part1/docs/data_notes
+part3_BRPO/docs/archived/
+part3_BRPO/docs/agent/
 
 # =========================
 # Archives / large bundled files
