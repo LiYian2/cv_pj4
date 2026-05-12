@@ -1,88 +1,238 @@
-# cv_pj4
+# Part3: BRPO-based Generative Pseudo-View Enhancement for Sparse-View 3DGS SLAM
 
-## 整体框架
-<img width="1440" height="1016" alt="image" src="https://github.com/user-attachments/assets/4ba56808-a207-4968-9201-422a6fbbfa49" />
+This project follows **BRPO (Bidirectional Reciprocal Pseudo-view Optimization)** pipeline on top of S3PO-GS for enhancing sparse-view 3D Gaussian Splatting SLAM with generative pseudo-views.
 
-## 整体背景
-给定一些照片，能不能重建出完整的3D场景？三个Part的难度依次递增：从"图片很多、条件理想"，到"图片极少、还不知道相机在哪"，再到"用AI生成缺失的视角来补全"。
+## Overview
 
----
+Sparse-view 3D reconstruction suffers from insufficient supervision in unobserved regions. This project addresses this challenge by:
 
-## Part 1 High-Fidelity Reconstruction (Initialization Analysis)
-### 背景
-3DGS 是目前最主流的3D重建方法之一。它把整个场景表示成数百万个"3D高斯椭球"，每个椭球有位置、颜色、透明度等属性。训练完之后，支持从任意新视角实时渲染，速度极快。
+1. **Pseudo-view Generation**: Generating intermediate views between keyframes using DIFIX diffusion restoration
+2. **Joint-Primary Topology**: Placing pseudo-views at midpoint positions with bidirectional correspondence verification
+3. **Confidence Masking**: Weighting pseudo-view supervision by correspondence reliability
 
-但3DGS在训练之前，需要两样东西作为初始化:
-+ 每张照片的相机位姿（相机在哪、朝哪个方向拍的）
-+ 场景的稀疏点云（场景大致长什么样）
+### Architecture
 
-两种方法(均需实现):
-+ Plan A（传统）：用COLMAP。这是一个经典的SfM（Structure from Motion）工具，通过匹配不同图片中的相同特征点，来反推相机位置和场景点云。可靠，但需要图片足够多、有大量重叠区域。
-+ Plan B（前沿）：用3D基础模型（VGGT / DUSt3R / Pi3）。这些是最新的大模型，可以直接从几张图片"看出"相机位姿和点云，无需手工匹配特征。
+```
+part3_BRPO/
+├── pseudo_branch/           # Pseudo-view generation and refinement
+│   ├── integration/         # Runtime integration with S3PO backend
+│   ├── refine/              # Loss functions, pose optimization
+│   ├── mask/                # Confidence mask generation
+│   └── common/              # MASt3R matcher utilities
+├── online_mapping/          # Online mapping runtime implementation
+│   ├── runtime/             # Exact backend, slot selector, DIFIX loader
+│   └── records/             # Runtime record builders
+├── core_shared/             # Shared kernels (losses, pose, records)
+└── slam_replace/            # Modified S3PO-GS files for replacement
+    ├── slam.py              # Main entry point
+    └── utils/               # Modified utility 
+```
 
-### 做什么
-1. 下载提供的数据集（视频帧，密集视角）
-2. 分别用 Plan A 和 Plan B 生成初始化文件
-3. 把两者都输入到3DGS进行训练 **(可选Scaffold-GS/Wavelet-GS)**
-4. 比较：收敛速度哪个快？最终渲染质量哪个好？
+## Dependencies
 
-## 额外的东西
-甚至可以专门跑一组"GT pose + 3DGS"的实验，作为 **Plan C(理论上限)** 写进报告里。这样你就有了三条对比线：COLMAP初始化、基础模型初始化、GT pose初始化，分析三者的差距很有说服力。
+- Python 3.11
+- PyTorch 2.1.0+cu118
+- CUDA 11.8
+- NVIDIA GPU with ≥20GB VRAM (tested on RTX A6000)
 
-### 期望结果
-输出几张"新视角渲染图"，并填一张对比表（PSNR / SSIM / LPIPS on **Test Set** 这三个指标衡量图像质量，越高越好/越低越好）。核心分析是：**初始化质量如何影响3DGS的最终效果？**
+## Installation
 
----
+### Step 1: Clone S3PO-GS
 
-## Part 2 Unposed Sparse Reconstruction
-### 背景
-Part 1是"豪华模式"——图片很多，条件好。Part 2开始挑战现实：只给你极少数图片（每10-30帧只取1帧），而且不告诉你相机在哪。这非常接近真实场景（比如随手拍几张照片然后想建3D模型）。
+```bash
+git clone https://github.com/3DAgentWorld/S3PO-GS.git --recursive
+cd S3PO-GS
+```
 
-两种方法(二选一):
-**Option A：无位姿稀疏重建（推荐用RegGS或InstantSplat）**
-+ 先用基础模型（如DUSt3R）预测每张图的几何关系
-+ 把所有局部点云"拼接"成一个全局坐标系（这步叫Registration，有点像拼图）
-+ 再做3DGS优化
-+ 难点:处理coordinate transformations和scale alignment
+### Step 2: Setup Environment
+
+```bash
+conda env create -f environment.yml
+conda activate s3po-gs
+```
+
+Or use the provided environment from this project:
+
+```bash
+conda env create -f part3_BRPO/environment.yml
+conda activate s3po-gs
+```
+
+### Step 3: Compile Submodules
+
+```bash
+pip install submodules/simple-knn
+pip install submodules/diff-gaussian-rasterization
+```
+
+### Step 4: Compile RoPE CUDA Kernels
+
+```bash
+cd croco/models/curope/
+python setup.py build_ext --inplace
+cd ../../../
+```
+
+### Step 5: Clone This Project
+
+```bash
+git clone <this-repo-url> part3_BRPO
+```
+
+### Step 6: Replace S3PO-GS Files
+
+Copy the modified files from `slam_replace/` to S3PO-GS:
+
+```bash
+# Root level
+cp part3_BRPO/slam_replace/slam.py S3PO-GS/
+
+# utils directory
+cp part3_BRPO/slam_replace/utils/*.py S3PO-GS/utils/
+
+# gaussian_splatting/loss directory
+cp part3_BRPO/slam_replace/gaussian_splatting/utils/*.py S3PO-GS/gaussian_splatting/utils/
+```
 
 
-**Option B：单目3DGS-SLAM（推荐用S3PO-GS或Artdeco）**
-+ 把图片当成连续视频，像SLAM（同步定位与建图）系统一样边走边建图
-+ 有一个"追踪线程"（估计相机位置）和"建图线程"（更新场景表示）同时运行
-+ 难点：在稀疏或长序列中防止"尺度漂移"（建出来的场景慢慢变形）
+**Files replaced:**
+- `slam.py` - Main entry point
+- `utils/slam_backend.py` - Backend mapping with BRPO integration
+- `utils/slam_backend_brpo.py` - BRPO pseudo-view mapping logic
+- `utils/slam_frontend.py` - Frontend tracking modifications
+- `utils/slam_utils.py` - Utility modifications
+- `utils/camera_utils.py` - Camera utility modifications
+- `utils/pose_utils.py` - Pose utility modifications
+- `utils/internal_eval_utils.py` - Evaluation modifications
+- `gaussian_splatting/utils/loss_utils.py` - Loss function modifications
 
-### 做什么 (不能拿GT Pose训练)
-1. 从part 1的结果中subsample出极其稀疏的帧数,稀疏比例如下
-   + Waymo-405841 (Outdoor) – P2 Sparsity: 1/10 frames (follow BRPO)
-   + Dl3dv-2 (Outdoor) – P2 Sparsity: 1/30 frames (follow BRPO)
-   + Re10k-1 (Indoor) – P2 Sparsity: 1/30 frames
-2. 选一个Option，在稀疏数据上运行，得到一个完全不依赖COLMAP的3DGS模型。
+These modified files import modules from `part3_BRPO` via PYTHONPATH.
 
-### 期望结果
+## Weights
 
-1. 渲染质量指标（PSNR/SSIM/LPIPS）
-2. 位姿误差（ATE，衡量估计的相机位置和真实位置差多少）
-3. 效果会比Part 1差，这是正常的，重点是分析原因
+### MASt3R (Dense Matcher)
 
-## Part 3 Generative Enhancement (Research)
-### 背景
-稀疏视角重建的核心问题是：有些角度根本没有图片，3DGS不知道那里长什么样，就会出现"洞"或者模糊。Part 3的思路是：用扩散模型（AI图像生成）来"编造"缺失视角的图片，然后把这些伪造图片加入训练，帮助3DGS补全场景。
+Download the MASt3R checkpoint for correspondence verification:
 
-### 技术路线(二选一)
-+ 参考ReconX：用视频扩散模型在稀疏帧之间插值生成中间帧
-+ 参考BRPO（Difix3D）：把3DGS已经渲染出来的有"洞"的图片，用扩散模型修复/补全，再当成训练数据
-+ 高级选项
-  + 设计置信度掩码（因为AI生成的图片不完全准确，不能完全相信它）
-  + 用光流或重投影误差自动降低不可靠区域的训练权重
- 
-### 做什么
-1. 选一种方法生成伪视角图片
-2. 把这些图片加入Part 2的训练集，重新训练3DGS
-3. 对比"只用稀疏真实图片" vs "稀疏图片+生成图片" 的渲染结果
+```bash
+mkdir -p checkpoints/
+wget https://download.europe.naverlabs.com/ComputerVision/MASt3R/MASt3R_ViTLarge_BaseDecoder_512_catmlpdpt_metric.pth -P checkpoints/
+```
 
-### 期望结果
-一组对比图和对比数值，直观展示生成式增强让重建变好了多少。即使你没做完，也要在报告里写失败原因和失败案例（完全不写会"不及格"）。
+### DIFIX (Diffusion Restoration)
 
-## 关于GT Pose
-GT pose 永远可以用来"评估"结果好坏, 但不一定能作为输入.
+DIFIX model is loaded from HuggingFace. Set cache directory:
 
+```bash
+export HF_HOME=/path/to/.cache/huggingface
+export HUGGINGFACE_HUB_CACHE=/path/to/.cache/huggingface/hub
+export HF_ENDPOINT=https://hf-mirror.com  # For China mirror
+```
+
+The model `nvidia/difix_ref` will be automatically downloaded on first use.
+
+## Dataset Preparation
+
+We support DL3DV, Waymo, and Re10k datasets in S3PO-GS format.
+
+## Usage
+
+### Basic Run
+
+```bash
+export PYTHONPATH=/path/to/S3PO-GS:/path/to/part3_BRPO:
+export CUDA_VISIBLE_DEVICES=0
+cd S3PO-GS
+
+python slam.py --config /path/to/config.yaml
+```
+
+### Example: DL3DV-2 with BRPO Enhancement
+
+```bash
+ulimit -n 65536  # Increase file descriptor limit
+export PYTHONPATH=/home/user/S3PO-GS:/home/user/part3_BRPO:
+export CUDA_VISIBLE_DEVICES=0
+export HF_HOME=/data/.cache/huggingface
+export HUGGINGFACE_HUB_CACHE=/data/.cache/huggingface/hub
+export HF_ENDPOINT=https://hf-mirror.com
+
+cd /home/user/S3PO-GS
+python slam.py --config part3_BRPO/configs/e5c_dl3dv.yaml
+```
+
+### Key Configuration Parameters
+
+```yaml
+Results:
+  brpo_online_mapping:
+    enabled: true                    # Enable pseudo-view enhancement
+    trigger: keyframe                # Trigger on each keyframe
+    topology_mode: joint_primary     # Midpoint pseudo placement
+    placement_mode: midpoint_only
+    
+    use_difix_restoration: true      # Use DIFIX for RGB refinement
+    difix_fusion_mode: overlap_confidence_weighted  # Fusion strategy
+    
+    matcher_mode: dense_pts3d_3d     # MASt3R dense matching
+    dense3d_conf_quantile: 0.15      # Confidence threshold
+    
+    lambda_depth: 0.025              # Depth loss weight 
+    lambda_pseudo: 1.0               # Pseudo-view loss weight
+    num_iterations: 20               # Per-keyframe optimization steps
+```
+
+
+## Results
+
+### Quantitative Evaluation
+
+| Dataset | Setting | PSNR ↑ | SSIM ↑ | LPIPS ↓ | ATE RMSE ↓ |
+|---------|---------|--------|--------|---------|------------|
+| Re10k-1 | S3PO-GS | 23.95 | 0.873 | 0.079 | 0.007 |
+| Re10k-1 | Ours | 24.75 | 0.886 | 0.074 | 0.015 |
+| Waymo-405841 | S3PO-GS | 24.02 | 0.766 | 0.280 | 2.789 |
+| Waymo-405841 | Ours | 24.87 | 0.785 | 0.237 | 1.783 |
+| DL3DV-2 | S3PO-GS | 17.48 | 0.615 | 0.354 | 0.463 |
+| DL3DV-2 | Ours | 21.93 | 0.721 | 0.228 | 0.041 |
+
+### Visual Results
+
+**Triptych Comparison** (Ground Truth vs. S3PO-GS vs. Ours):
+
+<p float="left">
+  <img src="assets/plots/triptych_0084.png" width="32%" />
+  <img src="assets/plots/triptych_0094.png" width="32%" />
+  <img src="assets/plots/triptych_0100.png" width="32%" />
+</p>
+
+<p float="left">
+  <img src="assets/plots/triptych_0128.png" width="32%" />
+  <img src="assets/plots/triptych_0132.png" width="32%" />
+  <img src="assets/plots/triptych_0236.png" width="32%" />
+</p>
+
+**Mask Strategy Visualization**:
+
+<img src="assets/plots/mask_strategy_radius1_densify_gaussian.png" width="60%" />
+
+**Video Comparison** (DL3DV-2 scene):
+
+<p align="center">
+  <img src="assets/video/S3PO-GS_DL3DV-2.webp" width="45%" />
+  <img src="assets/video/Ours_DL3DV-2.webp" width="45%" />
+</p>
+
+<p align="center"><em>Left: S3PO-GS Baseline | Right: Ours (BRPO Enhancement)</em></p>
+
+## Acknowledgement
+
+This work is built on:
+- [S3PO-GS](https://github.com/3DAgentWorld/S3PO-GS) - Outdoor monocular SLAM
+- [MASt3R](https://github.com/naver/mast3r) - Dense correspondence matching
+- [3DGS](https://github.com/graphdeco-inria/gaussian-splatting) - Gaussian splatting rendering
+- [MonoGS](https://github.com/muskie82/MonoGS) - SLAM visualization
+
+## License
+
+MIT License
