@@ -59,6 +59,8 @@ part3_BRPO/standalone_mask_signal/
 part3_BRPO/standalone_prepare/
 part3_BRPO/standalone_replay/
 part3_BRPO/docs/archived/
+part3_BRPO/configs/
+part3_BRPO/scripts/
 part2/scripts/
 part2/configs/
 part2_s3po/scripts/
@@ -123,3 +125,20 @@ backups/
 # PDF / documentation
 # =========================
 *.pdf
+
+# =========================
+
+# =========================
+# Part3 pseudo_branch compatibility facades not needed for live online_mapping GitHub subset
+# NOTE: these are currently tracked; remove from index together with this ignore block update.
+# =========================
+part3_BRPO/pseudo_branch/brpo_v2_signal/
+part3_BRPO/pseudo_branch/gaussian_management/__init__.py
+part3_BRPO/pseudo_branch/mask/brpo_confidence_mask.py
+part3_BRPO/pseudo_branch/mask/brpo_train_mask.py
+part3_BRPO/pseudo_branch/mask/confidence_builder.py
+part3_BRPO/pseudo_branch/refine/pseudo_refine_scheduler.py
+part3_BRPO/pseudo_branch/target/brpo_depth_densify.py
+part3_BRPO/pseudo_branch/target/brpo_depth_target.py
+part3_BRPO/pseudo_branch/target/depth_target_builder.py
+part3_BRPO/pseudo_branch/target/support_expand.py
