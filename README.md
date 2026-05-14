@@ -187,7 +187,7 @@ Results:
     matcher_mode: dense_pts3d_3d     # MASt3R dense matching
     dense3d_conf_quantile: 0.15      # Confidence threshold
     
-    lambda_depth: 0.025              # Depth loss weight (critical!)
+    lambda_depth: 0.025              # Depth loss weight
     lambda_pseudo: 1.0               # Pseudo-view loss weight
     num_iterations: 20               # Per-keyframe optimization steps
 ```
