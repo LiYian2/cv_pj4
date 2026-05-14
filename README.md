@@ -105,15 +105,6 @@ mkdir -p S3PO-GS/gaussian_splatting/loss/
 cp part3_BRPO/slam_replace/gaussian_splatting/loss/*.py S3PO-GS/gaussian_splatting/loss/
 ```
 
-Or copy everything at once:
-
-```bash
-cp part3_BRPO/slam_replace/slam.py S3PO-GS/
-cp -r part3_BRPO/slam_replace/utils/* S3PO-GS/utils/
-mkdir -p S3PO-GS/gaussian_splatting/loss/
-cp -r part3_BRPO/slam_replace/gaussian_splatting/loss/* S3PO-GS/gaussian_splatting/loss/
-```
-
 **Files replaced:**
 - `slam.py` - Main entry point
 - `utils/slam_backend.py` - Backend mapping with BRPO integration
@@ -153,18 +144,6 @@ The model `nvidia/difix_ref` will be automatically downloaded on first use.
 ## Dataset Preparation
 
 We support DL3DV, Waymo, and Re10k datasets in S3PO-GS format.
-
-### DL3DV
-
-Download processed data from [S3PO-GS repository](https://drive.google.com/drive/folders/11K6lnSkFFiiCuJ9KG7II2bt0O7nevl7K).
-
-### Waymo
-
-Download from [Google Drive](https://drive.google.com/drive/folders/1xUyNuNzUtsvZIV_q5Qz9zIXMGoMbLuCr).
-
-### Re10k
-
-Organize in the same format as DL3DV.
 
 ## Usage
 
