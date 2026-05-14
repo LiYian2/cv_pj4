@@ -1,6 +1,6 @@
 # Part3: BRPO-based Generative Pseudo-View Enhancement for Sparse-View 3DGS SLAM
 
-This project implements **BRPO (Bidirectional Reciprocal Pseudo-view Optimization)** on top of S3PO-GS for enhancing sparse-view 3D Gaussian Splatting SLAM with generative pseudo-views.
+This project follows **BRPO (Bidirectional Reciprocal Pseudo-view Optimization)** on top of S3PO-GS for enhancing sparse-view 3D Gaussian Splatting SLAM with generative pseudo-views.
 
 ## Overview
 
@@ -239,25 +239,6 @@ Results:
 
 <p align="center"><em>Left: S3PO-GS Baseline | Right: Ours (BRPO Enhancement)</em></p>
 
-## Citation
-
-If you find this work useful, please cite:
-
-```bibtex
-@article{cheng2025outdoor,
-  title={Outdoor Monocular SLAM with Global Scale-Consistent 3D Gaussian Pointmaps},
-  author={Cheng, Chong and Yu, Sicheng and Wang, Zijian and Zhou, Yifan and Wang, Hao},
-  journal={ICCV},
-  year={2025}
-}
-
-@article{brpo2025,
-  title={Bidirectional Reciprocal Pseudo-view Optimization for Sparse-View 3D Gaussian Splatting},
-  author={...},
-  journal={...},
-  year={2025}
-}
-```
 
 ## Acknowledgement
 
