@@ -254,6 +254,9 @@ class BRPOBackEndContinuation:
                 fallback=0.7,
                 cast=float,
             )
+        # Apply use_depth flag regardless of match_real_loss_weights
+        if not bool(cfg.use_depth):
+            resolved_lambda_depth = 0.0
         resolved = {
             "beta_rgb": float(resolved_beta_rgb),
             "lambda_depth": float(resolved_lambda_depth),

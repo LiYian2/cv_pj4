@@ -172,6 +172,7 @@ class BackEnd(mp.Process):
             "update_real_exposure": bool(result_cfg.get("update_real_exposure", default_update_real_exposure)),
             "gaussian_maintenance_source": str(result_cfg.get("gaussian_maintenance_source", default_maintenance_source)),
             "joint_primary_run_legacy_prune": bool(result_cfg.get("joint_primary_run_legacy_prune", True)),
+            "joint_primary_real_densify_fallback": bool(result_cfg.get("joint_primary_real_densify_fallback", False)),
             "lambda_real": float(result_cfg.get("lambda_real", 1.0)),
             "lambda_pseudo": float(result_cfg.get("lambda_pseudo", 1.0)),
             "lambda_depth": resolved_lambda_depth,
@@ -208,6 +209,8 @@ class BackEnd(mp.Process):
             "gn_damping": float(result_cfg.get("gn_damping", 0.01)),
             "gn_every_n_steps": int(result_cfg.get("gn_every_n_steps", 1)),
 
+            "enable_densify": bool(result_cfg.get("enable_densify", True)),
+            "enable_opacity_reset": bool(result_cfg.get("enable_opacity_reset", True)),
             # Difix restoration parameters
             "use_difix_restoration": bool(result_cfg.get("use_difix_restoration", False)),
             "difix_model_name": str(result_cfg.get("difix_model_name", "nvidia/difix_ref")),
@@ -545,9 +548,9 @@ class BackEnd(mp.Process):
             extra_real_views=int(cfg.get("extra_real_views", 0)),
             propagate_pseudo_delta_to_neighbors=bool(cfg.get("propagate_pseudo_delta_to_neighbors", True)),
             gaussian_maintenance_source=str(cfg.get("gaussian_maintenance_source", "all_views")),
-            enable_densify=bool(joint_primary_mode),
-            enable_prune=False,
-            enable_opacity_reset=bool(joint_primary_mode),
+            enable_densify=bool(cfg.get("enable_densify", joint_primary_mode)),
+            enable_prune=bool(cfg.get("enable_prune", False)),
+            enable_opacity_reset=bool(cfg.get("enable_opacity_reset", joint_primary_mode)),
             isotropic_weight=float(cfg.get("isotropic_weight", 10.0)),
             output_dir=str(mapping_out),
             seed=int(cfg.get("seed", 0)),
@@ -685,6 +688,25 @@ class BackEnd(mp.Process):
         self.occ_aware_visibility[cur_frame_idx] = (n_touched > 0).long()   
         Log("Initialized map")
         return render_pkg
+
+    def _run_joint_primary_real_gaussian_fallback(self, iter_per_kf):
+        """Real-only Gaussian maintenance fallback for joint_primary mode.
+
+        When joint_primary succeeds but enable_densify=false, this method
+        runs an extra real-only Gaussian optimization pass with densify
+        and opacity_reset enabled (controlled by map()'s default behavior).
+
+        Key features:
+        - Temporarily sets keyframe_optimizers=None to skip pose updates
+        - Runs map() with up_pose=False (both conditions block pose changes)
+        - Allows densify/opacity_reset to run via map()'s iteration logic
+        """
+        prev_optimizer = self.keyframe_optimizers
+        try:
+            self.keyframe_optimizers = None
+            self.map(self.current_window, iters=iter_per_kf, up_pose=False)
+        finally:
+            self.keyframe_optimizers = prev_optimizer
 
     def _run_legacy_real_keyframe_mapping(self, iter_per_kf, frames_to_optimize):
         opt_params = []
@@ -1443,6 +1465,21 @@ class BackEnd(mp.Process):
                             )
                             self._run_legacy_real_keyframe_mapping(iter_per_kf, frames_to_optimize)
                         else:
+                            # Joint-primary success branch: check for real densify fallback
+                            enable_densify = bool(self.brpo_online_mapping_cfg.get("enable_densify", True))
+                            fallback_enabled = bool(self.brpo_online_mapping_cfg.get("joint_primary_real_densify_fallback", False))
+
+                            if fallback_enabled and not enable_densify:
+                                self._run_joint_primary_real_gaussian_fallback(iter_per_kf)
+                                self._update_brpo_event_summary(
+                                    cur_frame_idx,
+                                    {
+                                        "joint_primary_status": "completed",
+                                        "joint_primary_real_densify_fallback_applied": True,
+                                        "joint_primary_real_densify_fallback_iter_per_kf": int(iter_per_kf),
+                                    },
+                                )
+
                             run_legacy_prune = bool(self.brpo_online_mapping_cfg.get("joint_primary_run_legacy_prune", True))
                             full_window = len(self.current_window) == self.config["Training"]["window_size"]
                             if run_legacy_prune and full_window:

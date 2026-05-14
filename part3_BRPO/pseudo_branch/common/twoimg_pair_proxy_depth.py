@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
 import numpy as np
+import cv2
 
 from .mast3r_pair_forward import MASt3RPairForward, MASt3RPairBundle
 
@@ -40,7 +41,7 @@ class TwoImgPairProxyDepthResult:
     scale_by_range: Dict[Tuple[float, float], float]  # Per-range scale factors
     fallback_scale: float  # Global fallback scale for uncovered pixels
     metadata: Dict[str, float]  # Coverage ratios
-    
+
     def save(self, output_dir: Path) -> None:
         """Save all outputs to directory."""
         import json
@@ -53,12 +54,12 @@ class TwoImgPairProxyDepthResult:
         np.save(output_dir / "depth_calibrated.npy", self.depth_calibrated.astype(np.float32))
         np.save(output_dir / "depth_effective.npy", self.depth_effective.astype(np.float32))
         np.save(output_dir / "cm_mask.npy", self.cm_mask.astype(np.float32))
-        
+
         # Convert scales to native Python floats for JSON
         scale_dict = {f"{r[0]}-{r[1]}": float(s) for r, s in self.scale_by_range.items()}
         with open(output_dir / "scale_by_range.json", "w") as f:
             json.dump({"scales": scale_dict, "fallback": float(self.fallback_scale)}, f, indent=2)
-        
+
         # Convert metadata to native Python floats
         meta_native = {k: float(v) for k, v in self.metadata.items()}
         with open(output_dir / "metadata.json", "w") as f:
@@ -71,11 +72,25 @@ def run_2img_forward(
     size: int = 512,
 ) -> MASt3RPairBundle:
     """Run MASt3R(pseudo, pseudo) to get 2IMG depth.
-    
+
     Returns pts3d with z-component as depth in pseudo's own coordinate frame.
     This depth has 100% coverage but unknown scale (MASt3R's internal metric).
     """
     return forwarder.run_pair(img1_path=pseudo_rgb_path, img2_path=pseudo_rgb_path, size=size)
+
+
+def resize_depth_to_target(depth: np.ndarray, target_h: int, target_w: int) -> np.ndarray:
+    """Resize depth map to target dimensions using bilinear interpolation.
+
+    Args:
+        depth: Depth map (H, W)
+        target_h: Target height
+        target_w: Target width
+
+    Returns:
+        Resized depth map (target_h, target_w)
+    """
+    return cv2.resize(depth, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
 
 
 def compute_pair_proxy_adaptive_scale(
@@ -86,14 +101,14 @@ def compute_pair_proxy_adaptive_scale(
     min_depth_valid: float = MIN_DEPTH_VALID,
 ) -> Tuple[Dict[Tuple[float, float], float], float, np.ndarray]:
     """Compute adaptive scale per depth range using PAIR projected depth as anchor.
-    
+
     Args:
         depth_2img: Raw 2IMG depth (H, W), unknown scale
         depth_pair_anchor: PAIR projected depth (H, W), metric scale (only valid in matching regions)
         depth_ranges: List of (min, max) depth ranges for scale calibration
         min_samples: Minimum pixels per range to compute scale
         min_depth_valid: Minimum depth value considered valid
-        
+
     Returns:
         scales_by_range: Dict mapping depth range -> scale factor
         fallback_scale: Global scale for pixels not covered by any range-specific scale
@@ -101,32 +116,35 @@ def compute_pair_proxy_adaptive_scale(
     """
     h, w = depth_2img.shape
     scales_by_range: Dict[Tuple[float, float], float] = {}
-    
+
     # Compute global fallback scale from all valid anchor pixels
     valid_anchor = depth_pair_anchor > min_depth_valid
     valid_2img = depth_2img > min_depth_valid
     valid_global = valid_anchor & valid_2img
-    
+
     if valid_global.sum() > min_samples:
         fallback_scale = float(np.median(depth_pair_anchor[valid_global]) / np.median(depth_2img[valid_global]))
     else:
         # No valid anchor, estimate scale from overall depth ratio
         fallback_scale = 1.0
-    
+
     # Compute scale per range (only for valid anchor pixels in that range)
     for range_tuple in depth_ranges:
         r_min, r_max = range_tuple
         # Mask: pixels where PAIR projected depth is valid AND falls in this range
-        mask = (depth_pair_anchor > min_depth_valid) &                (depth_pair_anchor >= r_min) &                (depth_pair_anchor < r_max) &                (depth_2img > min_depth_valid)
-        
+        mask = (depth_pair_anchor > min_depth_valid) & \
+               (depth_pair_anchor >= r_min) & \
+               (depth_pair_anchor < r_max) & \
+               (depth_2img > min_depth_valid)
+
         if mask.sum() >= min_samples:
             # Scale = median(PAIR depth) / median(2IMG depth) in this range
             scale = float(np.median(depth_pair_anchor[mask]) / np.median(depth_2img[mask]))
             scales_by_range[range_tuple] = scale
-    
+
     # Apply adaptive scale to create calibrated depth
     calibrated_depth = np.zeros_like(depth_2img)
-    
+
     # First, apply range-specific scales where valid PAIR anchor exists
     anchor_valid = depth_pair_anchor > min_depth_valid
     for range_tuple in depth_ranges:
@@ -135,11 +153,11 @@ def compute_pair_proxy_adaptive_scale(
             scale = scales_by_range[range_tuple]
             mask = anchor_valid & (depth_pair_anchor >= r_min) & (depth_pair_anchor < r_max)
             calibrated_depth[mask] = depth_2img[mask] * scale
-    
+
     # For pixels without valid PAIR anchor, use fallback scale (full image)
     uncovered = (calibrated_depth == 0) & (depth_2img > min_depth_valid)
     calibrated_depth[uncovered] = depth_2img[uncovered] * fallback_scale
-    
+
     return scales_by_range, fallback_scale, calibrated_depth
 
 
@@ -168,25 +186,25 @@ def compute_coverage_metadata(
     min_depth_valid: float = MIN_DEPTH_VALID,
 ) -> Dict[str, float]:
     """Compute the three coverage ratios required by design.
-    
+
     Returns:
         cm_nonzero_ratio: Fraction of image pixels with C_m > 0
         projected_depth_union_ratio: Fraction of C_m pixels with PAIR projected depth
         twoimg_depth_effective_ratio_after_cm_cap: Fraction of C_m pixels with effective depth
     """
     total_pixels = cm_mask.size
-    
+
     cm_nonzero = cm_mask > 0.5
     cm_nonzero_ratio = float(cm_nonzero.sum() / total_pixels)
-    
+
     # PAIR projected depth coverage within C_m
     pair_valid_in_cm = (depth_pair_anchor > min_depth_valid) & cm_nonzero
     projected_depth_union_ratio = float(pair_valid_in_cm.sum() / max(cm_nonzero.sum(), 1))
-    
+
     # 2IMG effective depth coverage within C_m
     effective_in_cm = (depth_effective > min_depth_valid) & cm_nonzero
     twoimg_depth_effective_ratio_after_cm_cap = float(effective_in_cm.sum() / max(cm_nonzero.sum(), 1))
-    
+
     return {
         "cm_nonzero_ratio": cm_nonzero_ratio,
         "projected_depth_union_ratio": projected_depth_union_ratio,
@@ -204,7 +222,7 @@ def build_twoimg_pair_proxy_depth(
     output_dir: Optional[Path] = None,
 ) -> TwoImgPairProxyDepthResult:
     """Main entry point: Generate 2IMG + PAIR-proxy calibrated depth.
-    
+
     Args:
         forwarder: Shared MASt3R forwarder
         pseudo_rgb_path: Path to pseudo RGB image
@@ -213,27 +231,33 @@ def build_twoimg_pair_proxy_depth(
         depth_ranges: Depth ranges for adaptive scale
         size: Image size for MASt3R
         output_dir: Optional directory to save outputs
-        
+
     Returns:
         TwoImgPairProxyDepthResult with all intermediate and final depths
     """
-    # Step 1: Get 2IMG depth
+    # Step 1: Get 2IMG depth at MASt3R resolution
     bundle_2img = run_2img_forward(forwarder, pseudo_rgb_path, size)
-    depth_2img = bundle_2img.pts3d_1[..., 2].astype(np.float32)
-    
-    # Step 2: Apply PAIR-proxy adaptive scale
+    depth_2img_mast3r = bundle_2img.pts3d_1[..., 2].astype(np.float32)
+
+    # Step 2: Resize depth_2img to match depth_pair_anchor's dimensions
+    # This is crucial because MASt3R outputs at fixed size (e.g., 512x512),
+    # but depth_pair_anchor and cm_mask are at original image dimensions
+    target_h, target_w = depth_pair_anchor.shape
+    depth_2img = resize_depth_to_target(depth_2img_mast3r, target_h, target_w)
+
+    # Step 3: Apply PAIR-proxy adaptive scale
     scales_by_range, fallback_scale, depth_calibrated = compute_pair_proxy_adaptive_scale(
         depth_2img=depth_2img,
         depth_pair_anchor=depth_pair_anchor,
         depth_ranges=depth_ranges,
     )
-    
-    # Step 3: Apply C_m cap
+
+    # Step 4: Apply C_m cap
     depth_effective = apply_cm_cap(depth_calibrated, cm_mask)
-    
-    # Step 4: Compute metadata
+
+    # Step 5: Compute metadata
     metadata = compute_coverage_metadata(cm_mask, depth_pair_anchor, depth_effective)
-    
+
     result = TwoImgPairProxyDepthResult(
         depth_2img_raw=depth_2img,
         depth_pair_anchor=depth_pair_anchor,
@@ -245,8 +269,8 @@ def build_twoimg_pair_proxy_depth(
         fallback_scale=fallback_scale,
         metadata=metadata,
     )
-    
+
     if output_dir is not None:
         result.save(output_dir)
-    
+
     return result

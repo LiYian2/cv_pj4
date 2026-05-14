@@ -1,6 +1,6 @@
 # Part3: BRPO-based Generative Pseudo-View Enhancement for Sparse-View 3DGS SLAM
 
-This project follows **BRPO (Bidirectional Reciprocal Pseudo-view Optimization)** pipeline on top of S3PO-GS for enhancing sparse-view 3D Gaussian Splatting SLAM with generative pseudo-views.
+This project implements **BRPO (Bidirectional Reciprocal Pseudo-view Optimization)** on top of S3PO-GS for enhancing sparse-view 3D Gaussian Splatting SLAM with generative pseudo-views.
 
 ## Overview
 
@@ -25,7 +25,17 @@ part3_BRPO/
 ├── core_shared/             # Shared kernels (losses, pose, records)
 └── slam_replace/            # Modified S3PO-GS files for replacement
     ├── slam.py              # Main entry point
-    └── utils/               # Modified utility 
+    ├── utils/               # Modified utility files
+    │   ├── slam_backend.py
+    │   ├── slam_backend_brpo.py
+    │   ├── slam_frontend.py
+    │   ├── slam_utils.py
+    │   ├── camera_utils.py
+    │   ├── pose_utils.py
+    │   └── internal_eval_utils.py
+    └── gaussian_splatting/
+        └── loss/
+            └── loss_utils.py
 ```
 
 ## Dependencies
@@ -91,9 +101,18 @@ cp part3_BRPO/slam_replace/slam.py S3PO-GS/
 cp part3_BRPO/slam_replace/utils/*.py S3PO-GS/utils/
 
 # gaussian_splatting/loss directory
-cp part3_BRPO/slam_replace/gaussian_splatting/utils/*.py S3PO-GS/gaussian_splatting/utils/
+mkdir -p S3PO-GS/gaussian_splatting/loss/
+cp part3_BRPO/slam_replace/gaussian_splatting/loss/*.py S3PO-GS/gaussian_splatting/loss/
 ```
 
+Or copy everything at once:
+
+```bash
+cp part3_BRPO/slam_replace/slam.py S3PO-GS/
+cp -r part3_BRPO/slam_replace/utils/* S3PO-GS/utils/
+mkdir -p S3PO-GS/gaussian_splatting/loss/
+cp -r part3_BRPO/slam_replace/gaussian_splatting/loss/* S3PO-GS/gaussian_splatting/loss/
+```
 
 **Files replaced:**
 - `slam.py` - Main entry point
@@ -104,7 +123,7 @@ cp part3_BRPO/slam_replace/gaussian_splatting/utils/*.py S3PO-GS/gaussian_splatt
 - `utils/camera_utils.py` - Camera utility modifications
 - `utils/pose_utils.py` - Pose utility modifications
 - `utils/internal_eval_utils.py` - Evaluation modifications
-- `gaussian_splatting/utils/loss_utils.py` - Loss function modifications
+- `gaussian_splatting/loss/loss_utils.py` - Loss function modifications
 
 These modified files import modules from `part3_BRPO` via PYTHONPATH.
 
@@ -134,6 +153,18 @@ The model `nvidia/difix_ref` will be automatically downloaded on first use.
 ## Dataset Preparation
 
 We support DL3DV, Waymo, and Re10k datasets in S3PO-GS format.
+
+### DL3DV
+
+Download processed data from [S3PO-GS repository](https://drive.google.com/drive/folders/11K6lnSkFFiiCuJ9KG7II2bt0O7nevl7K).
+
+### Waymo
+
+Download from [Google Drive](https://drive.google.com/drive/folders/1xUyNuNzUtsvZIV_q5Qz9zIXMGoMbLuCr).
+
+### Re10k
+
+Organize in the same format as DL3DV.
 
 ## Usage
 
@@ -177,11 +208,12 @@ Results:
     matcher_mode: dense_pts3d_3d     # MASt3R dense matching
     dense3d_conf_quantile: 0.15      # Confidence threshold
     
-    lambda_depth: 0.025              # Depth loss weight 
+    lambda_depth: 0.025              # Depth loss weight (critical!)
     lambda_pseudo: 1.0               # Pseudo-view loss weight
     num_iterations: 20               # Per-keyframe optimization steps
 ```
 
+**Important**: Ensure `lambda_depth > 0` for proper depth supervision. Setting `lambda_depth: 0.0` will disable depth loss and significantly degrade results.
 
 ## Results
 
@@ -201,15 +233,18 @@ Results:
 **Triptych Comparison** (Ground Truth vs. S3PO-GS vs. Ours):
 
 <p float="left">
-  <img src="assets/plots/triptych_0084.png" width="32%" />
-  <img src="assets/plots/triptych_0094.png" width="32%" />
-  <img src="assets/plots/triptych_0100.png" width="32%" />
+  <img src="assets/plots/triptych_0084.png" width="48%" />
+  <img src="assets/plots/triptych_0094.png" width="48%" />
 </p>
 
 <p float="left">
-  <img src="assets/plots/triptych_0128.png" width="32%" />
-  <img src="assets/plots/triptych_0132.png" width="32%" />
-  <img src="assets/plots/triptych_0236.png" width="32%" />
+  <img src="assets/plots/triptych_0100.png" width="48%" />
+  <img src="assets/plots/triptych_0128.png" width="48%" />
+</p>
+
+<p float="left">
+  <img src="assets/plots/triptych_0132.png" width="48%" />
+  <img src="assets/plots/triptych_0236.png" width="48%" />
 </p>
 
 **Mask Strategy Visualization**:
@@ -224,6 +259,26 @@ Results:
 </p>
 
 <p align="center"><em>Left: S3PO-GS Baseline | Right: Ours (BRPO Enhancement)</em></p>
+
+## Citation
+
+If you find this work useful, please cite:
+
+```bibtex
+@article{cheng2025outdoor,
+  title={Outdoor Monocular SLAM with Global Scale-Consistent 3D Gaussian Pointmaps},
+  author={Cheng, Chong and Yu, Sicheng and Wang, Zijian and Zhou, Yifan and Wang, Hao},
+  journal={ICCV},
+  year={2025}
+}
+
+@article{brpo2025,
+  title={Bidirectional Reciprocal Pseudo-view Optimization for Sparse-View 3D Gaussian Splatting},
+  author={...},
+  journal={...},
+  year={2025}
+}
+```
 
 ## Acknowledgement
 

@@ -34,8 +34,10 @@ dataset/
 output/
 output
 output_reference/
-plots/
+!assets/
 results/
+plots/
+!assets/plots/
 tmp/
 
 # Part3 specific outputs
